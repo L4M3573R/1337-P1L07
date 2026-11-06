@@ -6,7 +6,11 @@ AOL_MARKER = 0x0400
 AOL_EXPERIENCE = 32
 _EXCLUDED = int(HyundaiFlags.LEGACY | HyundaiFlags.UNSUPPORTED_LONGITUDINAL | HyundaiFlags.ALT_LIMITS_2 | HyundaiFlags.CAMERA_SCC | HyundaiFlags.FCEV)
 CLASSIC_LONG_IDS = frozenset(identity for identity in CLASSIC_SCC_IDS if not int(identity.config.flags) & _EXCLUDED)
-LONG_AOL_WORDS = frozenset(AOL_MARKER | 4 | gas | limits | lda for gas in (0, 1, 2) for limits in (0, 64) for lda in (0, 2048))
+# Camera-SCC LONG owners admitted by exact safety word. Kept out of CLASSIC_LONG_IDS so they
+# never enter the radar-disable startup; native lateral follows the panda's tracked main toggle.
+CAMERA_LONG_IDS = frozenset((CAR.HYUNDAI_ELANTRA_HEV_2024,))
+CAMERA_LONG_AOL_WORDS = frozenset((0x840E, 0x8C0E))
+LONG_AOL_WORDS = frozenset(AOL_MARKER | 4 | gas | limits | lda for gas in (0, 1, 2) for limits in (0, 64) for lda in (0, 2048)) | CAMERA_LONG_AOL_WORDS
 
 
 def ordinary_word(cp):
@@ -27,7 +31,7 @@ def qualified(cp, *, marked_only=False):
   from opendbc.car.hyundai.legacy_long_aol import CARS, qualified as legacy_qualified
   if cp.carFingerprint in CARS:
     return legacy_qualified(cp, marked_only=marked_only)
-  if cp.brand != 'hyundai' or cp.carFingerprint not in CLASSIC_LONG_IDS:
+  if cp.brand != 'hyundai' or cp.carFingerprint not in CLASSIC_LONG_IDS | CAMERA_LONG_IDS:
     return False
   declared = int(CAR[cp.carFingerprint].config.flags)
   allowed = declared | int(HyundaiFlags.HAS_LDA_BUTTON | HyundaiFlags.USE_FCA | HyundaiFlags.SEND_LFA)
@@ -56,6 +60,8 @@ def qualified(cp, *, marked_only=False):
     or cp.alternativeExperience not in (0, AOL_EXPERIENCE)
     or len(cp.safetyConfigs) != 1
   ):
+    return False
+  if cp.carFingerprint in CAMERA_LONG_IDS and aol_word(cp) not in CAMERA_LONG_AOL_WORDS:
     return False
   safety = cp.safetyConfigs[0]
   accepted = (aol_word(cp),) if marked_only else (ordinary_word(cp), aol_word(cp))

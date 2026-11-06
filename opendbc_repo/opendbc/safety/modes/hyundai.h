@@ -640,10 +640,11 @@ static safety_config hyundai_init(uint16_t param) {
 
   hyundai_common_init(param);
   hyundai_daw_init(false, false);
-  if ((param == 0x800EU) && (alternative_experience == 0)) {
+  classic_non_scc_aol_configure(param, false);
+  // Elantra Hybrid 2024 LONG tracks the main toggle, with or without its exact AOL profile.
+  if (((param == 0x800EU) && (alternative_experience == 0)) || classic_long_aol_main_track) {
     hyundai_long_main_policy = HYUNDAI_MAIN_TRACK;
   }
-  classic_non_scc_aol_configure(param, false);
   blended_aol_configure(param);
   hyundai_blended_alpha = false;
 #ifdef ALLOW_DEBUG

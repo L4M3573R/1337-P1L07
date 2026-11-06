@@ -7,14 +7,19 @@ from opendbc.car.hyundai.values import CAR, HyundaiFlags, Buttons
 def qualified(cp):
   if ev9_qualified(cp) or pe_qualified(cp):
     return True
+  from opendbc.car.hyundai.classic_long_aol import AOL_EXPERIENCE, aol_word, qualified as classic_long_qualified
   dynamic = int(HyundaiFlags.HAS_LDA_BUTTON | HyundaiFlags.USE_FCA | HyundaiFlags.SEND_LFA)
   declared = int(CAR.HYUNDAI_ELANTRA_HEV_2024.config.flags)
-  return bool(cp.brand == 'hyundai' and cp.carFingerprint == CAR.HYUNDAI_ELANTRA_HEV_2024 and
-    int(cp.flags) & ~dynamic == declared & ~dynamic and not cp.passive and not cp.notCar and not cp.dashcamOnly and
-    cp.openpilotLongitudinalControl and not cp.pcmCruise and cp.alphaLongitudinalAvailable and
-    cp.steerControlType == structs.CarParams.SteerControlType.torque and cp.alternativeExperience == 0 and
-    len(cp.safetyConfigs) == 1 and cp.safetyConfigs[0].safetyModel == structs.CarParams.SafetyModel.hyundai and
-    cp.safetyConfigs[0].safetyParam == 0x800E)
+  if not (cp.brand == 'hyundai' and cp.carFingerprint == CAR.HYUNDAI_ELANTRA_HEV_2024 and
+          int(cp.flags) & ~dynamic == declared & ~dynamic and not cp.passive and not cp.notCar and not cp.dashcamOnly and
+          cp.openpilotLongitudinalControl and not cp.pcmCruise and cp.alphaLongitudinalAvailable and
+          cp.steerControlType == structs.CarParams.SteerControlType.torque and
+          len(cp.safetyConfigs) == 1 and cp.safetyConfigs[0].safetyModel == structs.CarParams.SafetyModel.hyundai):
+    return False
+  # The exact AOL-marked profile keeps the same tracked main toggle as ordinary LONG.
+  marked = (cp.alternativeExperience == AOL_EXPERIENCE and classic_long_qualified(cp, marked_only=True) and
+            cp.safetyConfigs[0].safetyParam == aol_word(cp))
+  return bool((cp.alternativeExperience == 0 and cp.safetyConfigs[0].safetyParam == 0x800E) or marked)
 
 
 class LongCruiseButtons:

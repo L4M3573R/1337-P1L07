@@ -12,10 +12,16 @@
 #define HYUNDAI_NON_SCC_EV_ALT_AOL_MAIN 0x1441U
 #define HYUNDAI_NON_SCC_EV_ALT_AOL_LDA 0x1C41U
 #define HYUNDAI_CLASSIC_SOURCE_MAX_AGE_US 300000U
+// Elantra Hybrid 2024: CAN refresh messages | LONG | camera SCC | hybrid gas,
+// plus the AOL marker and optionally the LDA button. Exact words only.
+#define HYUNDAI_ELANTRA_HEV_2024_LONG_AOL 0x840EU
+#define HYUNDAI_ELANTRA_HEV_2024_LONG_AOL_LDA 0x8C0EU
 
 static bool classic_scc_aol_enabled = false;
 static bool classic_scc_aol_camera = false;
 static bool classic_long_aol_enabled = false;
+// Camera-SCC LONG has no stock main state: lateral follows the tracked main toggle.
+static bool classic_long_aol_main_track = false;
 static bool classic_long_main_neutral = false;
 static bool classic_long_main_pressed = false;
 static bool classic_scc_main_source_seen = false;
@@ -30,8 +36,17 @@ static bool legacy_long_aol_param(uint16_t param) {
   return (param == 0xE902U) || (param == 0xE903U) || (param == 0xE912U) || (param == 0xE913U);
 }
 
+static bool classic_long_camera_aol_param(uint16_t param) {
+  return (param == HYUNDAI_ELANTRA_HEV_2024_LONG_AOL) || (param == HYUNDAI_ELANTRA_HEV_2024_LONG_AOL_LDA);
+}
+
 static bool classic_long_aol_param(uint16_t param) {
-  return ((param & 0x0404U) == 0x0404U) && ((param & 0xF3B8U) == 0U) && ((param & 3U) != 3U);
+  return (((param & 0x0404U) == 0x0404U) && ((param & 0xF3B8U) == 0U) && ((param & 3U) != 3U)) ||
+         classic_long_camera_aol_param(param);
+}
+
+static bool classic_long_aol_main_on(void) {
+  return !classic_long_aol_main_track || hyundai_long_main_on;
 }
 
 static bool classic_scc_aol_param(uint16_t param) {
@@ -87,6 +102,7 @@ static void classic_non_scc_aol_reset(void) {
   classic_scc_aol_enabled = false;
   classic_scc_aol_camera = false;
   classic_long_aol_enabled = false;
+  classic_long_aol_main_track = false;
   classic_non_scc_aol_ev = false;
   classic_non_scc_aol_hev = false;
   classic_non_scc_aol_lda = false;
@@ -117,9 +133,14 @@ static uint8_t classic_non_scc_aol_request_mask(void) {
     classic_non_scc_aol_clear_authorization();
   } else if (heartbeat_engaged) {
     classic_non_scc_aol_session = true;
+    if (!classic_long_aol_main_on()) {
+      // Turning the tracked main off revokes lateral; turning it back on needs a fresh gesture.
+      classic_non_scc_aol_token = false;
+      classic_non_scc_aol_claimed = false;
+    }
     if (((classic_scc_aol_enabled && classic_non_scc_aol_lda) || classic_long_aol_enabled) && controls_allowed &&
         classic_non_scc_aol_main_seen && (!classic_long_aol_enabled || classic_non_scc_aol_main) &&
-        aol_rx_healthy() && ((aol_host_axis_mask & 1U) != 0U)) {
+        classic_long_aol_main_on() && aol_rx_healthy() && ((aol_host_axis_mask & 1U) != 0U)) {
       // Actual stock ACC activation can seed the host's LKAS-on-engage latch.
       classic_non_scc_aol_token = true;
       classic_non_scc_aol_token_ts = now;
@@ -144,8 +165,9 @@ static uint8_t classic_non_scc_aol_permission_mask(void) {
       (classic_non_scc_aol_token || controls_allowed) :
       (classic_non_scc_aol_main || classic_non_scc_aol_token || controls_allowed);
     result = (((request & 1U) != 0U) && classic_non_scc_aol_main_seen && physical_authorized &&
-              (!classic_long_aol_enabled || classic_non_scc_aol_main)) ? 1U : 0U;
-    if (classic_long_aol_enabled && classic_non_scc_aol_main && controls_allowed && ((request & 2U) != 0U)) {
+              (!classic_long_aol_enabled || classic_non_scc_aol_main) && classic_long_aol_main_on()) ? 1U : 0U;
+    if (classic_long_aol_enabled && classic_non_scc_aol_main && classic_long_aol_main_on() && controls_allowed &&
+        ((request & 2U) != 0U)) {
       result |= 2U;
     }
   }
@@ -253,6 +275,7 @@ static void classic_non_scc_aol_configure(uint16_t param, bool legacy) {
 #ifdef ALLOW_DEBUG
   classic_long_aol_enabled = !legacy && classic_long_aol_param(param) && ((unsigned int)alternative_experience == 32U);
 #endif
+  classic_long_aol_main_track = classic_long_aol_enabled && classic_long_camera_aol_param(param);
   classic_scc_aol_camera = classic_scc_aol_enabled && ((param & 8U) != 0U);
   classic_non_scc_aol_enabled = ((!legacy && ((param == HYUNDAI_FORTE_AOL_MAIN) || (param == HYUNDAI_FORTE_AOL_LDA) ||
                                (param == HYUNDAI_KONA_AOL_MAIN) || (param == HYUNDAI_KONA_AOL_LDA) ||

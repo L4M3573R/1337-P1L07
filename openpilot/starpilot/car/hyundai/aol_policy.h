@@ -25,7 +25,9 @@ inline bool hyundai_legacy_aol_param(uint16_t param) {
 inline constexpr AolSafetyProfile HYUNDAI_LEGACY_AOL_PROFILE{23U, hyundai_legacy_aol_param, true};
 
 inline bool hyundai_classic_long_aol_param(uint16_t param) {
-  return ((param & 0x0404U) == 0x0404U) && ((param & 0xF3B8U) == 0U) && ((param & 3U) != 3U);
+  // Mirrors opendbc classic_long_aol_param, including the exact Elantra Hybrid 2024 camera-SCC words.
+  return (((param & 0x0404U) == 0x0404U) && ((param & 0xF3B8U) == 0U) && ((param & 3U) != 3U)) ||
+         param == 0x840EU || param == 0x8C0EU;
 }
 
 inline bool hyundai_classic_aol_param(uint16_t param) {
