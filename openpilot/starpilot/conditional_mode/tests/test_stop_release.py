@@ -33,7 +33,8 @@ from types import SimpleNamespace
 from functools import lru_cache
 from openpilot.cereal import messaging
 from openpilot.selfdrive.controls.radard import get_RadarState_from_vision
-from openpilot.starpilot.conditional_mode.stop_release import StoppedLeadRelease
+from openpilot.starpilot.conditional_mode.stop_release import (StoppedLeadRelease, LEAD_EXTENT_MARGIN_M, LEAD_MAX_DISTANCE_M,
+                                                              MIN_MODEL_ACCEL)
 from openpilot.starpilot.longitudinal.tests import test_cem_green_release as green
 from openpilot.starpilot.tests.test_ford_recorded_departure import _motion_payloads, _samples
 
@@ -165,3 +166,69 @@ def test_niro_actual_cem_hold_releases_only_after_native_go(monkeypatch, vision)
     assert not case.owner.mode.projector.stop_detector.committed
   finally:
     case.doCleanups()
+
+
+def _release_results(mutate, *, vision=False):
+  cp = CarParams(openpilotLongitudinalControl=True, carFingerprint='HYUNDAI_ELANTRA_HEV_2024')
+  owner = StoppedLeadRelease()
+  detector = SimpleNamespace(committed=True, standstill_committed=True, standstill_reason='light', commit_distance_m=0.)
+  planner = SimpleNamespace(mpc=SimpleNamespace(solution_status=0), output_should_stop=False, output_a_target=.5,
+                            force_stop_plan=SimpleNamespace(forcing=False, should_stop=False))
+  results = []
+  for tick in range(13):
+    now = green.MONO + 1_000_000_000 + tick * 50_000_000
+    sm = scene(now, vision)
+    mutate(sm)
+    results.append(owner.sample(sm, cp, planner, detector, now_ns=now, drive_id=green.MONO-1_000_000_000))
+  return results
+
+
+def _scale_path(sm, extent):
+  model = sm['modelV2']
+  positions = list(model.position.x)
+  model.position.x = [x * extent / max(positions) for x in positions]
+
+
+@pytest.mark.parametrize('vision', [False, True])
+def test_departing_lead_releases_before_road_is_clear_for_the_full_extent(vision):
+  # Recorded Elantra Hybrid stops: behind a departing lead the model plans only 22-52 m,
+  # below the 54 m clear-road extent, yet it has already chosen to go.
+  results = _release_results(lambda sm: _scale_path(sm, 30.), vision=vision)
+  assert not any(results[:10]) and all(results[10:])
+
+
+@pytest.mark.parametrize('vision', [False, True])
+def test_model_path_must_reach_past_the_departing_lead(vision):
+  def short_of_lead(sm):
+    nearest = min(lead.dRel for lead in (sm['radarState'].leadOne, sm['radarState'].leadTwo) if lead.present)
+    _scale_path(sm, nearest + LEAD_EXTENT_MARGIN_M - .5)
+  assert not any(_release_results(short_of_lead, vision=vision))
+
+
+@pytest.mark.parametrize('accel,released', [(.2, True), (MIN_MODEL_ACCEL, True), (.1, False), (-.1, False)])
+def test_gentle_model_launch_is_enough(accel, released):
+  def set_accel(sm):
+    sm['modelV2'].action.desiredAcceleration = accel
+  results = _release_results(set_accel)
+  assert (not any(results[:10]) and all(results[10:])) if released else not any(results)
+
+
+@pytest.mark.parametrize('distance,released', [(25., True), (LEAD_MAX_DISTANCE_M, True), (LEAD_MAX_DISTANCE_M + .5, False)])
+def test_departing_lead_window_extends_beyond_eighteen_metres(distance, released):
+  def move_leads(sm):
+    for lead in (sm['radarState'].leadOne, sm['radarState'].leadTwo):
+      if lead.present:
+        lead.dRel = distance
+  results = _release_results(move_leads)
+  assert (not any(results[:10]) and all(results[10:])) if released else not any(results)
+
+
+@pytest.mark.parametrize('extra,released', [(.5, True), (-.5, False)])
+def test_far_departing_lead_still_needs_path_past_it(extra, released):
+  def far_lead(sm):
+    for lead in (sm['radarState'].leadOne, sm['radarState'].leadTwo):
+      if lead.present:
+        lead.dRel = LEAD_MAX_DISTANCE_M
+    _scale_path(sm, LEAD_MAX_DISTANCE_M + LEAD_EXTENT_MARGIN_M + extra)
+  results = _release_results(far_lead)
+  assert (not any(results[:10]) and all(results[10:])) if released else not any(results)

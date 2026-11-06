@@ -11,6 +11,13 @@ from openpilot.starpilot.conditional_mode.stop import FROZEN_RAW_STOP_DISTANCE_M
 SOURCES = ('carState', 'carControl', 'controlsState', 'selfdriveState', 'radarState', 'modelV2')
 MAX_AGE_NS = 150_000_000
 CLEAR_DWELL_NS = 500_000_000
+# A departing lead shortens the model's planned path, so a fixed clear-road extent
+# (FROZEN_RAW_STOP_DISTANCE_M) is only reached seconds after the lead has gone.
+# With a corroborated departing lead, the model path must instead reach past it.
+MIN_MODEL_ACCEL = .15
+LEAD_MIN_DISTANCE_M = 6.3
+LEAD_MAX_DISTANCE_M = 40.
+LEAD_EXTENT_MARGIN_M = STOP_MODEL_RELEASE_MARGIN_M
 
 
 def _supported(cp):
@@ -50,11 +57,23 @@ class StoppedLeadRelease:
           planner.mpc.solution_status != 0 or type(planner.output_should_stop) is not bool or
           not math.isfinite(planner.output_a_target) or
           planner.force_stop_plan.forcing or planner.force_stop_plan.should_stop or
-          model.action.shouldStop or not math.isfinite(model.action.desiredAcceleration) or model.action.desiredAcceleration < .3):
+          model.action.shouldStop or not math.isfinite(model.action.desiredAcceleration) or
+          model.action.desiredAcceleration < MIN_MODEL_ACCEL):
         self.reset()
         return False
+      leads = [(slot, lead) for slot, lead in enumerate((sm['radarState'].leadOne, sm['radarState'].leadTwo)) if lead.present]
+      if not leads or any(lead.radar and lead.radarTrackId < 0 or not all(math.isfinite(v) for v in
+          (lead.dRel, lead.vLead, lead.aLeadK, lead.yRel, lead.modelProb)) or
+          not LEAD_MIN_DISTANCE_M <= lead.dRel <= LEAD_MAX_DISTANCE_M or lead.vLead < .6 or lead.aLeadK < -.15 or
+          abs(lead.yRel) > 1. or lead.modelProb < .95 for _, lead in leads):
+        self.reset()
+        return False
+      # Every present lead is departing; the model must plan to travel past the nearest one,
+      # never further than the clear-road extent a lead-free release would need.
+      clear_road = max(FROZEN_RAW_STOP_DISTANCE_M, detector.commit_distance_m) + STOP_MODEL_RELEASE_MARGIN_M
+      required_extent = min(clear_road, min(lead.dRel for _, lead in leads) + LEAD_EXTENT_MARGIN_M)
       extent = _standstill_path_extent(model)
-      if extent is None or extent < max(FROZEN_RAW_STOP_DISTANCE_M, detector.commit_distance_m) + STOP_MODEL_RELEASE_MARGIN_M:
+      if extent is None or extent < required_extent:
         self.reset()
         return False
       velocities, times = tuple(model.velocity.x), tuple(ModelConstants.T_IDXS)
@@ -63,13 +82,6 @@ class StoppedLeadRelease:
         return False
       tail = [v for v, t in zip(velocities, times, strict=True) if t >= 2.]
       if not tail or min(tail) < .3 or tail[-1] < 5. or any(b < a for a, b in zip(tail, tail[1:], strict=False)):
-        self.reset()
-        return False
-      leads = [(slot, lead) for slot, lead in enumerate((sm['radarState'].leadOne, sm['radarState'].leadTwo)) if lead.present]
-      if not leads or any(lead.radar and lead.radarTrackId < 0 or not all(math.isfinite(v) for v in
-          (lead.dRel, lead.vLead, lead.aLeadK, lead.yRel, lead.modelProb)) or
-          not 6.3 <= lead.dRel <= 18. or lead.vLead < .6 or lead.aLeadK < -.15 or
-          abs(lead.yRel) > 1. or lead.modelProb < .95 for _, lead in leads):
         self.reset()
         return False
       for slot, lead in leads:
