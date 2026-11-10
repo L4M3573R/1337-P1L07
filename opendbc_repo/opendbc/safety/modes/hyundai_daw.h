@@ -14,7 +14,18 @@ static uint32_t hyundai_daw_tx_ts;
 static bool hyundai_daw_seen;
 static bool hyundai_daw_counter_seen;
 static bool hyundai_daw_sent;
-static uint8_t hyundai_daw_last_classic_tx[6];
+static uint8_t hyundai_daw_last_classic_tx[8];
+
+// Classic LKAS12 (0x53E) comes in two layouts. The 6-byte one reports advisories as status 1-3.
+// The 8-byte one reports an attention meter: status 5..1 counts down without steering input, then
+// 6 plus flag 0x10 raises "take a break". Its replacement holds the meter full (5) without the flag.
+#define HYUNDAI_DAW_METER_MASK 0x17U
+#define HYUNDAI_DAW_METER_FULL 5U
+
+static bool hyundai_daw_classic_advisory(unsigned int len, uint8_t byte5) {
+  const uint8_t status = byte5 & 7U;
+  return (len == 8U) ? ((status >= 1U) && (status <= 6U)) : ((status >= 1U) && (status <= 3U));
+}
 
 static void hyundai_daw_init(bool canfd, bool enabled) {
   hyundai_daw_addr = enabled ? (canfd ? 0x11AU : 0x53EU) : 0U;
@@ -34,7 +45,10 @@ static void hyundai_daw_rx(const CANPacket_t *msg) {
   if ((hyundai_daw_addr != 0U) && (msg->addr == hyundai_daw_addr) && (msg->bus == (canfd ? hyundai_daw_bus : 2U))) {
     const uint32_t now = microsecond_timer_get();
     const bool fresh = hyundai_daw_counter_seen && (safety_get_ts_elapsed(now, hyundai_daw_rx_ts) <= 100000U);
-    bool valid = GET_LEN(msg) == hyundai_daw_len;
+    bool valid = canfd ? (GET_LEN(msg) == hyundai_daw_len) : ((GET_LEN(msg) == 6U) || (GET_LEN(msg) == 8U));
+    if (valid && !canfd) {
+      hyundai_daw_len = GET_LEN(msg);  // the classic layout is fixed per car; follow the source
+    }
     if (valid && canfd) {
       valid = GET_BYTES_LE(msg, 0, 2) == (hyundai_common_canfd_compute_checksum(msg) ^ 0x041DU);
       if (fresh) {
@@ -59,8 +73,10 @@ static uint8_t hyundai_daw_expected(const uint8_t *data, unsigned int i) {
   uint8_t expected = data[i];
   if ((hyundai_daw_len == 16U) && (i == 7U) && (((expected >> 3U) & 7U) == 1U)) {
     expected &= (uint8_t)~0x38U;
-  } else if ((hyundai_daw_len == 6U) && (i == 5U) && ((expected & 7U) >= 1U) && ((expected & 7U) <= 3U)) {
+  } else if ((hyundai_daw_len == 6U) && (i == 5U) && hyundai_daw_classic_advisory(6U, expected)) {
     expected &= (uint8_t)~7U;
+  } else if ((hyundai_daw_len == 8U) && (i == 5U) && hyundai_daw_classic_advisory(8U, expected)) {
+    expected = (uint8_t)((expected & (uint8_t)~HYUNDAI_DAW_METER_MASK) | HYUNDAI_DAW_METER_FULL);
   } else {
     // Non-advisory payload bits are copied exactly from the current source.
   }
@@ -98,7 +114,7 @@ static bool hyundai_daw_tx(const CANPacket_t *msg) {
     hyundai_daw_sent = true;
     hyundai_daw_tx_ts = now;
     if (!canfd) {
-      (void)memcpy(hyundai_daw_last_classic_tx, msg->data, 6U);
+      (void)memcpy(hyundai_daw_last_classic_tx, msg->data, hyundai_daw_len);
     }
   }
   return valid;
@@ -106,16 +122,17 @@ static bool hyundai_daw_tx(const CANPacket_t *msg) {
 
 static bool hyundai_daw_fwd(const CANPacket_t *msg) {
   const uint32_t now = microsecond_timer_get();
-  bool blocked = (msg->bus == 2U) && (msg->addr == 0x53EU) && (GET_LEN(msg) == 6U) && (hyundai_daw_addr == 0x53EU) &&
-                 (hyundai_daw_len == 6U) && hyundai_daw_seen && hyundai_daw_sent &&
+  bool blocked = (msg->bus == 2U) && (msg->addr == 0x53EU) && (hyundai_daw_addr == 0x53EU) &&
+                 ((hyundai_daw_len == 6U) || (hyundai_daw_len == 8U)) && (GET_LEN(msg) == hyundai_daw_len) &&
+                 hyundai_daw_seen && hyundai_daw_sent &&
                  !relay_malfunction && !safety_rx_checks_invalid &&
                  (safety_get_ts_elapsed(now, hyundai_daw_rx_ts) <= 100000U) &&
                  (safety_get_ts_elapsed(now, hyundai_daw_tx_ts) <= 100000U);
   if (blocked) {
-    const uint8_t status = msg->data[5] & 7U;
-    blocked = (status >= 1U) && (status <= 3U);
-    for (unsigned int i = 0U; i < 6U; i++) {
-      const uint8_t mask = (i == 5U) ? 0xF8U : 0xFFU;
+    blocked = hyundai_daw_classic_advisory(hyundai_daw_len, msg->data[5]);
+    const uint8_t advisory_bits = (hyundai_daw_len == 8U) ? HYUNDAI_DAW_METER_MASK : 7U;
+    for (unsigned int i = 0U; i < hyundai_daw_len; i++) {
+      const uint8_t mask = (i == 5U) ? (uint8_t)~advisory_bits : 0xFFU;
       blocked &= (msg->data[i] & mask) == (hyundai_daw_last_classic_tx[i] & mask);
     }
   }
@@ -124,7 +141,7 @@ static bool hyundai_daw_fwd(const CANPacket_t *msg) {
 
 static safety_config hyundai_daw_configure(safety_config ret, bool canfd, bool enabled) {
   hyundai_daw_init(canfd, false);
-  if (enabled && (ret.tx_msgs_len > 0) && (ret.tx_msgs_len < 64)) {
+  if (enabled && (ret.tx_msgs_len > 0) && (ret.tx_msgs_len < 63)) {
     static CanMsg daw_tx_msgs[64];
     for (int i = 0; i < ret.tx_msgs_len; i++) {
       daw_tx_msgs[i] = ret.tx_msgs[i];
@@ -132,6 +149,11 @@ static safety_config hyundai_daw_configure(safety_config ret, bool canfd, bool e
     const CanMsg daw = {canfd ? 0x11AU : 0x53EU, canfd ? 1U : 0U, canfd ? 16U : 6U, .check_relay = false};
     daw_tx_msgs[ret.tx_msgs_len] = daw;
     ret.tx_msgs_len++;
+    if (!canfd) {
+      const CanMsg daw8 = {0x53EU, 0U, 8U, .check_relay = false};
+      daw_tx_msgs[ret.tx_msgs_len] = daw8;
+      ret.tx_msgs_len++;
+    }
     ret.tx_msgs = daw_tx_msgs;
     hyundai_daw_init(canfd, true);
   }

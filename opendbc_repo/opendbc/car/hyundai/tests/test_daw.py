@@ -137,3 +137,24 @@ def test_actual_ioniq6_controller_keeps_live_source_off_sendcan(alternate):
   assert actual == baseline
   assert all(frame[0] != 0x11A for frame in actual)
   assert cp.to_dict() == before
+
+
+# Elantra Hybrid 2024 LKAS12 is 8 bytes: an attention meter (status 5..1), then 6 + flag 0x10 = "take a break".
+ELANTRA_HEV_METER = bytes.fromhex('03001e1e08011e10')
+
+
+def meter(status, flag=False):
+  data = bytearray(ELANTRA_HEV_METER)
+  data[5] = (data[5] & ~0x17) | status | (0x10 if flag else 0)
+  return bytes(data)
+
+
+@pytest.mark.parametrize('status,flag', [(s, False) for s in range(8)] + [(6, True)])
+def test_eight_byte_meter_is_held_full_and_break_popup_cleared(status, flag):
+  owner = DawSource(params(False))
+  data = meter(status, flag)
+  owner.update([(BASE, [CanData(owner.address, data, owner.source_bus)])])
+  command, = owner.command(BASE)
+  expected = meter(5) if 1 <= status <= 6 else data
+  assert command == CanData(owner.address, expected, owner.target_bus)
+  assert owner.data == data  # the source is kept unmodified

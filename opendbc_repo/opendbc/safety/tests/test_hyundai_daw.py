@@ -208,3 +208,35 @@ def test_packet_forwarding_preserves_existing_other_profile_rules():
     for bus in range(3):
       for addr in (0x53E, 0x340, 0x4F1, 0x421, 0x110, 0x11A):
         assert safety.safety_fwd_packet_hook(packet(addr, data, bus)) == safety.safety_fwd_hook(bus, addr)
+
+
+@pytest.mark.parametrize('status,flag', [(s, False) for s in range(8)] + [(6, True)])
+def test_eight_byte_meter_replacement_is_exact_and_blocks_only_its_original(status, flag):
+  from opendbc.car.hyundai.tests.test_daw import meter
+  safety, _ = setup(False, 0)
+  owner = DawSource(params(False))
+  first = meter(5)
+  incoming = packet(0x53E, first, 2)
+  assert safety.safety_fwd_packet_hook(incoming) == 0
+  safety.safety_rx_hook(incoming)
+  owner.update([(BASE, [(0x53E, first, 2)])])
+  addr, output, bus = owner.command(BASE)[0]
+  assert safety.safety_tx_hook(packet(addr, output, bus))
+
+  safety.set_timer(1_010_000)
+  data = meter(status, flag)
+  incoming = packet(0x53E, data, 2)
+  safety.safety_rx_hook(incoming)
+  owner.update([(BASE + 10_000_000, [(0x53E, data, 2)])])
+  addr, output, bus = owner.command(BASE + 10_000_000)[0]
+  for bit in range(64):  # only the exact meter-full replacement is accepted
+    bad = bytearray(output)
+    bad[bit // 8] ^= 1 << (bit % 8)
+    assert not safety.safety_tx_hook(packet(addr, bad, bus)), bit
+  assert safety.safety_tx_hook(packet(addr, output, bus))
+  advisory = 1 <= status <= 6
+  assert output == (meter(5) if advisory else data)
+  # the camera's original is blocked only while its live replacement is being sent
+  assert safety.safety_fwd_packet_hook(incoming) == (-1 if advisory else 0)
+  safety.set_timer(1_200_001)
+  assert safety.safety_fwd_packet_hook(incoming) == 0
