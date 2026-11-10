@@ -25,6 +25,7 @@ from openpilot.selfdrive.ui.mici.widgets.dialog import BigConfirmationDialog, Bi
 class FeatureSession(Protocol):
   def feature_snapshot(self, page: str) -> FeatureSettingsState: ...
   def feature_request(self, request: FeatureSettingsRequest) -> bool: ...
+  # Optional: def feature_save_pending(self) -> bool, for sessions that save on a worker thread.
 
 
 class FeatureSettingsCompact:
@@ -89,10 +90,28 @@ class FeatureSettingsCompact:
           self._confirm(request, lane_change_question(request), refresh, page)
         elif self.session.feature_request(request):
           refresh()
+        elif self._save_pending():
+          # Some saves (AOL) finish on a worker thread and report False here, so show
+          # the pending state now and redraw again once the save settles.
+          refresh()
+          self._refresh_when_saved(refresh, page)
 
       button.set_click_callback(clicked)
       result.append(button)
     return result
+
+  def _save_pending(self) -> bool:
+    pending = getattr(self.session, "feature_save_pending", None)
+    return bool(pending is not None and pending())
+
+  def _refresh_when_saved(self, refresh: Callable[[], None], page: NavScroller) -> None:
+    def tick() -> None:
+      if not gui_app.widget_in_stack(page):
+        gui_app.remove_nav_stack_tick(tick)
+      elif not self._save_pending():
+        gui_app.remove_nav_stack_tick(tick)
+        refresh()
+    gui_app.add_nav_stack_tick(tick)
 
   def _confirm_reset(self, row: FeatureRow, refresh: Callable[[], None], page: NavScroller | None = None) -> None:
     request = FeatureSettingsRequest(row.key, row.source, "confirm", confirmation=True,

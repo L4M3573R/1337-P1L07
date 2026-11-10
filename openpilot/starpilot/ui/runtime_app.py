@@ -742,6 +742,11 @@ class StarShellSession:
     else:
       self._unavailable("AOL preference was not saved; refresh settings")
 
+  def feature_save_pending(self) -> bool:
+    """True while a background preference save is still running; settles a finished one."""
+    self._poll_aol_save()
+    return getattr(self, "_aol_save", None) is not None
+
   def _save_aol(self, request: FeatureSettingsRequest) -> bool:
     self._poll_aol_save()
     if getattr(self, "_aol_save_closed", False) or getattr(self, "_aol_save", None) is not None:
