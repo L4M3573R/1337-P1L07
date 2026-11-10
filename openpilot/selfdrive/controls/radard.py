@@ -201,8 +201,13 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
 
 class RadarD:
   def __init__(self, delay: float = 0.0, *, adjacent_enabled: bool = False, radar_available: bool = False,
-               clock_pair_fn=None, honda_bosch_a_radar: bool = False, use_voacc: bool = False):
+               clock_pair_fn=None, honda_bosch_a_radar: bool = False, use_voacc: bool = False,
+               tandem_fusion: bool = False):
     self.use_voacc = use_voacc
+    self.tandem = None
+    if tandem_fusion and not use_voacc and not honda_bosch_a_radar:
+      from openpilot.starpilot.car.hyundai.radar_fusion import TandemLeadPolicy
+      self.tandem = TandemLeadPolicy()
     self.tracks: dict[int, Track] = {}
     self.honda_bosch_a = None
     if honda_bosch_a_radar:
@@ -355,7 +360,10 @@ class RadarD:
       elif self.honda_bosch_a is not None:
         self.radar_state.leadOne, self.radar_state.leadTwo = self.honda_bosch_a.leads(sm, self, model_v_ego)
       else:
-        self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.lead_prob_filters[0].x, low_speed_override=True)
+        lead_one = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.lead_prob_filters[0].x, low_speed_override=True)
+        if self.tandem is not None and self.ready:
+          lead_one = self.tandem.lead_one(lead_one, self.tracks, sm['modelV2'], self.lead_prob_filters[0].x)
+        self.radar_state.leadOne = lead_one
         self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego,
                                           self.lead_prob_filters[1].x, low_speed_override=False)
     if self.adjacent_enabled:
@@ -414,8 +422,10 @@ def main() -> None:
 
   from opendbc.car.honda.bosch_a_radar import VERIFIED_BOSCH_A_CARS
   honda_bosch_a = CP.brand == "honda" and CP.carFingerprint in VERIFIED_BOSCH_A_CARS and not CP.radarUnavailable
+  from openpilot.starpilot.car.hyundai.radar_fusion import supported as tandem_supported
   RD = RadarD(CP.radarDelay, adjacent_enabled=adjacent_enabled, radar_available=not CP.radarUnavailable,
-              honda_bosch_a_radar=honda_bosch_a, use_voacc=voacc_selected(params, CP))
+              honda_bosch_a_radar=honda_bosch_a, use_voacc=voacc_selected(params, CP),
+              tandem_fusion=tandem_supported(CP.carFingerprint, CP.radarUnavailable))
   set_core_affinity([3, 5])
 
   while 1:
