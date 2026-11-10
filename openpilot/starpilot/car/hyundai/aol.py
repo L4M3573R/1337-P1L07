@@ -14,6 +14,7 @@ from opendbc.car.hyundai.classic_long_aol import (
   independent_buttons_qualified as qualified_sonata_independent,
   aol_word as classic_long_word,
   native_accepts as classic_long_accepts,
+  CAMERA_LONG_IDS as CLASSIC_CAMERA_LONG_IDS,
   LONG_AOL_WORDS,
 )
 from opendbc.car.hyundai.classic_scc_aol import (
@@ -130,6 +131,9 @@ def _policy_for(CP) -> AolVehiclePolicy:
       settings_supported=True,
       runtime_supported=True,
       normal_runtime_supported=True,
+      # Camera-long cars always start AOL-armed so the saved toggle takes effect live: the AOL
+      # intent re-reads it every 0.1 s and only latches steering at cruise main while it is on.
+      full_axis_runtime_required=CP.carFingerprint in CLASSIC_CAMERA_LONG_IDS,
       explicit_latch=True,
       safety_param_addition=classic_long_word(CP) ^ int(CP.safetyConfigs[0].safetyParam),
       alternative_experience_addition=AOL_EXPERIENCE,
