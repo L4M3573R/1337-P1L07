@@ -4,7 +4,8 @@ import numpy as np
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.common.parameterized import parameterized_class
 from openpilot.cereal import log
-from openpilot.selfdrive.car.cruise import VCruiseHelper, V_CRUISE_MIN, V_CRUISE_MAX, V_CRUISE_INITIAL, IMPERIAL_INCREMENT
+from openpilot.selfdrive.car.cruise import (VCruiseHelper, V_CRUISE_MIN, V_CRUISE_MAX, V_CRUISE_INITIAL, V_CRUISE_ENGAGE_FLOOR,
+                                            IMPERIAL_INCREMENT)
 from opendbc.car.structs import car
 from openpilot.common.constants import CV
 from openpilot.selfdrive.test.longitudinal_maneuvers.maneuver import Maneuver
@@ -147,7 +148,8 @@ class TestVCruiseHelper(OpenpilotTestCase):
         assert not self.v_cruise_helper.v_cruise_initialized
 
         self.enable(float(v_ego), experimental_mode)
-        assert V_CRUISE_INITIAL <= self.v_cruise_helper.v_cruise_kph <= V_CRUISE_MAX
+        # Default initial speed: SET engages at the current speed, down to the low-speed floor.
+        assert self.v_cruise_helper.v_cruise_kph == round(np.clip(v_ego * CV.MS_TO_KPH, V_CRUISE_ENGAGE_FLOOR, V_CRUISE_MAX))
         assert self.v_cruise_helper.v_cruise_initialized
 
 
@@ -179,7 +181,7 @@ class TestResumeInitialization(OpenpilotTestCase):
           owner.CS_prev = empty
           owner.sm['carControl'].enabled = True
           owner.update_cruise_speed(empty)
-        expected = V_CRUISE_INITIAL if explicit is False else stored
+        expected = round(V_CRUISE_ENGAGE_FLOOR) if explicit is False else stored
         self.assertAlmostEqual(owner.v_cruise_helper.v_cruise_kph, expected)
         self.assertEqual(owner.v_cruise_helper.pending_resume_ns, 0)
 
@@ -200,7 +202,7 @@ class TestResumeInitialization(OpenpilotTestCase):
                  return_value=1_600_000_000 if invalidation == 'expired' else 1_010_000_000):
         helper.update_v_cruise(state, False, False)
         helper.initialize_v_cruise(car.CarState(), False)
-      self.assertEqual(helper.v_cruise_kph, V_CRUISE_INITIAL)
+      self.assertEqual(helper.v_cruise_kph, round(V_CRUISE_ENGAGE_FLOOR))
 
 
 class TestConfiguredInitialCruiseSpeed(OpenpilotTestCase):
@@ -211,7 +213,10 @@ class TestConfiguredInitialCruiseSpeed(OpenpilotTestCase):
           self.v_cruise_helper = VCruiseHelper(car.CarParams(pcmCruise=False))
           self.v_cruise_helper.initialize_v_cruise(car.CarState(vEgo=v_ego), experimental_mode,
                                                  resume=False, initial_speed=initial_speed)
-          expected = round(np.clip(max(v_ego * CV.MS_TO_KPH, initial_speed), V_CRUISE_INITIAL, V_CRUISE_MAX))
+          if initial_speed == V_CRUISE_INITIAL:
+            expected = round(np.clip(v_ego * CV.MS_TO_KPH, V_CRUISE_ENGAGE_FLOOR, V_CRUISE_MAX))
+          else:
+            expected = round(np.clip(max(v_ego * CV.MS_TO_KPH, initial_speed), V_CRUISE_INITIAL, V_CRUISE_MAX))
           assert self.v_cruise_helper.v_cruise_kph == expected
 
   def test_configured_floor_does_not_override_resume(self):

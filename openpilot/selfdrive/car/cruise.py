@@ -15,6 +15,7 @@ V_CRUISE_MIN = 8
 V_CRUISE_MAX = 145
 V_CRUISE_UNSET = 255
 V_CRUISE_INITIAL = 40
+V_CRUISE_ENGAGE_FLOOR = max(V_CRUISE_MIN, 7.0 * 1.609344)  # kph; lowest speed SET engages at with the default initial speed
 IMPERIAL_INCREMENT = round(CV.MPH_TO_KPH, 1)  # round here to avoid rounding errors incrementing set speed
 
 ButtonEvent = car.CarState.ButtonEvent
@@ -325,7 +326,11 @@ class VCruiseHelper:
       if self.toyota is None:
         self.apply_slc_target(slc_target_mps, is_metric)
       return True
+    elif type(initial_speed) is int and initial_speed == V_CRUISE_INITIAL:
+      # Default setting: engage at the current speed down to the low-speed floor, as before the Dom rebase.
+      self.v_cruise_kph = int(round(np.clip(CS.vEgo * CV.MS_TO_KPH, V_CRUISE_ENGAGE_FLOOR, V_CRUISE_MAX)))
     else:
+      # A raised Initial Cruise Speed, or an invalid one, keeps the configured floor.
       self.v_cruise_kph = int(round(np.clip(max(CS.vEgo * CV.MS_TO_KPH, validated_initial_cruise_speed(initial_speed)), V_CRUISE_INITIAL, V_CRUISE_MAX)))
 
     self.v_cruise_cluster_kph = self.v_cruise_kph

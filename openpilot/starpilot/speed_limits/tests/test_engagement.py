@@ -141,13 +141,13 @@ def test_unavailable_limit_keeps_normal_initialization(invalid, resume):
   assert instance.slc_receipts == []
 
 
-def test_first_engagement_without_limit_keeps_default_floor():
+def test_first_engagement_without_limit_uses_low_speed_floor():
   _, sm, cp = drive()
   sm['slcState'].observationKind = 'unknown'
   sm['carState'].vEgo = sm['carState'].vEgoCluster = 0.
   instance = owner(sm, cp)
   engage(instance)
-  assert instance.v_cruise_helper.v_cruise_kph == cruise.V_CRUISE_INITIAL
+  assert instance.v_cruise_helper.v_cruise_kph == round(cruise.V_CRUISE_ENGAGE_FLOOR)
   assert instance.slc_receipts == []
 
 
@@ -220,7 +220,7 @@ def test_engagement_receipt_cannot_adopt_unrelated_or_stale_work(change):
 def test_initializer_rejects_invalid_targets(target):
   helper = cruise.VCruiseHelper(car.CarParams(pcmCruise=False, openpilotLongitudinalControl=True))
   assert not helper.initialize_v_cruise(car.CarState(), False, resume=False, slc_target_mps=target)
-  assert helper.v_cruise_kph == cruise.V_CRUISE_INITIAL
+  assert helper.v_cruise_kph == round(cruise.V_CRUISE_ENGAGE_FLOOR)
 
 
 @pytest.mark.parametrize('resume', [False, True])
