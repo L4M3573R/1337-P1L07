@@ -165,6 +165,30 @@ def test_signal_turn_guidance_resumes_after_stopping_at_the_turn(sm):
   assert sample() == log.Desire.none
 
 
+def test_signal_turn_guidance_survives_a_brief_stop_prediction_while_rolling(sm):
+  """Rolling turn, never stopping: a momentary stop prediction pauses guidance for 1 s, not the whole turn."""
+  from openpilot.starpilot.navigation.intent import SIGNAL_STOP_RELEASE_NS, TurnIntent
+  owner = TurnIntent()
+  owner.guidance = NS(sample=lambda *_, **__: NS(turn_signal_guidance=True))
+  owner.steering_capable = True
+  sm['starpilotNavigation'].navigation.enabled = False
+  plan = NS(modelMonoTime=NOW, shouldStop=False)
+  sm['longitudinalPlan'] = plan
+  sm.valid['longitudinalPlan'] = sm.alive['longitudinalPlan'] = True
+
+  def sample(now, model_stop=False):
+    for name in ('carState', 'carControl', 'longitudinalPlan', 'deviceState'):
+      sm.logMonoTime[name] = now
+    plan.modelMonoTime = now
+    return owner.select(sm, now, log.Desire.none, supported=True, model_stop=model_stop)
+
+  assert sample(NOW) == log.Desire.turnRight
+  assert sample(NOW + 50_000_000, model_stop=True) == log.Desire.none  # brief stop prediction
+  assert sample(NOW + 100_000_000) == log.Desire.none  # still within the release window
+  assert sample(NOW + 50_000_000 + SIGNAL_STOP_RELEASE_NS) == log.Desire.turnRight  # rolling on: guidance resumes
+  assert sample(NOW + 2 * SIGNAL_STOP_RELEASE_NS) == log.Desire.turnRight
+
+
 def test_approaching_turn_does_not_start_or_replace_lane_change(sm):
   from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
   from openpilot.starpilot.navigation.intent import matching_turn_signal

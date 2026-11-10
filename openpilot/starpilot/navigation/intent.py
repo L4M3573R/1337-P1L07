@@ -9,6 +9,7 @@ from openpilot.starpilot.navigation.wire import navigation_state
 
 SERVICE = 'starpilotNavigation'
 MAX_AGE_NS = 2_500_000_000
+SIGNAL_STOP_RELEASE_NS = 1_000_000_000  # blinker guidance resumes 1 s after stop predictions end
 TARGET_MPH = {'uturn': 5., 'sharpLeft': 10., 'sharpRight': 10., 'left': 14., 'right': 14.}
 
 
@@ -104,6 +105,7 @@ class TurnIntent:
     self.guidance = LiveLaneChangePolicy(params) if params is not None else None
     self.steering_capable = steering_capable(cp)
     self.signal_stop_hold = False
+    self.signal_stop_seen_ns = 0
     self.key = None
     self.stop_hold = False
 
@@ -141,12 +143,18 @@ class TurnIntent:
       signaling = bool(cs.leftBlinker or cs.rightBlinker)
       policy = self.guidance.sample(now_ns, signaling=signaling,
                                     maneuver_active=current_desire != log.Desire.none)
-      # Hold while the planner is stopping short of the turn; release once stopped so pulling
-      # away into the turn gets guidance (a stopped car's planner keeps reporting shouldStop).
+      # Guidance is speed based: hold only while a stop is being predicted short of the turn.
+      # Release once stopped (a stopped car's planner keeps reporting shouldStop) or once no
+      # stop has been predicted for SIGNAL_STOP_RELEASE_NS, so a brief stop prediction while
+      # rolling through a turn cannot withhold guidance for the rest of it.
+      stop_predicted = bool(model_stop or plan.shouldStop)
       if not signaling or cs.standstill:
         self.signal_stop_hold = False
-      elif model_stop or plan.shouldStop:
+      elif stop_predicted:
         self.signal_stop_hold = True
+        self.signal_stop_seen_ns = now_ns
+      elif self.signal_stop_hold and now_ns - self.signal_stop_seen_ns >= SIGNAL_STOP_RELEASE_NS:
+        self.signal_stop_hold = False
       if (not supported or not self.steering_capable or not policy.turn_signal_guidance or
           current_desire != log.Desire.none or self.signal_stop_hold or not cc.latActive or
           not cs.canValid or cs.canTimeout or str(cs.gearShifter) != 'drive' or cs.standstill or
