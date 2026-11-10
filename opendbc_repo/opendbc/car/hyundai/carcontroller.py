@@ -43,6 +43,7 @@ from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.vehicle_model import VehicleModel
 
 EV9_OP_LONG_ANGLE_TARGET_MAX = 140.0
+PE_OP_LONG_ANGLE_TARGET_MAX = 175.0
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -118,6 +119,7 @@ class CarController(CarControllerBase):
     self.angle_vm = VehicleModel(CP) if CP.flags & HyundaiFlags.CANFD_ANGLE_STEERING else None
     self.apply_angle_last = 0.0
     self.angle_gain_last = 0.0
+    self.angle_fault_driver_override = False
     self.angle_tx_recovery = (AngleTxRecovery(0xCB, self.CAN.ECAN)
       if pe_long_qualified(CP) or ev9_long_qualified(CP) else AngleTxRecovery(0x110, self.CAN.ACAN)
       if CP.carFingerprint in (CAR.HYUNDAI_IONIQ_5_PE, CAR.KIA_EV9) and
@@ -436,6 +438,8 @@ class CarController(CarControllerBase):
 
     # steering control
     if ev9_long:
+      self.angle_fault_driver_override = bool(CS.out.steeringPressed and (
+        self.angle_fault_driver_override or CS.out.steerFaultTemporary or CS.out.steerFaultPermanent))
       drive = CS.out.gearShifter == structs.CarState.GearShifter.drive
       measured = CS.angle_steering_angle
       if self.angle_tx_recovery is not None and self.angle_tx_recovery.take_rejection(self.frame):
@@ -445,16 +449,20 @@ class CarController(CarControllerBase):
         if self.ev9_angle_filter is not None:
           self.ev9_angle_filter.x = self.apply_angle_last
       safety_speed = max(CS.out.vEgoRaw - 1.0, 1.0)
+      target_max = PE_OP_LONG_ANGLE_TARGET_MAX if pe_long else EV9_OP_LONG_ANGLE_TARGET_MAX
       bound = min(get_max_angle_vm(safety_speed, self.ev9_legacy_envelope, self.params),
                   get_max_angle_vm(safety_speed, self.angle_vm, self.params))
+      if pe_long:
+        bound = min(bound, target_max)
       ev9_lateral_allowed = lateral_request_allowed(CC, CS.out, CS.angle_steering_fault,
                                                    independent=(ev9_long_aol_qualified(self.CP, marked_only=True) or
                                                                 pe_long_aol_qualified(self.CP, marked_only=True)))
-      active = bool(ev9_lateral_allowed and CC.latActive and abs(measured) <= bound and abs(self.apply_angle_last) <= bound)
+      active = bool(ev9_lateral_allowed and CC.latActive and not self.angle_fault_driver_override and
+                    abs(measured) <= bound and abs(self.apply_angle_last) <= bound)
       self.ev9_angle_filter.update_alpha(float(np.interp(CS.out.vEgo, [5.0, 10.0, 20.0], [0.2, 0.1, 0.0])))
       desired = self.ev9_angle_filter.update(float(np.clip(CC.actuators.steeringAngleDeg,
-                                                         -(self.params.ANGLE_LIMITS.STEER_ANGLE_MAX if pe_long else EV9_OP_LONG_ANGLE_TARGET_MAX),
-                                                         self.params.ANGLE_LIMITS.STEER_ANGLE_MAX if pe_long else EV9_OP_LONG_ANGLE_TARGET_MAX)))
+                                                         -target_max,
+                                                         target_max)))
       # Preserve the original two VM passes and its final tolerance-envelope delta.
       angle = apply_steer_angle_limits_vm(desired, self.apply_angle_last, CS.out.vEgoRaw, measured,
                                          active, self.params, self.angle_vm)
@@ -591,16 +599,18 @@ class CarController(CarControllerBase):
         if self.gv60_longitudinal and self.frame % 4 == 0:
           can_sends.append(hyundaicanfd.create_gv60_radar_heartbeat(self.frame // 4, CS.out.brakePressed, CS.out.gasPressed))
         if self.ioniq6_longitudinal is not None and self.frame % 4 == 0:
-          can_sends.append(hyundaicanfd.create_ioniq6_radar_heartbeat(self.frame // 4, CS.out.brakePressed, CS.out.gasPressed))
+          can_sends.append(hyundaicanfd.create_ioniq6_radar_heartbeat(self.frame // 4, CS.out.brakePressed, CS.out.gasPressed, bus=self.CAN.ACAN))
         if self.ioniq6_bsm_enabled and self.frame % 5 == 0:
           sources = getattr(CS, "ioniq6_bsm_sources", None)
           can_now_ns = getattr(CS, "ioniq6_bsm_now_ns", 0)
           status = (sources.status(can_now_ns) if sources is not None and can_now_ns > self.ioniq6_bsm_last_can_ns else None)
           if status is not None:
-            # Neutralize only the injected dashboard indication below 5 mph.
-            if CS.out.vEgoRaw < 5 * CV.MPH_TO_MS:
+            left_queued = CC.leftBlinker and not CC.rightBlinker
+            right_queued = CC.rightBlinker and not CC.leftBlinker
+            if (CS.out.vEgoRaw < 5 * CV.MPH_TO_MS or
+                status.left == 2 and not left_queued or status.right == 2 and not right_queued):
               status = BlindspotStatus(0, 0)
-            can_sends.extend(hyundaicanfd.create_ioniq6_blindspot_status(self.ioniq6_bsm_counter, status))
+            can_sends.extend(hyundaicanfd.create_ioniq6_blindspot_status(self.ioniq6_bsm_counter, status, bus=self.CAN.ECAN))
             self.ioniq6_bsm_counter = (self.ioniq6_bsm_counter + 1) & 0xff
             self.ioniq6_bsm_last_can_ns = can_now_ns
       elif not ccnc_non_lka:

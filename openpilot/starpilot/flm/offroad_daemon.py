@@ -56,8 +56,20 @@ class StatusReport:
       details['Joined steering observations'] = count('joined_tracking')
       details['Retained control windows'] = count('qualified_whole_windows')
       details['Retained tracking windows'] = count('stable_qualified_whole_windows')
+      details['Original controller observations'] = count('original_control_metadata_rows')
+      details['Controller eligibility refusals'] = count('controller_fit_refusals')
       details['Automatic configuration changed'] = bool(value.get('configuration_changed', False))
       details['Analysis decision'] = value['reason']
+      details['Saved route adjustment count'] = value.get('saved_adjustments')
+      details['Recorded steering response'] = value.get('recorded_tracking')
+      checks = value.get('qualification_summary')
+      if checks is not None:
+        details['Controller and encoder check windows'] = [checks['passed'], checks['required']]
+        details['Automatic tune refusal reasons'] = [list(row) for row in checks['refusals']]
+      suggestions = value.get('suggestions', ())
+      details['Recorded route suggestions'] = [[s['parameter'], s['delta'], s['whole_windows'], s['qualification']] for s in suggestions[:16]]
+      details['Recorded suggestion count'] = value.get('suggestion_count', len(suggestions))
+      details['More recorded suggestions omitted'] = value.get('suggestion_count', len(suggestions)) > len(suggestions)
     proposal = value.get('suggestion')
     if proposal is not None:
       details['Full surface coordinates'] = [[n, proposal['values'][n]] for n in NAMES]
@@ -156,6 +168,28 @@ def parked_status(sm, params, *, stopped=False, now=None):
   return bool(not sm['deviceState'].started and pandas and all(not (p.ignitionLine or p.ignitionCan or p.controlsAllowed or p.faults) for p in pandas))
 
 
+def wait_for_parked(sm, params, *, stopped=lambda: False, clock=time.monotonic):
+  """Refresh a lapped subscriber before resuming analysis; never use stale permission."""
+  deadline = clock() + 0.75
+  timeout = 0
+  while True:
+    sm.update(timeout)
+    if parked_status(sm, params, stopped=stopped(), now=clock()):
+      return True
+    if (
+      stopped()
+      or not params.get_bool('IsOffroad')
+      or params.get_bool('IsEngaged')
+      or sm['deviceState'].started
+      or any(p.ignitionLine or p.ignitionCan or p.controlsAllowed or p.faults for p in sm['pandaStates'])
+      or clock() >= deadline
+    ):
+      return False
+    # A lost/invalid/freshness check grants nothing. Wait for an actual new
+    # message and re-run the identical predicate before any analysis continues.
+    timeout = 20
+
+
 def main():
   from openpilot.common.hardware.hw import Paths
   from openpilot.starpilot.flm.offroad_cache import directory_for_params
@@ -175,8 +209,7 @@ def main():
     sm = messaging.SubMaster(['deviceState', 'pandaStates', 'peripheralState'])
 
     def parked():
-      sm.update(0)
-      return parked_status(sm, params, stopped=stopped)
+      return wait_for_parked(sm, params, stopped=lambda: stopped)
 
     def permitted():
       okay = parked()
@@ -191,7 +224,14 @@ def main():
       permitted=permitted,
       on_analysis=lambda: report.set({'status': 'fitting', 'reason': 'analyzing_last_completed_drive'}),
       on_assessment=lambda a: report.set(
-        {'status': 'fitting', 'reason': 'checking_recorded_steering_recommendations', 'completed_route': a.receipt.route_id, 'analysis_counts': dict(a.counts)}
+        {
+          'status': 'fitting',
+          'reason': 'checking_recorded_steering_recommendations',
+          'completed_route': a.receipt.route_id,
+          'vehicle': str(a.cp.carFingerprint),
+          'analysis_counts': dict(a.counts),
+          'recorded_tracking': a.recorded_tracking,
+        }
       ),
     )
     next_analysis = 0.0
@@ -221,8 +261,8 @@ def main():
           report.set(worker.run_once())
         except (ValueError, OSError, RuntimeError) as error:
           traceback.print_exc()
-          worker.record_failure(error)
-          report.set({'status': 'unavailable', 'reason': str(error)[:300]})
+          failure = worker.record_failure(error)
+          report.set(failure if failure is not None else {'status': 'unavailable', 'reason': str(error)[:300]})
       report.publish()
       if not stopped:
         time.sleep(0.05)

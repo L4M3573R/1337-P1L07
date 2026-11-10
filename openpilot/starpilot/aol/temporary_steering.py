@@ -49,7 +49,11 @@ def temporary_steering_intent_current(self, sm, cp, cs, axis, stamp, now_ns, *, 
     now_ns - previous[8] <= AXIS_MAX_AGE_NS and
     0 < self.lateral_source_ns <= now_ns and
     now_ns - self.lateral_source_ns <= AXIS_MAX_AGE_NS)
-  held_original = bool(axis.desiredLateral and axis.lateralActive and axis.nativeAcknowledged and
+  repeated_native_first = bool(signature == previous and not axis.lateralActive and
+    0 < now_ns <= self.hkg_eps_join_until_ns)
+  held_original = bool(axis.desiredLateral and (axis.lateralActive or
+    cp.brand == 'hyundai' and str(cp.steerControlType) == 'angle' and
+    (fresh_active_successor or repeated_native_first)) and axis.nativeAcknowledged and
     (signature == previous or fresh_active_successor))
   if not withdrawn and not held_original:
     return False
@@ -58,9 +62,13 @@ def temporary_steering_intent_current(self, sm, cp, cs, axis, stamp, now_ns, *, 
     not axis.desiredLongitudinal and not axis.longitudinalActive and not cs.steeringDisengage and
     cs.cruiseState.available and not cs.cruiseState.enabled and stock_user is not None and
     any(event.name == stock_user and event.userDisable for event in sm['onroadEvents']))
+  from openpilot.starpilot.car.subaru.aol import temporary_eps_brake_recovery
+  subaru_brake = bool(stock_eps_user and temporary_eps_brake_recovery(cp, cs))
   # Seatbelt blocks normal LONG, not admitted LAT intent. Keep warnings/native/output checks.
   events = tuple(event for event in sm['onroadEvents'] if not (
     stock_eps_user and event.name == stock_user and event.userDisable and
+    not event.softDisable and not event.immediateDisable) and not (
+    subaru_brake and event.name == log.OnroadEvent.EventName.pedalPressed and event.userDisable and
     not event.softDisable and not event.immediateDisable) and not (
     self.lateral_only_baseline and cs.seatbeltUnlatched and not axis.desiredLongitudinal and
     not axis.longitudinalActive and event.name == log.OnroadEvent.EventName.seatbeltNotLatched and
@@ -150,11 +158,13 @@ def temporary_steering_intent_current(self, sm, cp, cs, axis, stamp, now_ns, *, 
   if (native is None or not native.pandaInventory or
       stock_eps_user and (native.requestedLongitudinal or native.longitudinalAllowed) or
       held_original and not (native.requestedLateral and (native.lateralAllowed or
-        restricted_eps and (ford_alpha_eps or not native.requestedLongitudinal and not native.longitudinalAllowed))) or
+        restricted_eps and (ford_alpha_eps or hkg_angle_eps or not native.requestedLongitudinal and not native.longitudinalAllowed))) or
       axis.longitudinalActive and not native.longitudinalAllowed or
       native.observedMonoTime < self.lateral_native_ns or
       (native.pandaSerial, tuple(p.hardwareSerial for p in native.pandaInventory)) != self.lateral_inventory):
     return False
+  if hkg_angle_eps and fresh_active_successor and axis.desiredLateral and not axis.lateralActive:
+    self.hkg_eps_join_until_ns = min(previous[4], self.lateral_source_ns + AXIS_MAX_AGE_NS)
   if stock_volkswagen_eps and matched_withdrawal:
     self.volkswagen_eps_source_ns = int(axis.sourceCarStateMonoTime)
   if cs.steerFaultTemporary and matched_withdrawal:

@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.starpilot.galaxy.batch_routes import change_drive_state, delete_records, non_default_settings, preview_layout, preview_settings_recovery
+from openpilot.starpilot.audio.preview import AlertPreview, AlertPreviewError
 from openpilot.starpilot.galaxy.access import AccessStatus, default_owner
 from openpilot.starpilot.galaxy.auth import LocalSessions
 from openpilot.starpilot.galaxy.http_server import (_LocalHTTPHandler, _LocalHTTPServer, allowed_authority,
@@ -99,7 +100,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
                 starport_client=None, navigation=None, offline_maps=None, drive_state=None, cloud_provider=None, cloud_offroad=None, projection_layout=None,
                 local_access=None, tmux_live=None, starport_logs=None, starport_log_sender=None, hotspot=None, toyota_tools=None,
                 replay_client=None, replay_root=None,
-                spotify_setup=None, companion=None, phone_location=None, reverse_proxy=None, local_hostnames=None):
+                spotify_setup=None, companion=None, phone_location=None, reverse_proxy=None, local_hostnames=None, sound_preview=None):
   from openpilot.starpilot.galaxy.local_hostnames import LocalHostnames
   hostname_source = local_hostnames if local_hostnames is not None else LocalHostnames(clock=clock)
   from openpilot.starpilot.galaxy.companion import CompanionRegistry, APK_PATH
@@ -252,6 +253,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
   favorites_source = favorites
   favorites_lock = threading.Lock()
   sound_source = sounds
+  alert_preview = sound_preview or AlertPreview(parked=parked)
   sounds_lock = threading.Lock()
 
   def drive_owner():
@@ -1413,7 +1415,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
           return
         try:
           result = sound_owner().snapshot()
-        except SoundDownloadError as error:
+        except (SoundDownloadError, AlertPreviewError) as error:
           self.json(error.status, {'error': str(error)})
         except (OSError, ValueError, RuntimeError):
           self.json(503, {'error': 'Sound packs are unavailable'})
@@ -1669,7 +1671,8 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
                       '/api/settings/reset-default', '/api/settings/restore', '/api/recordings/action',
                       '/api/replay/start', '/api/replay/control', '/api/replay/stop',
                       '/api/replay/export-start',
-                      '/api/galaxy/pair', '/api/galaxy/unpair', '/api/galaxy/device-name', '/api/galaxy/hotspot', '/api/cameras/snapshot',
+                      '/api/galaxy/pair', '/api/galaxy/unpair', '/api/galaxy/device-name', '/api/galaxy/hotspot',
+                      '/api/cameras/snapshot', '/api/cameras/white-balance',
                       '/api/starport/layout', '/api/starport/enable', '/api/starport/control', '/api/starport/pairing',
                       '/api/starport/logs/send',
                       '/api/starport/pairing/response', '/api/starport/pairing/cancel', '/api/starport/pairing/select',
@@ -1680,7 +1683,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
                       '/api/models/active', '/api/models/preferences', '/api/models/download', '/api/models/download_all',
                       '/api/models/cancel', '/api/models/delete', '/api/models/refresh_manifest', '/api/models/jetlink',
                       '/api/models/laboratory', '/api/models/laboratory/download', '/api/models/laboratory/delete',
-                      '/api/sounds/download', '/api/sounds/cancel', '/api/software/action', '/api/drives/ignore',
+                      '/api/sounds/preview', '/api/sounds/download', '/api/sounds/cancel', '/api/software/action', '/api/drives/ignore',
                       '/api/recordings/delete-videos', '/api/sentry/notifications', '/api/sentry/events/delete', '/api/crash-reports/delete',
                       '/api/navigation/search', '/api/navigation/action', '/api/navigation/offline', '/api/drive-state/action',
                       '/api/toyota-tools/action', '/api/vehicle-selection/preview', '/api/vehicle-selection/confirm'):
@@ -1987,6 +1990,25 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
         else:
           self.respond(200, body, 'image/jpeg')
         return
+      if path == '/api/cameras/white-balance':
+        if type(payload) is not dict or not (payload == {} or (set(payload) == {'enabled'} and type(payload['enabled']) is bool)):
+          self.json(400, {'error': 'Invalid white balance choice'})
+          return
+        identity = self.settings_session()
+        if identity is None:
+          self.json(401, {'error': 'Sign in to Galaxy'})
+          return
+        from openpilot.common.params import Params
+        params = Params()
+        with effect_lock:
+          if 'enabled' in payload:
+            params.put_bool('CabinWhiteBalance', payload['enabled'])
+          enabled = params.get_bool('CabinWhiteBalance')
+        if self.settings_session() == identity:
+          self.json(200, {'enabled': enabled})
+        else:
+          self.json(401, {'error': 'Sign in to Galaxy'})
+        return
       if path == '/api/galaxy/device-name':
         if not self.require_session():
           return
@@ -2269,8 +2291,9 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
             if self.settings_session() != identity:
               self.json(401, {'error': 'Sign in to Galaxy'})
               return
-            result = sound_owner().action(path.rsplit('/', 1)[-1], payload)
-        except SoundDownloadError as error:
+            result = (alert_preview.play(payload) if path == '/api/sounds/preview' else
+                      sound_owner().action(path.rsplit('/', 1)[-1], payload))
+        except (SoundDownloadError, AlertPreviewError) as error:
           self.json(error.status, {'error': str(error)})
         except (OSError, ValueError, RuntimeError):
           self.json(503, {'error': 'Sound packs are unavailable'})
@@ -2352,7 +2375,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
             self.json(401, {'error': 'Sign in to Galaxy'})
         return
       if path == '/api/starport/logs/send':
-        if type(payload) is not dict or set(payload) != {'message'}:
+        if type(payload) is not dict or set(payload) not in ({'message'}, {'message', 'discord'}):
           self.json(400, {'error': 'Invalid StarPort log send request'})
           return
         identity = self.settings_session()
@@ -2361,7 +2384,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
           return
         from openpilot.starpilot.galaxy.starport_send import SendBusy, SendRejected
         try:
-          result = starport_log_sender().start(payload['message'])
+          result = starport_log_sender().start(payload['message'], payload.get('discord', ''))
         except SendRejected as error:
           self.json(400, {'error': str(error)})
         except SendBusy as error:
@@ -2440,6 +2463,10 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
           command, arguments = 'start', {}
         elif action == 'reset_handshake' and set(payload) == {'action'}:
           command, arguments = 'reset_handshake', {}
+        elif action == 'continue_ladder' and set(payload) == {'action'}:
+          command, arguments = 'continue_ladder', {}
+        elif action == 'dismiss_fix_suggestion' and set(payload) == {'action', 'rule'} and isinstance(payload['rule'], str):
+          command, arguments = 'dismiss_fix_suggestion', {'rule': payload['rule'][:64]}
         elif action == 'auto_connect' and set(payload) == {'action', 'enabled'} and type(payload['enabled']) is bool:
           if not configuration_allowed():
             self.json(403, {'error': 'Park before changing automatic connection'})

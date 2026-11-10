@@ -299,7 +299,8 @@ class VisionModelCore:
     if cv2 is None:
       raise RuntimeError("OpenCV DNN is unavailable")
     self.is_metric = is_metric
-    self.net = self._load_net("speed_limit_us_detector.onnx", self.DETECTOR_SHA256)
+    self.last_classifier_reject_dominant = False
+    self.net = self._load_detector_net()
     self.classifier_net = (self._load_net("speed_limit_us_value_classifier.onnx", self.CLASSIFIER_SHA256)
                            if load_classifier else None)
     if not load_classifier:
@@ -330,6 +331,7 @@ class VisionModelCore:
     """Discard evidence from a previous camera, stream or sign-unit setting."""
     self.history.clear()
     self.last_classifier_advisory_rejected = False
+    self.last_classifier_reject_dominant = False
     self.latest_detector_proposal = None
     self.published_speed_limit_mph = 0
     self.published_confidence = 0.0
@@ -339,6 +341,9 @@ class VisionModelCore:
     self.last_published_support_at = 0.0
     self.published_support_count = 0
     self.episode = 0
+
+  def _load_detector_net(self):
+    return self._load_net("speed_limit_us_detector.onnx", self.DETECTOR_SHA256)
 
   @classmethod
   def _verified_model_path(cls, name: str, expected_sha256: str) -> Path:
@@ -371,7 +376,12 @@ class VisionModelCore:
   def infer(self, frame_bgr: np.ndarray) -> Detection | None:
     if frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3 or frame_bgr.size == 0:
       raise ValueError("Expected a nonempty BGR frame")
-    return self._publishable_detection(self._detect_sign_from_detector_classifier(frame_bgr))
+    face_filter = getattr(self, '_speed_face_filter', None)
+    try:
+      return self._publishable_detection(self._detect_sign_from_detector_classifier(frame_bgr))
+    finally:
+      if face_filter is not None:
+        face_filter.end_frame()
 
   def observe(self, frame_bgr: np.ndarray, *, now: float) -> tuple[int, float, int, int] | None:
     """Return the confirmed sign numeral in the configured units until reset or replacement."""
@@ -605,6 +615,9 @@ class VisionModelCore:
     detector_shape = (self.detector_input_size, self.detector_input_size)
     letterboxed, ratio, pad_width, pad_height = self._letterbox(frame_bgr, shape=detector_shape)
     blob = cv2.dnn.blobFromImage(letterboxed, scalefactor=1 / 255.0, size=detector_shape, swapRB=True, crop=False)
+    face_filter = getattr(self, '_speed_face_filter', None)
+    if face_filter is not None:
+      face_filter.capture_blob(blob)
     self.net.setInput(blob)
 
     forward_started_at = time.monotonic()
@@ -659,11 +672,17 @@ class VisionModelCore:
         continue
 
       candidates.append((confidence, class_id, (x1, y1, x2, y2)))
+      face_filter = getattr(self, '_speed_face_filter', None)
+      if face_filter is not None:
+        face_filter.remember((confidence, class_id, (x1, y1, x2, y2)), prediction[:4], index)
 
     return candidates
 
 
   def _collect_detector_classifier_proposals(self, frame_bgr):
+    face_filter = getattr(self, '_speed_face_filter', None)
+    if face_filter is not None:
+      face_filter.begin_frame()
     if self.net is None:
       return []
 
@@ -705,6 +724,7 @@ class VisionModelCore:
 
   def _classify_speed_limit_from_model(self, sign_crop):
     self.last_classifier_advisory_rejected = False
+    self.last_classifier_reject_dominant = False
     if self.classifier_net is None or sign_crop.size == 0:
       return None
 
@@ -735,6 +755,10 @@ class VisionModelCore:
       return None
 
     probabilities = self._normalize_classifier_output(scores)
+    self.last_classifier_reject_dominant = bool(
+      has_reject_class and original_probabilities is not None and np.isfinite(probabilities).all() and
+      int(np.argmax(original_probabilities)) == speed_class_count and int(np.argmax(probabilities)) == speed_class_count
+    )
     speed_probabilities = probabilities[:speed_class_count]
     class_index = int(np.argmax(speed_probabilities))
     confidence = float(speed_probabilities[class_index])
@@ -758,6 +782,7 @@ class VisionModelCore:
     frame_height, frame_width = frame_bgr.shape[:2]
     best_detection = None
     best_score = 0.0
+    best_retry_conflict = False
     rejected_advisory_boxes: list[tuple[int, int, int, int]] = []
 
     for proposal_confidence, class_id, (x1, y1, x2, y2) in self._collect_detector_classifier_proposals(frame_bgr):
@@ -861,6 +886,8 @@ class VisionModelCore:
       speed_model_only_rescue_support: dict[int, int] = {}
       speed_direct_model_support: dict[int, int] = {}
       speed_strong_model_support: dict[int, int] = {}
+      expanded_regulatory_speeds: set[int] = set()
+      primary_reject_dominant = False
 
       expansions = getattr(self, "detector_classifier_expansions", DETECTOR_CLASSIFIER_EXPANSIONS)
       for expand_left, expand_top, expand_right, expand_bottom, expansion_weight in expansions:
@@ -877,7 +904,15 @@ class VisionModelCore:
         if class_id == 2:
           is_regulatory = True
 
+        face_filter = getattr(self, '_speed_face_filter', None)
+        if face_filter is not None and face_filter.reject_once((proposal_confidence, class_id, (x1, y1, x2, y2))):
+          self.latest_detector_proposal = None
+          return None
         model_read = self._classify_speed_limit_from_model(sign_crop)
+        if not any((expand_left, expand_top, expand_right, expand_bottom)):
+          primary_reject_dominant = bool(
+            not raw_is_regulatory and getattr(self, "last_classifier_reject_dominant", False)
+          )
         if (class_id == 0 and not raw_is_regulatory and model_read is None and
             getattr(self, "last_classifier_advisory_rejected", False)):
           # A confident advisory veto applies to this object, not another crop of it.
@@ -947,6 +982,8 @@ class VisionModelCore:
         speed_scores[speed_limit_mph] = speed_scores.get(speed_limit_mph, 0.0) + score
         speed_best_confidences[speed_limit_mph] = max(speed_best_confidences.get(speed_limit_mph, 0.0), read_confidence)
         speed_support_counts[speed_limit_mph] = speed_support_counts.get(speed_limit_mph, 0) + 1
+        if raw_is_regulatory and any((expand_left, expand_top, expand_right, expand_bottom)):
+          expanded_regulatory_speeds.add(speed_limit_mph)
         if is_regulatory or class_id == 2 or strong_model_read:
           speed_regulatory_support[speed_limit_mph] = speed_regulatory_support.get(speed_limit_mph, 0) + 1
         if trusted_model_read:
@@ -1040,13 +1077,17 @@ class VisionModelCore:
       if selection_score > best_score:
         best_score = selection_score
         best_detection = Detection(speed_limit_mph, published_score, strong_rescue)
+        best_retry_conflict = (
+          class_id == 0 and primary_reject_dominant and speed_limit_mph in expanded_regulatory_speeds and
+          speed_support_counts[speed_limit_mph] < DETECTOR_CLASSIFIER_MODEL_ONLY_CONSENSUS_MIN_SUPPORT
+        )
         self._remember_detector_proposal(
           proposal_confidence, class_id, (x1, y1, x2, y2), speed_limit_mph, preferred=True,
         )
       if best_detection is not None and best_detection.confidence >= MODEL_DETECTION_SHORT_CIRCUIT_CONFIDENCE:
-        return best_detection
+        return None if best_retry_conflict else best_detection
 
-    return best_detection
+    return None if best_retry_conflict else best_detection
 
 
   def _prune_history(self, now):

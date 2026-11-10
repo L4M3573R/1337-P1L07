@@ -6,7 +6,9 @@ from unittest.mock import patch
 import numpy as np
 
 from openpilot.starpilot.speed_limits.vision.traffic_signs import TrafficSignModelCore as VisionModelCore
+from openpilot.starpilot.speed_limits.vision.speed_face import StopFaceVerifier
 from openpilot.starpilot.speed_limits.vision.stop_signs import StopDetection, SignDetectorOutputs, decode_stop_signs
+from openpilot.starpilot.speed_limits.vision.tests import _identity_fixture as identity_fixture
 
 
 class TestStopSigns(unittest.TestCase):
@@ -48,6 +50,8 @@ class TestStopSigns(unittest.TestCase):
   def test_reset_and_invalid_new_frame_clear_stop_detections(self):
     core = VisionModelCore.__new__(VisionModelCore)
     core.history = deque()
+    core.net = SimpleNamespace(rgb256=None)
+    core._stop_face_filter = StopFaceVerifier(identity_fixture.Net('aux'))
     core.stop_detections = (StopDetection(.9, (10, 10, 30, 30)),)
     core.reset()
     self.assertEqual(core.stop_detections, ())
@@ -78,23 +82,31 @@ class TestStopSigns(unittest.TestCase):
     self.assertEqual(joint.last_classifier_forward_count, speed.last_classifier_forward_count)
 
   def test_stop_only_does_not_load_or_run_the_numeric_classifier(self):
-    load = VisionModelCore._load_net
+    from openpilot.starpilot.speed_limits.vision import model as vision_model
     calls = []
+
+    class StopNet(identity_fixture.Net):
+      def forward(self, names=None):
+        if names != ['stop/output0']:
+          raise AssertionError('Unexpected output request')
+        return [np.zeros((1, 5, 4096), np.float32)]
 
     def checked(cls, name, expected):
       calls.append(name)
-      self.assertNotEqual(name, 'speed_limit_us_value_classifier.onnx')
-      return load(name, expected)
+      self.assertEqual(name, 'traffic_signs_us_stop_detector.onnx')
+      self.assertEqual(expected, VisionModelCore.STOP_PROJECTION_SHA256)
+      return StopNet('joint')
 
-    with patch.object(VisionModelCore, '_load_net', classmethod(checked)):
+    with patch.object(vision_model.VisionModelCore, '_load_net', classmethod(checked)), patch.object(VisionModelCore, '_verified_model_path'), patch('openpilot.starpilot.speed_limits.vision.traffic_signs.SpeedFaceVerifier', side_effect=lambda _: identity_fixture.fake_identity()):
       core = VisionModelCore(is_metric=False, speed_enabled=False)
       frame = np.zeros((760, 1344, 3), np.uint8)
-      with patch.object(core, '_classify_speed_limit_from_model', side_effect=AssertionError('Unused speed classifier')):
+      with patch.object(core, '_classify_speed_limit_from_model', side_effect=AssertionError('Unused speed classifier')), patch.object(core._stop_face_filter.net, 'forward', side_effect=AssertionError('Unexpected identity work')):
         self.assertIsNone(core.observe(frame, now=1.0))
     self.assertIsNone(core.classifier_net)
+    self.assertIsNone(core._speed_face_filter)
     self.assertEqual(core.last_classifier_forward_count, 0)
     self.assertEqual(core.last_detector_forward_count, 1)
-    self.assertEqual(calls, ['speed_limit_us_detector.onnx'])
+    self.assertEqual(calls, ['traffic_signs_us_stop_detector.onnx'])
 
   def test_speed_mode_transition_discards_old_speed_evidence(self):
     core = VisionModelCore(is_metric=False)

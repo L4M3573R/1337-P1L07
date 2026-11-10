@@ -159,6 +159,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"PIPPreviewShowOnBlinker", {PERSISTENT, BOOL, "0"}},
     {"PIPPreviewShowOnBSM", {PERSISTENT, BOOL, "0"}},
     {"PIPPreviewInvert", {PERSISTENT, BOOL, "0"}},
+    {"CabinWhiteBalance", {PERSISTENT, BOOL, "1"}},
     {"StarPilotDisplayPreferencesEnabled", {PERSISTENT, BOOL}},
     {"ScreenBrightness", {PERSISTENT, INT}},
     {"ScreenBrightnessOnroad", {PERSISTENT, INT}},
@@ -390,7 +391,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"JetlinkChargePhone", {PERSISTENT, BOOL, "0"}},
     {"JetlinkModel", {PERSISTENT, JSON}},
     {"JetlinkSpec", {PERSISTENT | DONT_LOG, JSON}},
-    {"JetlinkPointers", {PERSISTENT | DONT_LOG, JSON}},
     {"JetlinkProgress", {CLEAR_ON_MANAGER_START | DONT_LOG, JSON}},
     {"Version", {PERSISTENT, STRING}},
 };

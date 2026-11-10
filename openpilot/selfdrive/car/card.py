@@ -25,9 +25,10 @@ from opendbc.car.gm.distance_button import GMDistanceButtons
 from opendbc.car.gm.interface import CarInterface as GMInterface
 from opendbc.car.gm.profiles import profiles_supported as gm_profiles_supported
 from opendbc.car.hyundai.ioniq6_handoff import (IONIQ6_LONG_PREARM_ENABLED, HandoffOutcome,
-                                                IONIQ6_ECAN_BUS, TimestampedCanPacket, build_ioniq6_hda2_long_candidate,
+                                                TimestampedCanPacket, build_ioniq6_hda2_long_candidate,
                                                 prepare_ioniq6_long_candidate, confirm_ioniq6_prepared_takeover, restore_ioniq6_adas,
                                                 inspect_ioniq6_long_sources)
+from opendbc.car.hyundai.hyundaicanfd import CanBus as HyundaiCanBus
 from opendbc.car.hyundai.ioniq6_media import Ioniq6MediaButtons
 from opendbc.car.hyundai.values import CAR as HYUNDAI_CAR
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
@@ -60,6 +61,7 @@ from opendbc.car.ford.aol import (
   temporary_restriction as ford_temporary_restriction,
 )
 from opendbc.car.hyundai.canfd_angle_aol import native_observation, temporary_restriction, qualified as qualified_angle_aol
+from opendbc.car.hyundai.blended_stock_aol import qualified_alpha as qualified_blended_alpha_aol
 from opendbc.car.hyundai.canfd_owner import config_index as hyundai_canfd_config_index
 from opendbc.car.hyundai.captured_adrv_startup import CapturedADRVStartup
 from openpilot.starpilot.car.nissan.aol import (
@@ -282,7 +284,7 @@ class Car:
                             any(ps.ignitionLine or ps.ignitionCan for ps in self.sm['pandaStates']))
           long_cp = build_ioniq6_hda2_long_candidate(cp, fingerprints) if eligible else None
           if long_cp is not None:
-            preflight = inspect_ioniq6_long_sources(self.can_callbacks[0])
+            preflight = inspect_ioniq6_long_sources(self.can_callbacks[0], ecan_bus=HyundaiCanBus(cp).ECAN)
             cloudlog.event('ioniq6_long_preflight', reason=preflight.reason)
             if preflight.source_period is None or preflight.vehicle_ready is not False:
               # Reboot in READY retains original stock CP before CI/parsers and
@@ -328,7 +330,7 @@ class Car:
 
     self.CP.alternativeExperience = 0
     self.switchback_capable = ioniq6_media_eligible(self.CP)
-    self.ioniq6_media = Ioniq6MediaButtons(IONIQ6_ECAN_BUS) if self.switchback_capable else None
+    self.ioniq6_media = Ioniq6MediaButtons(HyundaiCanBus(self.CP).ECAN) if self.switchback_capable else None
     self.switchback_button_tracker = ButtonTracker() if self.switchback_capable else None
     self.switchback_settings_owner = ConditionalSettingsOwner(self.params) if self.switchback_capable else None
     self.gm_distance = GMDistanceButtons() if self.conditional_replay and gm_profiles_supported(self.CP) else None
@@ -615,9 +617,10 @@ class Car:
         self.aol_card_intent, cancel_source_ns=cancel_source_ns, now_ns=now_ns,
         producer=getattr(self, 'slc_producer_session', ''))
       cancel_feedback = self.aol_transport_feedback
-      if (hkg_cancel_retained and self.CP.carFingerprint in (HYUNDAI_CAR.KIA_EV9, HYUNDAI_CAR.HYUNDAI_IONIQ_5_PE) and
+      if (hkg_cancel_retained and (self.CP.carFingerprint in (HYUNDAI_CAR.KIA_EV9, HYUNDAI_CAR.HYUNDAI_IONIQ_5_PE) or
+          qualified_blended_alpha_aol(self.CP, marked_only=True)) and
           cancel_feedback is not None and not cancel_feedback.longitudinal_cancel_ns):
-        # The pure guard proved this exact CCNC raw CANCEL/FULL join. Bind
+        # The pure guard proved this exact raw CANCEL/FULL join. Bind
         # its first local receipt for the existing bounded withdrawal handshake;
         # held samples never renew it or any source/native/output deadline.
         if cancel_source_ns > cancel_feedback.last_cancel_source_ns:
@@ -1044,21 +1047,35 @@ class Car:
       self.pm.send('carParams', cp_send)
       self.car_params_published = True
 
+    timing = getattr(self, '_cycle_timing', None)
+    if timing is not None:
+      timing.publication_mark('begin')
+
     # publish new carOutput
     co_send = messaging.new_message('carOutput')
     co_send.valid = self.sm.all_checks(['carControl'])
     co_send.carOutput.actuatorsOutput = self.last_actuators_output
     self.learning_feedback_publication = None
+    if timing is not None:
+      timing.publication_mark('car_output_create')
     capture = self._feedback_capture(int(co_send.logMonoTime))
+    if timing is not None:
+      timing.publication_mark('feedback_capture')
     if capture is not None:
       try:
         self.learning_feedback_publication = capture.publication(co_send)
       except Exception:
         capture.invalidate()  # Optional observation cannot affect the original CO.
+    if timing is not None:
+      timing.publication_mark('feedback_publication')
     self.pm.send('carOutput', co_send)
+    if timing is not None:
+      timing.publication_mark('car_output_send')
 
     # kick off controlsd step while we actuate the latest carControl packet
     cs_send = messaging.new_message('carState')
+    if timing is not None:
+      timing.publication_mark('car_state_create')
     if (self.slc_replay or self.curve_replay or getattr(self, 'conditional_replay', False)) and REPLAY and hasattr(self, 'can_log_mono_time'):
       cs_send.logMonoTime = int(self.can_log_mono_time)
     cs_send.valid = CS.canValid
@@ -1325,7 +1342,8 @@ class Car:
       return
     if not self.ioniq6_long_prearmed:
       return
-    if any((src == 1 and address in (0x1A0, 0x1BA, 0x1E5)) or (src == 0 and address == 0x100)
+    CAN = self.CI.CC.CAN
+    if any((src == CAN.ECAN and address in (0x1A0, 0x1BA, 0x1E5)) or (src == CAN.ACAN and address == 0x100)
            for _, packet in can_list for address, _, src in packet):
       self.ioniq6_long_lost = True
     if self.ioniq6_host_warmed:
@@ -1342,18 +1360,24 @@ class Car:
     panda_states = self.sm['pandaStates']
     return bool(
       self.sm.valid['pandaStates'] and self.sm.alive['pandaStates'] and
-      len(panda_states) >= len(self.CP.safetyConfigs) and
+      len(panda_states) == len(self.CP.safetyConfigs) and
       all(ps.safetyModel == config.safetyModel and ps.safetyParam == config.safetyParam and
           ps.alternativeExperience == self.CP.alternativeExperience and not ps.safetyRxChecksInvalid
           for ps, config in zip(panda_states, self.CP.safetyConfigs, strict=False))
     )
 
   def ioniq6_panda_diagnostic_ready(self):
+    if not ioniq6_long_eligible(self.CP):
+      return False
+    owner = hyundai_canfd_config_index(self.CP)
+    if owner is None:
+      return False
     if not self.sm.valid['pandaStates'] or not self.sm.alive['pandaStates']:
       return False
     panda_states = self.sm['pandaStates']
     return bool(
       len(panda_states) == len(self.CP.safetyConfigs) and
+      (owner == 0 or panda_states[owner].safetyParam == 1) and
       all(ps.safetyModel == structs.CarParams.SafetyModel.elm327 and
           ps.safetyParam in (0, 1) and not ps.controlsAllowed
           for ps in panda_states)
@@ -1696,7 +1720,7 @@ class Car:
           return
         self.ioniq6_last_preflight_at = handoff_started
         try:
-          self.ioniq6_handoff_result = confirm_ioniq6_prepared_takeover(*self.can_callbacks)
+          self.ioniq6_handoff_result = confirm_ioniq6_prepared_takeover(*self.can_callbacks, ecan_bus=self.CI.CC.CAN.ECAN)
         except Exception:
           cloudlog.exception("Ioniq 6 takeover transaction failed")
           self.ioniq6_handoff_result = None
@@ -1959,7 +1983,7 @@ def main():
       if callbacks is not None:
         car.ioniq6_restore_attempted = True
         try:
-          restored = restore_ioniq6_adas(*callbacks)
+          restored = restore_ioniq6_adas(*callbacks, ecan_bus=car.CI.CC.CAN.ECAN)
         except Exception:
           restored = False
         if not restored:
