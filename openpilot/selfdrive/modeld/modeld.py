@@ -398,8 +398,9 @@ def main(demo=False):
   # A timed-out GPU worker must never hold up access to the small runner.
   small_model = small_prepared = None
   selected_small_failed = False
-  if selection.big_path is not None and selection.small_path is not None:
-    small_model, small_prepared, selected_small_failed = load_small()
+  # The Chestnut worker starts first so its USB and power waits overlap the small preload, but it
+  # touches neither the catalog lock nor the GPU until that preload has finished.
+  small_preloaded = threading.Event()
   if CHESTNUT:
     big_path = selection.big_path or modeld_pkl_path(True)
     big_artifact_identity = receipt_owner.capture(big_path)
@@ -412,7 +413,10 @@ def main(demo=False):
         t_present = time.monotonic()
         if not demo:
           wait_for_chestnut_power(CP, timeout=min(30., BIG_MODEL_TIMEOUT / 2))
-        cloudlog.warning(f"chestnut ready: present after {t_present - t_wait:.2f}s, power after {time.monotonic() - t_present:.2f}s")
+        t_power = time.monotonic()
+        small_preloaded.wait()
+        ready = f"present after {t_present - t_wait:.2f}s, power after {t_power - t_present:.2f}s"
+        cloudlog.warning(f"chestnut ready: {ready}, then waited {time.monotonic() - t_power:.2f}s for the small preload")
         set_core_affinity([7])
         if selection.big_path is not None:
           m, prepared = load_verified_model(cam_w, cam_h,
@@ -428,6 +432,12 @@ def main(demo=False):
         cloudlog.exception("big model load failed")
     loader = threading.Thread(target=load_big, daemon=True)
     loader.start()
+  try:
+    if selection.big_path is not None and selection.small_path is not None:
+      small_model, small_prepared, selected_small_failed = load_small()
+  finally:
+    small_preloaded.set()
+  if CHESTNUT:
     loader.join(BIG_MODEL_TIMEOUT)
     if loader.is_alive():
       report_load_timeout(loader, BIG_MODEL_TIMEOUT)

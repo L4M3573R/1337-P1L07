@@ -24,6 +24,19 @@ from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 PREFETCH_WAIT_S = 30.0
 
 
+def chestnut_load_detail() -> str:
+  """Split of the last Chestnut load (GPU boot + arena, USB upload, unpickle), when the runtime recorded it."""
+  try:
+    from openpilot.starpilot.models.runtime_bridge.runtime import _load_chestnut
+    p = _load_chestnut.last_phases
+    upload_rate = p['upload_mb'] / p['upload'] if p['upload'] > 0 else 0.0
+    boot = f"header {p['header']:.2f}s, gpu boot+arena {p['gpu_boot_alloc']:.2f}s"
+    upload = f"upload {p['upload']:.2f}s ({p['upload_mb']:.0f} MB at {upload_rate:.0f} MB/s)"
+    return f" [{boot}, {upload}, unpickle {p['unpickle']:.2f}s]"
+  except (AttributeError, ImportError, KeyError, TypeError, ZeroDivisionError):
+    return ""
+
+
 class ArtifactPrefetch:
   """Hash an installed artifact on a background thread while modeld waits for cameras and CarParams.
 
@@ -111,7 +124,7 @@ def load_verified_model(cam_w: int, cam_h: int, artifact_path: Path, behavior_ve
       early = f", hashed early in {prefetch.seconds:.2f}s" if reused and prefetch.seconds is not None else ""
       variant = 'chestnut' if chestnut else 'small'
       phases = f"verify {t1 - t0:.2f}s{early}, load {t2 - t1:.2f}s, warmup {t3 - t2:.2f}s"
-      report(f"model load phases {model_id} ({variant}): {phases}")
+      report(f"model load phases {model_id} ({variant}): {phases}{chestnut_load_detail() if chestnut else ''}")
     return model, prepared
 
 

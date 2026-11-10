@@ -25,6 +25,8 @@ def loader(source, *, demo=False, bundled=False, failure=None):
     return run
 
   model = SimpleNamespace(warmup=record('warmup'))
+  preloaded = threading.Event()
+  preloaded.set()  # the small fallback preload has already finished
   namespace = {'demo': demo, 'CP': object(), 'BIG_MODEL_TIMEOUT': 120, 'wait_for_chestnut': record('usb'),
                    'wait_for_chestnut_power': record('power'), 'set_core_affinity': record('affinity'),
                    'selection': SimpleNamespace(big_path=None if bundled else Path('/verified.pkl'), big_version='v16',
@@ -32,7 +34,7 @@ def loader(source, *, demo=False, bundled=False, failure=None):
                    'cam_w': 1928, 'cam_h': 1208, 'big_path': Path('/verified.pkl'),
                    'load_verified_model': record('verified', (model, 'prepared')), 'ModelState': record('bundled', model),
                    'receipt_owner': SimpleNamespace(prepare=record('receipt', 'prepared')),
-                   'big_artifact_identity': object(), 'big_prefetch': None, 'time': __import__('time'),
+                   'big_artifact_identity': object(), 'big_prefetch': None, 'time': __import__('time'), 'small_preloaded': preloaded,
                    'cloudlog': SimpleNamespace(exception=record('error'), warning=lambda *args, **kwargs: None)}
   outer = ast.parse('def outer():\n big_model = None\n big_prepared = None\n return load_big, lambda: (big_model, big_prepared)\n').body[0]
   outer.body.insert(2, function)

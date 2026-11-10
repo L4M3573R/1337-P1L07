@@ -211,25 +211,34 @@ def _load_chestnut(path):
   import io
   import pickle
   import struct
+  import time
   from tinygrad import Device, Tensor
   from tinygrad.device import Buffer
   from tinygrad.dtype import dtypes
+  _load_chestnut.last_phases = {}  # startup diagnostics: seconds per phase of this load
+  t0 = time.monotonic()
   with open(path, "rb") as f:
     opcodes = f.read(struct.unpack('<q', f.read(8))[0])
     if f.tell() == Path(path).stat().st_size:
       return pickle.loads(opcodes)
     buffers = cast("LegacyBuffer", Tensor(Path(path))[f.tell():].uop.buffer).ensure_allocated()
 
+  t1 = time.monotonic()
   arena, chunk_size = cast("LegacyBufferFactory", Buffer)(Device.DEFAULT, buffers.nbytes, dtypes.uchar, preallocate=True), 8 << 20
+  t2 = time.monotonic()
   for off in range(0, buffers.nbytes, chunk_size):
     size = min(chunk_size, buffers.nbytes-off)
     arena.view(size, dtypes.uchar, off).ensure_allocated().copy_from(buffers.view(size, dtypes.uchar, off).ensure_allocated())
+  t3 = time.monotonic()
 
   def persistent_load(pid): return arena.view(*pid)
 
   u = pickle.Unpickler(io.BytesIO(opcodes))
   cast("LegacyPersistentUnpickler", u).persistent_load = persistent_load
-  return u.load()
+  artifact = u.load()
+  _load_chestnut.last_phases = {'header': t1 - t0, 'gpu_boot_alloc': t2 - t1, 'upload': t3 - t2,
+                                'unpickle': time.monotonic() - t3, 'upload_mb': buffers.nbytes / 1e6}
+  return artifact
 
 
 def load_oob(path, chestnut=False):

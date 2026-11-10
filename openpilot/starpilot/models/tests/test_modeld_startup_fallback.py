@@ -187,12 +187,16 @@ def test_big_worker_waits_before_load_and_failure_requests_fresh_small_process(c
       self.target = target
 
     def start(self):
+      self.started = True
+
+    def join(self, duration):
+      # The worker's USB/power waits may overlap the small preload, but it is gated on that preload
+      # before loading; run it here, after the main thread has finished (and signalled) the preload.
       nonlocal worker
+      assert self.started
       worker = True
       self.target()
       worker = False
-
-    def join(self, duration):
       events.append(("join", duration))
 
     def is_alive(self):
@@ -227,7 +231,7 @@ def test_big_worker_waits_before_load_and_failure_requests_fresh_small_process(c
          "time": SimpleNamespace(monotonic=lambda: 0), "cloudlog": Mock(), "selection": selection,
          "CHESTNUT": True, "vipc_client_main": SimpleNamespace(width=1928, height=1208), "wait_for_chestnut": wait,
          "ModelState": state, "load_verified_model": verified, "modeld_pkl_path": lambda big: "bundled-big" if big else "bundled-small",
-         "receipt_owner": receipt, "threading": SimpleNamespace(Thread=Thread), "BIG_MODEL_TIMEOUT": 30,
+         "receipt_owner": receipt, "threading": SimpleNamespace(Thread=Thread, Event=__import__("threading").Event), "BIG_MODEL_TIMEOUT": 30,
          "report_load_timeout": Mock(),
          "params": params, "requested_model_id": "big", "ModelVariant": ModelVariant,
          "CP": SimpleNamespace(brand="mock"), "demo": False,
