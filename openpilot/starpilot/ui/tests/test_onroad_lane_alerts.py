@@ -52,3 +52,31 @@ def test_existing_alerts_and_actual_steering_state_take_priority():
 @pytest.mark.parametrize('state,direction', [('off', 'left'), ('preLaneChange', 'none')])
 def test_no_notice_for_blinkers_without_lane_change_intent(state, direction):
   assert lateral_lane_alert(OnroadAlert(), **sources(state, direction)) == OnroadAlert()
+
+
+def turn_sources(*, left=True, speed=4.0, prob=1.0, lat=True):
+  from openpilot.cereal import log
+  desire = [0.0] * 8
+  desire[log.Desire.turnLeft if left else log.Desire.turnRight] = prob
+  return {'car': NS(canValid=True, canTimeout=False, standstill=speed == 0, gearShifter='drive', vEgo=speed,
+                    leftBlinker=left, rightBlinker=not left),
+          'control': NS(latActive=lat), 'model': NS(meta=NS(desireState=desire))}
+
+
+@pytest.mark.parametrize('left,text', [(True, 'Turning Left'), (False, 'Turning Right')])
+def test_turn_guidance_shows_turning_notice(left, text):
+  from openpilot.starpilot.ui.onroad_lane_alerts import turn_intent_alert
+  alert = turn_intent_alert(OnroadAlert(), **turn_sources(left=left))
+  assert (alert.size, alert.text1) == (AlertSize.SMALL, text)
+
+
+@pytest.mark.parametrize('change', [{'speed': 12.0}, {'speed': 0}, {'prob': 0.2}, {'lat': False}])
+def test_turning_notice_only_while_turn_guidance_is_in_use(change):
+  from openpilot.starpilot.ui.onroad_lane_alerts import turn_intent_alert
+  assert turn_intent_alert(OnroadAlert(), **turn_sources(**change)) == OnroadAlert()
+
+
+def test_turning_notice_never_replaces_an_existing_alert():
+  from openpilot.starpilot.ui.onroad_lane_alerts import turn_intent_alert
+  existing = OnroadAlert(AlertSize.FULL, 'TAKE CONTROL', 'Communication Issue', True)
+  assert turn_intent_alert(existing, **turn_sources()) is existing

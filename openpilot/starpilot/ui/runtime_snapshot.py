@@ -47,7 +47,7 @@ from openpilot.starpilot.ui.onroad_state import (AlertSize, BorderSignals, Obser
 from openpilot.starpilot.ui.unified_speed_presentation import displayed_adjusted_limit_mps, displayed_limit_mps, positive, retaining_limit
 from openpilot.starpilot.ui.onroad_stopped_timer import StoppedTimer
 from openpilot.starpilot.speed_limits.vision.stop_observation import StopConfirmation, read_stop_evidence
-from openpilot.starpilot.ui.onroad_lane_alerts import lateral_lane_alert
+from openpilot.starpilot.ui.onroad_lane_alerts import lateral_lane_alert, turn_intent_alert
 from openpilot.starpilot.ui.onroad_camera import ReverseDriverCamera
 from openpilot.starpilot.ui.navigation_state import navigation_display, official_navigation_display
 from openpilot.starpilot.ui.settings_state import Destination, DestinationAvailability, SettingsState
@@ -461,6 +461,7 @@ class RuntimeSnapshotAdapter:
     native_alert = current_alert(sm, now_ns, after_frame=after) if started else OnroadAlert()
     native_alert = lateral_lane_alert(native_alert, car=display_car, control=display_control,
                                       model=display_model, selfdrive=display_selfdrive)
+    native_alert = turn_intent_alert(native_alert, car=display_car, control=display_control, model=display_model)
     alert = self._personality_notice.update(
       display_selfdrive, drive_frame=after, event_ns=int(sm.logMonoTime['selfdriveState']) if display_selfdrive is not None else 0,
       now_ns=now_ns, native_alert=native_alert, hide=self._appearance_value.hide_personality_alerts)
