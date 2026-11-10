@@ -208,3 +208,29 @@ class TestStopDetector(unittest.TestCase):
 
 if __name__ == '__main__':
   unittest.main()
+
+
+class StopPointLeadTests(unittest.TestCase):
+  """A radar lead at or past the model's stop point is consistent with the stop and must not block it."""
+
+  def detected_after(self, lead, ticks=40, horizon=80.0, speed=16.0):
+    detector = StopLightDetector()
+    observation = None
+    for tick in range(ticks):
+      observation = detector.step(frame(tick, horizon=horizon, speed=speed, lead=lead, model_time=7.7))
+    return bool(observation.light_detected)
+
+  def test_car_stopping_at_the_stop_sign_does_not_block_detection(self):
+    stopping = StopLead(True, 82.0, 0.5, True, 0.85, True)  # radar car crawling at the model's stop point
+    self.assertTrue(self.detected_after(stopping))
+
+  def test_lead_beyond_the_stop_point_does_not_block_detection(self):
+    across = StopLead(True, 100.0, 12.0, True, 0.6, True)  # car already through the intersection
+    self.assertTrue(self.detected_after(across))
+
+  def test_moving_lead_short_of_the_stop_point_still_defers_to_following(self):
+    following = StopLead(True, 40.0, 12.0, True, 0.9, True)
+    self.assertFalse(self.detected_after(following))
+
+  def test_no_lead_baseline_detects(self):
+    self.assertTrue(self.detected_after(StopLead(False)))

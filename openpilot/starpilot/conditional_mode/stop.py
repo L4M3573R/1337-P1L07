@@ -26,6 +26,9 @@ MPH_TO_MPS = 0.44704
 MPS_TO_MPH = 1.0 / MPH_TO_MPS
 FROZEN_RAW_STOP_DISTANCE_M = 50.0  # CRUISING_SPEED * PLANNER_TIME.
 STOP_MODEL_RELEASE_MARGIN_M = 4.0  # Existing model-stop off margin.
+STOP_POINT_MARGIN_M = 8.0  # A lead this close to the model's stop point is at that stop.
+STOP_POINT_MARGIN_FRACTION = 0.15
+STOP_POINT_LEAD_MAX_MPS = 4.5  # Matches the existing slow approach-handoff lead speed.
 
 
 @dataclass(frozen=True)
@@ -322,6 +325,14 @@ class StopLightDetector:
     self.model_detected = model_stopping
 
     relevant = bool(lead.present and distance is not None and distance < threshold_m + 15.0)
+    stop_consistent = False
+    if relevant and model_stopping and lead_speed is not None:
+      # A lead stopping where the model stops (a car at the stop sign), or anything past the
+      # model's stop point, is consistent with the stop rather than a reason to defer to
+      # following. Radar-backed leads never qualified for the vision approach handoff below.
+      margin = max(STOP_POINT_MARGIN_M, STOP_POINT_MARGIN_FRACTION * distance)
+      at_stop_point = abs(distance - horizon) <= margin and lead_speed < STOP_POINT_LEAD_MAX_MPS
+      stop_consistent = at_stop_point or distance > horizon + margin
     if lead.present:
       assert distance is not None and lead_speed is not None and lead_prob is not None
       trackable_approach = bool(relevant and not lead.radar and lead_prob >= 0.9 and lead_speed < 4.5 and not lead.tracked)
@@ -333,7 +344,7 @@ class StopLightDetector:
       self.approach_hold_until_s = now + 1.0
     approach_latched = now < self.approach_hold_until_s and trackable_approach
     handoff = relevant and not lead.tracked and ((self.light_detected and handoff_speed) or approach_latched)
-    if handoff:
+    if handoff or stop_consistent:
       lead_cleared = True
     else:
       self.lead_clear_filter.update(not relevant)
@@ -344,7 +355,7 @@ class StopLightDetector:
     strong = horizon < max(threshold_m - 10.0, 0.0)
     if filtered and (model_stopped or strong):
       self.light_hold_until_s = now + 4.0
-    hold_context = not relevant or trackable_approach
+    hold_context = not relevant or trackable_approach or stop_consistent
     self._commit(frame, horizon, model_stopping, filtered or handoff or approach_latched, dt)
     self.light_detected = bool(self.committed or active or (hold_context and now < self.light_hold_until_s))
     hold, reason = self._standstill(frame, model_stopped)
