@@ -390,7 +390,13 @@ class LongitudinalPlanner:
     if preap_acceleration_cap is not None:
       selected_acceleration = (preap_acceleration_cap if selected_acceleration is None else
                                min(selected_acceleration, preap_acceleration_cap))
-    self.a_cruise = get_cruise_accel(sm['selfdriveState'].experimentalMode, v_cruise, v_ego,
+    # Pulse and Glide owns the cruise acceleration (steady pulse, zero-torque glide); the set
+    # speed itself is unchanged for every other consumer, and leads/stops still win the min below.
+    cruise_speed_for_accel = v_cruise
+    if (coast_plan is not None and coast_plan.accel_target is not None and not coast_plan.force_decel and
+        not sm['controlsState'].forceDecel and math.isfinite(coast_plan.accel_target)):
+      cruise_speed_for_accel = v_ego + coast_plan.accel_target
+    self.a_cruise = get_cruise_accel(sm['selfdriveState'].experimentalMode, cruise_speed_for_accel, v_ego,
                                      self.a_cruise, steer_angle_without_offset, self.CP, self.dt,
                                      accel_coast, self.allow_throttle, cruise_profile,
                                      base_brake_floor=global_floor, selected_acceleration_max=selected_acceleration, faster_takeoffs=faster_takeoffs,

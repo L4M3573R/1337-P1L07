@@ -1,6 +1,41 @@
 import math
 from dataclasses import dataclass
 
+G = 9.81
+# Pulse and Glide. The glide commands the car's natural coasting deceleration so the
+# powertrain makes ~zero torque (no engine, no regen); commanding less deceleration than
+# that makes the powertrain push, which at highway speed keeps the engine running.
+# Natural coast ~= -(c0 + c2 * v^2) on a flat road: rolling + driveline loss plus aero.
+# Calibrated against Elantra Hybrid lift-off coasting (-0.19 m/s^2 at 35 mph, -0.27 at 65)
+# and generic passenger-car physics.
+GLIDE_C0 = 0.12
+GLIDE_C2 = 0.00018
+GLIDE_FLOOR_MARGIN = 0.05
+# A glide never carries the car past the set speed (downhill): hold it at the set speed instead.
+GLIDE_SET_SPEED_GAIN = 1.0
+# The pulse is a steady, moderate acceleration through the band (engine at an efficient load),
+# easing only just below the set speed so it never overshoots.
+PULSE_ACCEL_BP = [10.0, 20.0, 30.0]
+PULSE_ACCEL_V = [0.8, 0.6, 0.45]
+PULSE_ARRIVAL_GAIN = 1.5
+# Far below the band (after slowing for traffic), ordinary cruise owns the return.
+PULSE_ENTRY_MARGIN = 1.0
+
+
+def glide_accel(speed_mps, pitch):
+  grade = G * math.sin(pitch) if type(pitch) in (int, float) and math.isfinite(pitch) else 0.0
+  return -(GLIDE_C0 + GLIDE_C2 * speed_mps ** 2) - grade
+
+
+def pulse_accel(speed_mps):
+  bp, values = PULSE_ACCEL_BP, PULSE_ACCEL_V
+  if speed_mps <= bp[0]:
+    return values[0]
+  for i in range(1, len(bp)):
+    if speed_mps <= bp[i]:
+      return values[i - 1] + (values[i] - values[i - 1]) * (speed_mps - bp[i - 1]) / (bp[i] - bp[i - 1])
+  return values[-1]
+
 
 @dataclass(frozen=True)
 class CoastPlan:
@@ -8,6 +43,9 @@ class CoastPlan:
   brake_floor: float | None = None
   speed_ceiling_mps: float | None = None
   pulse_coasting: bool = False
+  # Cruise acceleration target while Pulse and Glide owns the cruise speed (pulse or glide).
+  accel_target: float | None = None
+  pulsing: bool = False
 
 
 class CoastOwner:
@@ -40,7 +78,8 @@ class CoastOwner:
     self.force_coast &= not (gas or brake)
     if not active:
       return CoastPlan()
-    ceiling = None
+    accel_target = None
+    pulsing = False
     if not self.pulse_glide:
       self.coasting = False
       self.hill_paused = False
@@ -52,18 +91,24 @@ class CoastOwner:
         elif abs(pitch) >= math.radians(3.0):
           self.hill_paused = True
       lower = target_mps - delta_mps
-      if (self.hill_paused or target_mps <= 5.0 or lower < 3.0 or delta_mps <= 0 or
-          lead_relevant or stop_context):
+      available = not (self.hill_paused or target_mps <= 5.0 or lower < 3.0 or delta_mps <= 0 or
+                       lead_relevant or stop_context)
+      if not available:
         self.coasting = False
       elif self.coasting:
         if speed_mps <= lower + 0.25:
           self.coasting = False
       elif speed_mps >= target_mps - 0.25:
         self.coasting = True
-      if self.coasting:
-        ceiling = lower
-    return CoastPlan(self.force_coast, -0.6 if self.force_coast else -0.03 if self.coasting else None,
-                     ceiling, self.coasting)
+      if available and self.coasting:
+        accel_target = min(glide_accel(speed_mps, pitch), GLIDE_SET_SPEED_GAIN * (target_mps - speed_mps))
+      elif available and speed_mps >= lower - PULSE_ENTRY_MARGIN:
+        pulsing = True
+        accel_target = min(pulse_accel(speed_mps), PULSE_ARRIVAL_GAIN * max(0.0, target_mps - speed_mps))
+    if self.force_coast:
+      return CoastPlan(True, -0.6, None, self.coasting)
+    brake_floor = accel_target - GLIDE_FLOOR_MARGIN if self.coasting and accel_target is not None else None
+    return CoastPlan(False, brake_floor, None, self.coasting, accel_target, pulsing)
 
 
 class CoastRuntime:
