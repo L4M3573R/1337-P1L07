@@ -289,7 +289,8 @@ class CarInterface(CarInterfaceBase):
     if DBC[ret.carFingerprint].get(Bus.radar) == HYUNDAI_G90_RADAR_DBC:
       ret.radarUnavailable = not all(fingerprint[1].get(addr) == 8 for addr in range(0x500, 0x520))
     elif blended_track_radar(ret) or DBC[ret.carFingerprint].get(Bus.radar) == HYUNDAI_GV70_RADAR_DBC:
-      ret.radarUnavailable = not all(fingerprint[0].get(addr) == 32 for addr in range(0x210, 0x220))
+      track_bus = radar_bus(ret) if candidate == CAR.HYUNDAI_ELANTRA_HEV_2024 else 0
+      ret.radarUnavailable = not all(fingerprint[track_bus].get(addr) == 32 for addr in range(0x210, 0x220))
     elif DBC[ret.carFingerprint].get(Bus.radar) == HYUNDAI_MRREVO14F_RADAR_DBC:
       ret.radarUnavailable = fingerprint[1].get(KONA_NON_SCC_FCA_RADAR_ADDR) != 8
     elif DBC[ret.carFingerprint].get(Bus.radar) == HYUNDAI_MRR30_RADAR_DBC:

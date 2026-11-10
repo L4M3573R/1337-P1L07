@@ -138,6 +138,9 @@ def radar_bus(CP) -> int:
   # its LKA/HDA-II wiring and the other MRR35 cars expose it on bus 0.
   if CP.carFingerprint == CAR.HYUNDAI_IONIQ_6 and CP.flags & HyundaiFlags.CANFD_CAMERA_SCC:
     return offset + 1
+  # Elantra Hybrid 2024 camera-SCC wiring exposes the front radar's track frames on bus 1.
+  if CP.carFingerprint == CAR.HYUNDAI_ELANTRA_HEV_2024:
+    return 1
   return offset
 
 # POC for parsing corner radars: https://github.com/commaai/openpilot/pull/24221/

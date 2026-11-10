@@ -322,6 +322,8 @@ class CAR(Platforms):
       HyundaiCarDocs("Hyundai i30 Hybrid 2024", car_parts=CarParts.common([CarHarness.hyundai_k])),
     ],
     HYUNDAI_ELANTRA_HEV_2021.specs,
+    # The front radar's 16 CAN-FD track frames (0x210-0x21F, 20 Hz) reach the harness on bus 1.
+    dbc_dict={Bus.pt: "hyundai_can_refresh_generated", Bus.radar: "hyundai_radar_210_21f_generated"},
     flags=HyundaiFlags.CHECKSUM_CRC8 | HyundaiFlags.CAMERA_SCC | HyundaiFlags.HYBRID,
   )
   HYUNDAI_GENESIS = HyundaiPlatformConfig(
