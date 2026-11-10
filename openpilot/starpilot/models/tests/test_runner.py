@@ -237,5 +237,50 @@ class TestCatalogRunner(unittest.TestCase):
         state.assert_not_called()
 
 
+  def test_early_hash_is_reused_only_for_the_unchanged_file(self):
+    from openpilot.starpilot.models.receipt import artifact_digest, artifact_identity
+    from openpilot.starpilot.models.runner import ArtifactPrefetch
+
+    with tempfile.TemporaryDirectory() as temporary:
+      root = Path(temporary)
+      artifact = root / "model.pkl"
+      artifact.write_bytes(b"trusted compiled artifact")
+      digest = artifact_digest(artifact, artifact_identity(artifact))
+      prefetch = ArtifactPrefetch(artifact)
+      self.assertEqual(prefetch.prepared(artifact, artifact_identity(artifact)).sha256, digest)
+      self.assertIsNone(prefetch.prepared(root / "other.pkl", artifact_identity(artifact)))
+      reports = []
+      with patch("openpilot.starpilot.models.runner.CatalogModelState"), \
+           patch("openpilot.starpilot.models.runner.prepare_artifact") as rehash:
+        loaded, prepared = load_verified_model(8, 8, artifact, "v11", False, "sc23", digest, root=root,
+                                               prefetch=prefetch, report=reports.append)
+        rehash.assert_not_called()  # the early digest was used
+      self.assertEqual(prepared.sha256, digest)
+      self.assertIn("hashed early", reports[0])
+
+      artifact.write_bytes(b"changed artifact")  # new identity: the early digest must not be trusted
+      self.assertIsNone(prefetch.prepared(artifact, artifact_identity(artifact)))
+      with patch("openpilot.starpilot.models.runner.CatalogModelState") as state:
+        with self.assertRaisesRegex(ValueError, "changed before loading"):
+          load_verified_model(8, 8, artifact, "v11", False, "sc23", digest, root=root, prefetch=prefetch)
+        state.assert_not_called()
+
+  def test_early_hash_of_a_tampered_file_is_rejected(self):
+    from openpilot.starpilot.models.receipt import artifact_digest, artifact_identity
+    from openpilot.starpilot.models.runner import ArtifactPrefetch
+
+    with tempfile.TemporaryDirectory() as temporary:
+      root = Path(temporary)
+      artifact = root / "model.pkl"
+      artifact.write_bytes(b"trusted compiled artifact")
+      digest = artifact_digest(artifact, artifact_identity(artifact))
+      artifact.write_bytes(b"tampered before boot")
+      prefetch = ArtifactPrefetch(artifact)
+      with patch("openpilot.starpilot.models.runner.CatalogModelState") as state:
+        with self.assertRaisesRegex(ValueError, "changed before loading"):
+          load_verified_model(8, 8, artifact, "v11", False, "sc23", digest, root=root, prefetch=prefetch)
+        state.assert_not_called()
+
+
 if __name__ == "__main__":
   unittest.main()

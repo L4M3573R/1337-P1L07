@@ -4,6 +4,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import threading
+import time
 from typing import Any
 import weakref
 
@@ -18,6 +20,39 @@ from openpilot.starpilot.models.parser import Parser
 from openpilot.starpilot.models.catalog import ARTIFACT_ABI, COMPILER_REVISION
 from openpilot.starpilot.models.receipt import PreparedArtifact, artifact_identity, prepare_artifact
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
+
+PREFETCH_WAIT_S = 30.0
+
+
+class ArtifactPrefetch:
+  """Hash an installed artifact on a background thread while modeld waits for cameras and CarParams.
+
+  Hashing reads the whole file, so it also leaves it in the page cache for the load. The digest is
+  reused only if the file identity (device, inode, size, mtime, ctime) is unchanged when loading.
+  """
+
+  def __init__(self, path: Path):
+    self.path = Path(path)
+    self.seconds: float | None = None
+    self._result: PreparedArtifact | None = None
+    self._done = threading.Event()
+    threading.Thread(target=self._run, name=f"prefetch-{self.path.name}", daemon=True).start()
+
+  def _run(self) -> None:
+    start = time.monotonic()
+    try:
+      self._result = prepare_artifact(self.path, artifact_identity(self.path))
+    except Exception:
+      self._result = None
+    finally:
+      self.seconds = time.monotonic() - start
+      self._done.set()
+
+  def prepared(self, path: Path, identity: tuple[int, int, int, int, int], timeout: float = PREFETCH_WAIT_S) -> PreparedArtifact | None:
+    if Path(path) != self.path or not self._done.wait(timeout):
+      return None
+    result = self._result
+    return result if result is not None and result.identity == identity else None
 
 
 SUPPORTED_VERSIONS = frozenset(f"v{version}" for version in range(8, 17))
@@ -46,23 +81,37 @@ class SharedCameraWarp:
 
 def load_verified_model(cam_w: int, cam_h: int, artifact_path: Path, behavior_version: str, chestnut: bool,
                         model_id: str, expected_sha256: str | None, *, root: Path | None = None,
-                        coherent_warp: Callable[[Any], None] | None = None) -> tuple["CatalogModelState", PreparedArtifact]:
+                        coherent_warp: Callable[[Any], None] | None = None,
+                        prefetch: ArtifactPrefetch | None = None,
+                        report: Callable[[str], None] | None = None) -> tuple["CatalogModelState", PreparedArtifact]:
   from openpilot.starpilot.models.manager import ROOT, state_lock
 
   if expected_sha256 is None:
     raise ValueError("selected catalog model has no verified digest")
   with state_lock(ROOT if root is None else root):
+    t0 = time.monotonic()
     identity = artifact_identity(artifact_path)
-    prepared = prepare_artifact(artifact_path, identity)
+    prepared = prefetch.prepared(artifact_path, identity) if prefetch is not None else None
+    reused = prepared is not None
+    if prepared is None:
+      prepared = prepare_artifact(artifact_path, identity)
     if prepared.sha256 != expected_sha256:
       raise ValueError("selected catalog model changed before loading")
+    t1 = time.monotonic()
     model = CatalogModelState(cam_w, cam_h, artifact_path, behavior_version, chestnut)
     if coherent_warp is not None:
       model.move_warp_output(coherent_warp)
+    t2 = time.monotonic()
     model.warmup()
+    t3 = time.monotonic()
     if artifact_identity(artifact_path) != identity:
       raise ValueError("selected catalog model changed while loading")
     model.model_id = model_id
+    if report is not None:
+      early = f", hashed early in {prefetch.seconds:.2f}s" if reused and prefetch.seconds is not None else ""
+      variant = 'chestnut' if chestnut else 'small'
+      phases = f"verify {t1 - t0:.2f}s{early}, load {t2 - t1:.2f}s, warmup {t3 - t2:.2f}s"
+      report(f"model load phases {model_id} ({variant}): {phases}")
     return model, prepared
 
 

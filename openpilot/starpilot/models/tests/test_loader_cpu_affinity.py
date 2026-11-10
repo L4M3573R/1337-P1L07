@@ -32,7 +32,8 @@ def loader(source, *, demo=False, bundled=False, failure=None):
                    'cam_w': 1928, 'cam_h': 1208, 'big_path': Path('/verified.pkl'),
                    'load_verified_model': record('verified', (model, 'prepared')), 'ModelState': record('bundled', model),
                    'receipt_owner': SimpleNamespace(prepare=record('receipt', 'prepared')),
-                   'big_artifact_identity': object(), 'cloudlog': SimpleNamespace(exception=record('error'))}
+                   'big_artifact_identity': object(), 'big_prefetch': None, 'time': __import__('time'),
+                   'cloudlog': SimpleNamespace(exception=record('error'), warning=lambda *args, **kwargs: None)}
   outer = ast.parse('def outer():\n big_model = None\n big_prepared = None\n return load_big, lambda: (big_model, big_prepared)\n').body[0]
   outer.body.insert(2, function)
   module = ast.fix_missing_locations(ast.Module(body=[outer], type_ignores=[]))

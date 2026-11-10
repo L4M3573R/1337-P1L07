@@ -119,6 +119,11 @@ def execute(statements, env):
   env.setdefault("recovery_small_only", False)
   env.setdefault("coherent_warp", None)
   env.setdefault("set_core_affinity", Mock())
+  # Early artifact hashing only reuses digests for unchanged files; these startup tests verify ordering.
+  env.setdefault("ArtifactPrefetch", lambda path: None)
+  env.setdefault("big_prefetch", None)
+  env.setdefault("small_prefetch", None)
+  env.setdefault("time", __import__("time"))
   from openpilot.starpilot.models.recovery import STARTUP_FALLBACK_EXIT
   env.setdefault("STARTUP_FALLBACK_EXIT", STARTUP_FALLBACK_EXIT)
   exec(compile(ast.fix_missing_locations(ast.Module(body=statements, type_ignores=[])), str(MODEL_SOURCE), "exec"), env)
@@ -204,6 +209,8 @@ def test_big_worker_waits_before_load_and_failure_requests_fresh_small_process(c
     return SimpleNamespace(chestnut=chestnut, model_id="big" if chestnut else "small", warmup=Mock())
 
   def verified(width, height, path, version, chestnut, model_id, sha, **kwargs):
+    # Early hashing only adds the optional prefetch and phase-timing report to the verified loader.
+    assert kwargs.pop("prefetch", None) is None and callable(kwargs.pop("report", print))
     assert kwargs == ({} if chestnut else {"coherent_warp": None})
     return state(width, height, chestnut), "prepared-" + model_id
 

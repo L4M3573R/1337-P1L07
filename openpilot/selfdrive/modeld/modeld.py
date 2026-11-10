@@ -53,7 +53,7 @@ from openpilot.starpilot.models.startup import report_load_timeout, wait_for_che
 from openpilot.starpilot.models.recovery import STARTUP_FALLBACK_EXIT
 from openpilot.starpilot.navigation.intent import TurnIntent, matching_turn_signal
 from openpilot.starpilot.models.catalog import BUNDLED_CURRENT, BY_ID, DEFAULT_SMALL, DEFAULT_SMALL_SHA256
-from openpilot.starpilot.models.runner import CatalogModelState, load_verified_model
+from openpilot.starpilot.models.runner import ArtifactPrefetch, CatalogModelState, load_verified_model
 from openpilot.starpilot.models import jetlink_adapter
 import uuid
 from openpilot.selfdrive.controls.lib.drive_helpers import get_accel_from_plan, should_stop, smooth_value, get_curvature_from_plan
@@ -329,6 +329,11 @@ def main(demo=False):
 
   gc.disable()
 
+  # Verify (hash) the selected artifacts while waiting for cameras and CarParams below; the loader
+  # reuses a digest only for an unchanged file and the hash leaves the file in the page cache.
+  big_prefetch = ArtifactPrefetch(selection.big_path) if CHESTNUT and selection.big_path is not None else None
+  small_prefetch = ArtifactPrefetch(selection.small_path) if selection.small_path is not None else None
+
   # visionipc clients
   while True:
     available_streams = VisionIpcClient.available_streams("camerad", block=False)
@@ -375,7 +380,8 @@ def main(demo=False):
       try:
         selected, prepared = load_verified_model(cam_w, cam_h,
                                                  selection.small_path, selection.small_version, False,
-                                                 selection.small_id, selection.small_sha256, coherent_warp=coherent_warp)
+                                                 selection.small_id, selection.small_sha256, coherent_warp=coherent_warp,
+                                                 prefetch=small_prefetch, report=cloudlog.warning)
         return selected, prepared, False
       except Exception:
         cloudlog.exception("selected small model load failed, using shipped RDFv4")
@@ -401,13 +407,17 @@ def main(demo=False):
     def load_big():
       nonlocal big_model, big_prepared
       try:
+        t_wait = time.monotonic()
         wait_for_chestnut()
+        t_present = time.monotonic()
         if not demo:
           wait_for_chestnut_power(CP, timeout=min(30., BIG_MODEL_TIMEOUT / 2))
+        cloudlog.warning(f"chestnut ready: present after {t_present - t_wait:.2f}s, power after {time.monotonic() - t_present:.2f}s")
         set_core_affinity([7])
         if selection.big_path is not None:
           m, prepared = load_verified_model(cam_w, cam_h,
-                                            big_path, selection.big_version, True, selection.big_id, selection.big_sha256)
+                                            big_path, selection.big_version, True, selection.big_id, selection.big_sha256,
+                                            prefetch=big_prefetch, report=cloudlog.warning)
         else:
           m = ModelState(cam_w, cam_h, True)
           m.warmup()
