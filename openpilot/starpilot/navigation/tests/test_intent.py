@@ -138,6 +138,33 @@ def test_turn_stop_hold_reuses_planner_stop_until_standstill(sm):
   assert sample() == log.Desire.none
 
 
+def test_signal_turn_guidance_resumes_after_stopping_at_the_turn(sm):
+  """Blinker-only turn: slow for the stop, wait stopped (planner says stop), then pull away into the turn."""
+  from openpilot.starpilot.navigation.intent import TurnIntent
+  owner = TurnIntent()
+  owner.guidance = NS(sample=lambda *_, **__: NS(turn_signal_guidance=True))
+  owner.steering_capable = True
+  sm['starpilotNavigation'].navigation.enabled = False  # no route: blinker-only guidance
+  sm['carControl'].longActive = False  # Always On Lateral without cruise
+  sm['longitudinalPlan'] = NS(modelMonoTime=NOW, shouldStop=False)
+  sm.logMonoTime['longitudinalPlan'] = NOW
+  sm.valid['longitudinalPlan'] = sm.alive['longitudinalPlan'] = True
+  cs, plan = sm['carState'], sm['longitudinalPlan']
+
+  def sample():
+    return owner.select(sm, NOW, log.Desire.none, supported=True, model_stop=False)
+
+  assert sample() == log.Desire.turnRight
+  plan.shouldStop = True  # slowing for the stop line: no turn guidance yet
+  assert sample() == log.Desire.none
+  cs.standstill, cs.vEgo = True, 0.  # waiting to turn; planner still says stop
+  assert sample() == log.Desire.none
+  cs.standstill, cs.vEgo, plan.shouldStop = False, 1.5, False  # pulling away into the turn
+  assert sample() == log.Desire.turnRight
+  plan.shouldStop = True  # a new stop while moving holds again
+  assert sample() == log.Desire.none
+
+
 def test_approaching_turn_does_not_start_or_replace_lane_change(sm):
   from openpilot.selfdrive.controls.lib.desire_helper import DesireHelper
   from openpilot.starpilot.navigation.intent import matching_turn_signal

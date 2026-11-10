@@ -141,9 +141,11 @@ class TurnIntent:
       signaling = bool(cs.leftBlinker or cs.rightBlinker)
       policy = self.guidance.sample(now_ns, signaling=signaling,
                                     maneuver_active=current_desire != log.Desire.none)
+      # Hold while the planner is stopping short of the turn; release once stopped so pulling
+      # away into the turn gets guidance (a stopped car's planner keeps reporting shouldStop).
       if not signaling or cs.standstill:
         self.signal_stop_hold = False
-      if model_stop or plan.shouldStop:
+      elif model_stop or plan.shouldStop:
         self.signal_stop_hold = True
       if (not supported or not self.steering_capable or not policy.turn_signal_guidance or
           current_desire != log.Desire.none or self.signal_stop_hold or not cc.latActive or
