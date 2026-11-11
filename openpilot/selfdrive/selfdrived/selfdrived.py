@@ -1792,6 +1792,7 @@ class SelfdriveD:
     from openpilot.starpilot.car.toyota.legacy_lateral import below_engage_lateral_allowed as toyota_below_engage_lateral_allowed
     retained_dm_lateral, lateral_events = lateral_event_context(self, CS, intent, native, now_ns, ordinary_lag)
     reverse_pause = known_reverse_pause(CS, getattr(self, 'car_state_samples', ()))
+    pause_brake_mps = self.aol_settings.pause_brake_mps if self.aol_settings is not None else 0.0
     if reverse_pause:
       lateral_events = [event for event in lateral_events if event not in (EventName.wrongGear, EventName.reverseGear)]
     return decide_axes(
@@ -1833,12 +1834,12 @@ class SelfdriveD:
                       not retained_dm_lateral and (self.sm['driverMonitoringState'].lockout or
                         self.sm['driverMonitoringState'].alwaysOnLockout or
                         self.sm['driverMonitoringState'].alertLevel == AlertLevel.three)),
-      pause_brake_mps=self.aol_settings.pause_brake_mps if self.aol_settings is not None else 0.0,
+      pause_brake_mps=pause_brake_mps,
       gear_pause=reverse_pause,
       lateral_inhibit=self.aol_dm_lateral_inhibit or sng_standstill_lateral_inhibit(self.CP, CS) or
         volkswagen_lateral_output_inhibited(self.CP, CS) or any(
-        sample.steerFaultTemporary or sample.brakePressed and not sample.standstill and
-        sample.vEgo < (self.aol_settings.pause_brake_mps if self.aol_settings is not None else 0.0)
+        sample.steerFaultTemporary or pause_brake_mps > 0 and sample.brakePressed and not sample.standstill and
+        sample.vEgo < pause_brake_mps
         for sample, _ in getattr(self, 'car_state_samples', ())))
 
   def cold_gm_park_readiness(self, CS, intent, now_ns):
@@ -1884,7 +1885,10 @@ class SelfdriveD:
       ford_native_accepts_cp(self.CP, int(car.CarParams.SafetyModel.ford), self.CP.safetyConfigs[-1].safetyParam))
     # Driver steering does not invalidate a still-current native LAT grant.
     from opendbc.car.volkswagen.long_aol import qualified as volkswagen_long_qualified
-    steering_override_allowed = (ordinary_ford or self.CP.brand == 'hyundai' or
+    from openpilot.starpilot.car.toyota.aol import qualified as toyota_aol_qualified
+    toyota_longitudinal = bool(self.CP.brand == 'toyota' and self.CP.openpilotLongitudinalControl and
+                              toyota_aol_qualified(self.CP, marked_only=True))
+    steering_override_allowed = (ordinary_ford or toyota_longitudinal or self.CP.brand == 'hyundai' or
                                  volkswagen_long_qualified(self.CP, marked_only=True))
     proof = getattr(self, 'aol_published_input_proof', None)
     prior = getattr(self, 'aol_published_input_native', None)
@@ -1922,7 +1926,6 @@ class SelfdriveD:
     if len(owners) != 1:
       return False
     from openpilot.starpilot.car.gm.aol import native_accepts_cp as gm_native_accepts_cp
-    from openpilot.starpilot.car.toyota.aol import qualified as toyota_aol_qualified
     from openpilot.starpilot.car.hyundai.aol import early_native_long_withdrawal_supported
     # Pandad reads health before its final native permission read. A GM driver
     # withdrawal between those reads legitimately leaves the earlier health
@@ -1937,7 +1940,7 @@ class SelfdriveD:
     # The exact vehicle policies and all proof/health checks above remain required.
     return bool(ordinary_ford or gm_native_accepts_cp(self.CP, native.safetyModel, native.safetyParam) or
                 early_native_long_withdrawal_supported(self.CP) or
-                toyota_aol_qualified(self.CP, marked_only=True) or
+                toyota_longitudinal or
                 not native.pandaInventory[owners[0]].controlsAllowed and
                 not self.sm['pandaStates'][owners[0]].controlsAllowed)
 

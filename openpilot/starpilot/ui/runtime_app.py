@@ -43,7 +43,7 @@ from openpilot.starpilot.ui.pip_owner import FORMAT_PREFIX as PIP_FORMAT_PREFIX,
 from openpilot.starpilot.ui.pip_preferences import read_pip
 from openpilot.starpilot.ui.pip_render import PiPRenderer
 from openpilot.starpilot.ui.pip_sidecam import Signals, Rect
-from openpilot.starpilot.ui.onroad_customization import CAMERA_WIDGETS, fit_to_road, placement, widget_size
+from openpilot.starpilot.ui.onroad_customization import CAMERA_WIDGETS, fit_road_snapshot, placement, widget_size
 from openpilot.starpilot.ui.layout_preview_sidebar import SIDEBAR_WIDTH
 from openpilot.starpilot.ui.pip_warning import PiPWarningSource
 from openpilot.starpilot.spot_monitor.preferences import read_preferences as read_vasm_preferences
@@ -76,6 +76,7 @@ from openpilot.starpilot.ui.onroad_dm import DriverMonitorLayer
 from openpilot.starpilot.favorites.owner import FavoritesOwner
 from openpilot.starpilot.controllers.cruise_action import CruiseActionPublisher, ui_authority as cruise_action_authority
 from openpilot.starpilot.controllers.wheel_actions import WheelConsumer
+from openpilot.starpilot.ui.wheel_input import onroad_action_context
 from openpilot.starpilot.system.starport.projection_bookmark import BookmarkReceiver
 from openpilot.starpilot.system.starport.projection_slc_action import SlcActionReceiver
 from openpilot.starpilot.controllers.mode_actions import ModeActionPublisher, producer_available, authority as mode_action_authority
@@ -319,17 +320,17 @@ class StarShellSession:
     if getattr(self, "_projection_tap", False):
       return bool(ui_state.started and display_message(ui_state.sm, 'carState', time.monotonic_ns(),
                                                        after_frame=ui_state.started_frame) is not None)
-    if self._mode != ShellMode.ONROAD:
+    if not onroad_action_context(self, native_device, ui_state):
       return False
     state = self.snapshot(ShellMode.ONROAD).onroad
     camera_allowed = (self.profile != Profile.COMPACT or not state.reversing or
                       state.appearance.camera_view in (CameraViewChoice.NONE, CameraViewChoice.DRIVER))
     alert_allowed = state.alert.size == AlertSize.NONE or allow_personality_notice and is_personality_notice(state.alert)
-    return bool(self._mode == ShellMode.ONROAD and state.camera_available and alert_allowed and camera_allowed)
+    return bool(state.camera_available and alert_allowed and camera_allowed)
 
   def _bookmark_authority(self) -> bool:
     if (getattr(ui_state, "replay_clock", None) is not None or
-        self._mode != ShellMode.ONROAD or not ui_state.started):
+        not onroad_action_context(self, native_device, ui_state) or not ui_state.started):
       return False
     car_state = display_message(ui_state.sm, 'carState', time.monotonic_ns(), after_frame=ui_state.started_frame)
     return bool(car_state is not None and car_state.canValid and not car_state.canTimeout)
@@ -580,7 +581,8 @@ class StarShellSession:
           state = self._live_slc_message(now_ns)
           if state is not None and not state.hasPending:
             self.slc_actions.dispatch(SlcUiRequest(SlcActionKind.ADOPT, str(state.sessionId), int(state.decisionId),
-                                                  int(state.presentationId), float(state.speedLimit)))
+                                                  int(state.presentationId), float(state.speedLimit)),
+                                      wheel_observed_ns=command.observed_ns)
         elif command.action in (11, 12, 13):
           slot = self.favorites_owner.snapshot().slots[command.action - 11]
           if slot.available and slot.request is not None:
@@ -1290,10 +1292,11 @@ class StarShellSession:
         not any(p.ignitionLine or p.ignitionCan for p in pandas)):
       return None
     after = ui.started_frame
-    car = current_message(ui.sm, "carState", now_ns, after_frame=after)
-    control = current_message(ui.sm, "carControl", now_ns, after_frame=after)
-    controls = current_message(ui.sm, "controlsState", now_ns, after_frame=after)
-    selfdrive = current_message(ui.sm, "selfdriveState", now_ns, after_frame=after)
+    # plannerd revalidates actions.
+    car = display_message(ui.sm, "carState", now_ns, after_frame=after)
+    control = display_message(ui.sm, "carControl", now_ns, after_frame=after)
+    controls = display_message(ui.sm, "controlsState", now_ns, after_frame=after)
+    selfdrive = display_message(ui.sm, "selfdriveState", now_ns, after_frame=after)
     cp = ui.CP
     if (car is None or not getattr(car, "canValid", False) or getattr(car, "canTimeout", True) or
         control is None or controls is None or selfdrive is None or cp is None):
@@ -1309,11 +1312,11 @@ class StarShellSession:
                                   compact_scroll_x=self.compact_scroll_x, sidebar_expanded=self.sidebar_expanded,
                                   menu_only=self.profile == Profile.COMPACT and mode == ShellMode.SETTINGS,
                                   onroad_view_only=mode == ShellMode.ONROAD, stopped_timer_profile=str(self.profile))
+    from openpilot.starpilot.ui.onroad_rear_fog import update_rear_fog
+    snapshot = update_rear_fog(self, snapshot, onroad=mode == ShellMode.ONROAD)
     if mode == ShellMode.ONROAD and self.profile == Profile.LARGE:
       width = getattr(self, '_onroad_page_width', 2160.0) - (SIDEBAR_WIDTH if snapshot.onroad.appearance.show_developer_sidebar else 0)
-      fitted = fit_to_road(snapshot.onroad.customization, width)
-      if snapshot.onroad.viewport_width != width or fitted is not snapshot.onroad.customization:
-        snapshot = replace(snapshot, onroad=replace(snapshot.onroad, viewport_width=width, customization=fitted))
+      snapshot = fit_road_snapshot(snapshot, width)
     if mode == ShellMode.HOME:
       now = time.monotonic()
       previous = getattr(self, "_home_model", None)
@@ -1726,6 +1729,8 @@ class StarShellSession:
     self._favorite_claimed = False
 
   def close(self) -> None:
+    if receiver := getattr(self, "rear_fog", None):
+      receiver.close()
     if layer := getattr(self, 'onroad_jetlink', None):
       layer.close()
       self.onroad_jetlink = None

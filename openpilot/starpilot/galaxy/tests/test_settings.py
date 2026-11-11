@@ -461,9 +461,9 @@ class SettingsGatewayTest(unittest.TestCase):
         self.assertIn("Vision", primary["choices"])
         self.assertIn("Vision", secondary["choices"])
         self.assertNotIn("require your confirmation", primary["reason"])
-        confirmation = next(row for row in rows if row["label"] == "Automatic adoption")
-        self.assertEqual(confirmation["value"], "On")
-        self.assertIn("immediately", confirmation["reason"])
+        confirmation = next(row for row in rows if row["label"] == "Confirm limits")
+        self.assertEqual(confirmation["value"], "Off")
+        self.assertIn("automatically", confirmation["reason"])
         self.assertIn("accepts", confirmation["reason"])
 
     with mock.patch.dict(os.environ, {"SLC_REPLAY_RUNTIME": "0", "SLC_VISION_DEVELOPMENT": "0"}):
@@ -840,7 +840,7 @@ class SettingsGatewayTest(unittest.TestCase):
     self.assertTrue(self.gateway.confirm(intent["intent"], self.session, self.generation))
     self.assertEqual(read_lane_change(self.params).policy.close_gap_seconds, 0.8)
     self.assertEqual(self.page("lane_change")["rows"][gap]["value"], "0.8")
-    self.assertEqual(self.params.get("LaneChangePreferences")["version"], 5)
+    self.assertEqual(self.params.get("LaneChangePreferences")["version"], 6)
 
     saved = self.page("lane_change")
     revoke = self.gateway.preview(saved["view"], close, -1, self.session, self.generation)

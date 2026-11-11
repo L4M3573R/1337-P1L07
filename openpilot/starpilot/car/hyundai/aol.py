@@ -46,11 +46,11 @@ _REQUIRED_FLAGS = int(HyundaiFlags.CANFD | HyundaiFlags.EV | HyundaiFlags.CANFD_
 _FORBIDDEN_FLAGS = int(HyundaiFlags.CANFD_ALT_BUTTONS | HyundaiFlags.CANFD_ANGLE_STEERING | HyundaiFlags.CANFD_CAMERA_SCC)
 
 
-def _ioniq6_hda2_base(CP) -> bool:
+def _ioniq6_hda2_base(CP, *, require_radar=True) -> bool:
   if (
     str(CP.carFingerprint) != str(HyundaiCAR.HYUNDAI_IONIQ_6)
     or CP.brand != 'hyundai'
-    or CP.radarUnavailable
+    or (require_radar and CP.radarUnavailable)
     or CP.notCar
     or CP.passive
     or CP.dashcamOnly
@@ -62,8 +62,8 @@ def _ioniq6_hda2_base(CP) -> bool:
   return flags & _REQUIRED_FLAGS == _REQUIRED_FLAGS and not flags & _FORBIDDEN_FLAGS
 
 
-def _stock_ioniq6(CP, *, marked_only=False) -> bool:
-  if not _ioniq6_hda2_base(CP) or CP.openpilotLongitudinalControl or not CP.pcmCruise:
+def _stock_ioniq6(CP, *, marked_only=False, require_radar=True) -> bool:
+  if not _ioniq6_hda2_base(CP, require_radar=require_radar) or CP.openpilotLongitudinalControl or not CP.pcmCruise:
     return False
   stock = 0x91 if int(CP.flags) & int(HyundaiFlags.CANFD_LKA_STEER_MSG_ALT) else 0x11
   raw = int(CP.safetyConfigs[config_index(CP)].safetyParam)
@@ -97,6 +97,12 @@ def native_admission_key(CP):
 def ioniq6_settings_capable(CP) -> bool:
   # Stock ACC lateral settings are independent of the experimental LONG opt-in.
   return _stock_ioniq6(CP) or (IONIQ6_LONG_PREARM_ENABLED and ioniq6_long_eligible(CP))
+
+
+def ioniq6_alpha_long_available(CP) -> bool:
+  # Cached radar discovery may predate the external-bus repair. This saves only
+  # an opt-in; the takeover still requires fresh physical radar and ECU evidence.
+  return _stock_ioniq6(CP, require_radar=False) or (IONIQ6_LONG_PREARM_ENABLED and ioniq6_long_eligible(CP))
 
 
 def qualified_ccnc_long_aol(CP, *, marked_only=False):
@@ -236,9 +242,9 @@ def native_profile_supported(model: int, param: int) -> bool:
 
 
 def native_accepts_cp(CP, model: int, param: int) -> bool:
-  # Ioniq 6 has its own exact contract; no generic Hyundai owner accepts it.
+  # HDA-II retains its dedicated namespace; camera SCC uses the shared exact word.
   # Revalidate the complete contract on every call, without caching live authority.
-  if CP.carFingerprint == HyundaiCAR.HYUNDAI_IONIQ_6:
+  if CP.carFingerprint == HyundaiCAR.HYUNDAI_IONIQ_6 and not CP.flags & HyundaiFlags.CANFD_CAMERA_SCC:
     return qualified_ioniq6(CP)
   if qualified_ccnc_long_aol(CP, marked_only=True):
     return model == int(car.CarParams.SafetyModel.hyundaiCanfd) and param == CP.safetyConfigs[0].safetyParam
@@ -552,3 +558,57 @@ def pending_stock_angle_arm(CP, CS, sm, owner, *, now_ns, producer, acknowledged
                 not native.requestedLongitudinal and not native.longitudinalAllowed)
   except (AttributeError, KeyError, IndexError, TypeError, ValueError, OverflowError):
     return False
+
+
+def retain_stopped_eps_arm(feedback, sm, cp, cs, axis, now_ns, *, latched, arm_ns, producer):
+  from openpilot.cereal import log
+  from openpilot.starpilot.aol.runtime import AXIS_MAX_AGE_NS
+  from openpilot.starpilot.aol.transport_pause import _configured_transport_native
+
+  pending = getattr(feedback, '_stopped_eps_arm', None)
+  feedback._stopped_eps_arm = None
+  if not cs.steerFaultTemporary and pending is None:
+    return False
+  if (not latched or feedback.failed or feedback.paused or feedback.pending_event or
+      feedback.retention_started_ns or cs.steerFaultPermanent or not cs.canValid or cs.canTimeout or
+      cs.accFaulted or cs.doorOpen or cs.vehicleSensorsInvalid or cs.steeringDisengage or
+      cs.gearShifter not in (car.CarState.GearShifter.drive, car.CarState.GearShifter.sport,
+                            car.CarState.GearShifter.low, car.CarState.GearShifter.brake) or
+      str(axis.faultReason) != 'none' or axis.longitudinalActive or axis.desiredLongitudinal or
+      not producer or axis.intentProducerSessionId != producer or
+      not 0 < axis.sourceCarStateMonoTime <= axis.observedMonoTime <= now_ns or
+      now_ns - axis.sourceCarStateMonoTime > AXIS_MAX_AGE_NS):
+    return False
+  binding = (int(arm_ns), str(axis.sessionId), producer, int(axis.intentIntegrityEpoch))
+  if pending is None:
+    if (not cs.steerFaultTemporary or not cs.standstill or not cs.brakePressed or
+        not 0 < arm_ns <= now_ns <= arm_ns + AXIS_MAX_AGE_NS or
+        not qualified_classic_scc(cp, marked_only=True) or
+        axis.lateralActive or axis.desiredLateral):
+      return False
+  elif pending[:4] != binding or not 0 <= now_ns - pending[5] <= AXIS_MAX_AGE_NS:
+    return False
+  event_ns = int(sm.logMonoTime['onroadEvents'])
+  temporary = (log.OnroadEvent.EventName.steerTempUnavailable,
+               log.OnroadEvent.EventName.steerTempUnavailableSilent)
+  allowed = (*temporary, log.OnroadEvent.EventName.wrongCarMode,
+             log.OnroadEvent.EventName.preEnableStandstill, log.OnroadEvent.EventName.pcmDisable,
+             log.OnroadEvent.EventName.pedalPressed, log.OnroadEvent.EventName.gasPressedOverride,
+             log.OnroadEvent.EventName.steerOverride)
+  events = sm['onroadEvents']
+  if (not sm.seen['onroadEvents'] or not sm.valid['onroadEvents'] or not sm.alive['onroadEvents'] or
+      not 0 < event_ns <= now_ns or now_ns - event_ns > 1_500_000_000 or
+      any(e.name not in allowed or e.immediateDisable or e.softDisable and e.name not in temporary for e in events) or
+      cs.steerFaultTemporary and not any(e.name in temporary for e in events)):
+    return False
+  native = _configured_transport_native(sm, cp, str(axis.sessionId), now_ns,
+    require_longitudinal=False, allow_restricted_lateral=True)
+  if native is None or not native.pandaInventory or native.requestedLongitudinal or native.longitudinalAllowed:
+    return False
+  inventory = (native.pandaSerial, tuple(slot.hardwareSerial for slot in native.pandaInventory))
+  if pending is not None and inventory != pending[4]:
+    return False
+  if axis.lateralActive:
+    return False
+  feedback._stopped_eps_arm = (*binding, inventory, now_ns)
+  return True
