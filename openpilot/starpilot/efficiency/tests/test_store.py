@@ -75,3 +75,15 @@ def test_recorder_ignores_repeated_samples_and_saves_on_finish(tmp_path):
   rec.finish()
   total = store.load_totals(tmp_path)[0]
   assert total.distance == pytest.approx(20.0 * 40, rel=0.02)
+
+
+def test_every_subscribed_service_exists_in_this_fork():
+  from openpilot.cereal.services import SERVICE_LIST
+  from openpilot.starpilot.efficiency.efficiencyd import SERVICES
+  assert set(SERVICES) <= set(SERVICE_LIST)  # an unknown name crashes SubMaster at startup
+
+
+def test_yaw_rate_from_device_motion_sets_curvature():
+  from openpilot.starpilot.efficiency.ledger import make_sample
+  motion = NS(angularVelocityDevice=NS(z=0.2))
+  assert make_sample(0.0, 1500.0, car_state(20.0), device_motion=motion).curvature == pytest.approx(0.01)

@@ -45,8 +45,8 @@ def samples(files: list[Path]):
         radar = e.radarState
       elif w == 'selfdriveState':
         sd = e.selfdriveState
-      elif w == 'livePose':
-        pose = e.livePose
+      elif w == 'deviceMotion':  # this fork's pose message (angular velocity in the device frame)
+        pose = e.deviceMotion
       elif w == 'can':
         for c in e.can:
           if c.address == BATTERY_ADDR and c.src == 0 and len(c.dat) > 2:

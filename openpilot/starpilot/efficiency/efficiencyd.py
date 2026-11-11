@@ -13,7 +13,7 @@ from pathlib import Path
 from openpilot.starpilot.efficiency import store
 from openpilot.starpilot.efficiency.ledger import Ledger, make_sample
 
-SERVICES = ['radarState', 'carState', 'carControl', 'selfdriveState', 'livePose']
+SERVICES = ['radarState', 'carState', 'carControl', 'selfdriveState', 'deviceMotion']
 CHECKPOINT_S = 60.0
 
 
@@ -24,11 +24,11 @@ class Recorder:
     self.last_checkpoint = None
     self.last_t = None
 
-  def observe(self, t: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, live_pose=None) -> None:
+  def observe(self, t: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, device_motion=None) -> None:
     if self.last_t is not None and t <= self.last_t:
       return  # the same carState seen again on the next radarState wake-up
     self.last_t = t
-    self.ledger.add(make_sample(t, self.mass, car_state, car_control, radar_state, selfdrive_state, live_pose))
+    self.ledger.add(make_sample(t, self.mass, car_state, car_control, radar_state, selfdrive_state, device_motion))
 
   def maybe_checkpoint(self, now: float) -> bool:
     if self.last_checkpoint is None:
@@ -70,9 +70,9 @@ def main() -> None:
     while True:
       sm.update()
       if sm.seen['carState']:
-        optional = {name: (sm[name] if sm.seen[name] else None) for name in ('carControl', 'radarState', 'selfdriveState', 'livePose')}
+        optional = {name: (sm[name] if sm.seen[name] else None) for name in ('carControl', 'radarState', 'selfdriveState', 'deviceMotion')}
         recorder.observe(sm.logMonoTime['carState'] / 1e9, sm['carState'], optional['carControl'], optional['radarState'],
-                         optional['selfdriveState'], optional['livePose'])
+                         optional['selfdriveState'], optional['deviceMotion'])
       recorder.maybe_checkpoint(time.monotonic())
   finally:
     recorder.finish()
