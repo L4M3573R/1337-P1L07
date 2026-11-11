@@ -81,3 +81,47 @@ def test_only_the_camera_long_elantra_gets_the_gear_rearm():
   other.carFingerprint = 'HYUNDAI_SONATA_HYBRID'
   assert ClassicLongCardIntent(elantra_cp(marked=True), ON).gear_rearm
   assert not ClassicLongCardIntent(other, ON).gear_rearm
+
+
+SECOND = 1_000_000_000
+
+
+def test_the_panda_arm_is_retained_while_out_of_drive_but_no_steering_is_allowed():
+  # Route 45: the published arm fell in Park, pandad let the Panda's physical arm lapse, and the
+  # re-armed request in Drive was refused 50 ms later. Keep publishing the arm through the shift.
+  owner = armed()
+  owner.update(state('neutral'), now_ns=10, fault_active=True)
+  for gear, t in (('reverse', 2), ('park', 10), ('neutral', 30)):
+    owner.update(state(gear), now_ns=t * SECOND, fault_active=False)
+    assert owner.lateral_arm_retained()
+    assert not owner.output(state(gear))[0]  # steering output stays off outside a driving gear
+  owner.update(state('drive'), now_ns=31 * SECOND, fault_active=False)
+  assert owner.allowed_latch and owner.lateral_arm_retained() and owner.output(state('drive'))[0]
+
+
+def test_a_long_stop_in_park_still_resumes_in_drive_like_mads():
+  owner = armed()
+  owner.update(state('neutral'), now_ns=SECOND, fault_active=True)
+  owner.update(state('park'), now_ns=20 * 60 * SECOND, fault_active=False)  # parked with the car on for 20 minutes
+  assert owner.lateral_arm_retained()
+  owner.update(state('drive'), now_ns=20 * 60 * SECOND + 1, fault_active=False)
+  assert owner.allowed_latch
+
+
+@pytest.mark.parametrize('fault', ['canValid', 'accFaulted', 'steerFaultPermanent'])
+def test_a_car_fault_while_out_of_drive_drops_the_retained_arm(fault):
+  owner = armed()
+  owner.update(state('neutral'), now_ns=SECOND, fault_active=True)
+  cs = state('park')
+  if fault == 'canValid':
+    cs.canValid = False
+  else:
+    setattr(cs, fault, True)
+  owner.update(cs, now_ns=2 * SECOND, fault_active=False)
+  assert not owner.lateral_arm_retained()
+
+
+def test_a_disarmed_intent_does_not_publish_an_arm():
+  owner = ClassicLongCardIntent(elantra_cp(marked=True), ON)
+  owner.update(state('park'), now_ns=SECOND)
+  assert not owner.lateral_arm_retained()

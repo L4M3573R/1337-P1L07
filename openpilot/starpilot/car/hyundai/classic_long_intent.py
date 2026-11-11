@@ -20,13 +20,21 @@ class ClassicLongCardIntent(AolCardIntent):
       preserve_unassigned_cancel=qualified_alpha(cp))
     self.requires_fault_observation = True
     self.observe_stock_engagement = True
-    # Camera-long Elantra Hybrid: shifting P/R/N and back to Drive keeps the driver's AOL choice.
+    # Camera-long Elantra Hybrid: like StarPilot AOL and sunnypilot MADS, P/R/N pauses steering and Drive
+    # resumes it with no time limit, until the driver presses Main/Cancel/LKAS or the car reports a fault.
     self.gear_rearm = cp.carFingerprint in CAMERA_LONG_IDS
     self.gear_rearm_pending = False
 
   def _arm_from_full_engagement(self, CS, *, source_ns):
     if not (CS.steerFaultTemporary or CS.gasPressed or CS.brakePressed):
       super()._arm_from_full_engagement(CS, source_ns=source_ns)
+
+  def lateral_arm_retained(self) -> bool:
+    """Published as lateralArmed so pandad keeps the Panda's physical arm while the car is out of Drive.
+
+    Output stays gated: allowedLatch is False outside a driving gear, so no steering is commanded meanwhile.
+    """
+    return bool(self.allowed_latch or self.gear_rearm_pending)
 
   def update(self, CS, **kwargs) -> None:
     latched = self.allowed_latch
@@ -41,6 +49,9 @@ class ClassicLongCardIntent(AolCardIntent):
       return
     if any(event.type in DRIVER_DECISION_BUTTONS and event.pressed for event in CS.buttonEvents) or not self.settings.enabled:
       self.gear_rearm_pending = False  # a deliberate driver action replaces the remembered choice
+      return
+    if not CS.canValid or CS.canTimeout or CS.accFaulted or CS.steerFaultPermanent:
+      self.gear_rearm_pending = False  # no longer healthy: a fresh button press is required
       return
     healthy = (CS.canValid and not CS.canTimeout and not CS.accFaulted and not CS.steerFaultPermanent and
                not self._fault_inhibit and not kwargs.get('fault_active'))

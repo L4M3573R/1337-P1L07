@@ -32,7 +32,8 @@ def chestnut_load_detail() -> str:
     upload_rate = p['upload_mb'] / p['upload'] if p['upload'] > 0 else 0.0
     boot = f"header {p['header']:.2f}s, gpu boot+arena {p['gpu_boot_alloc']:.2f}s"
     upload = f"upload {p['upload']:.2f}s ({p['upload_mb']:.0f} MB at {upload_rate:.0f} MB/s)"
-    return f" [{boot}, {upload}, unpickle {p['unpickle']:.2f}s]"
+    wrap = f", prep {p['prep']:.2f}s, protect {p['protect']:.2f}s" if 'prep' in p and 'protect' in p else ""
+    return f" [{boot}, {upload}, unpickle {p['unpickle']:.2f}s{wrap}]"
   except (AttributeError, ImportError, KeyError, TypeError, ZeroDivisionError):
     return ""
 
@@ -124,6 +125,9 @@ def load_verified_model(cam_w: int, cam_h: int, artifact_path: Path, behavior_ve
       early = f", hashed early in {prefetch.seconds:.2f}s" if reused and prefetch.seconds is not None else ""
       variant = 'chestnut' if chestnut else 'small'
       phases = f"verify {t1 - t0:.2f}s{early}, load {t2 - t1:.2f}s, warmup {t3 - t2:.2f}s"
+      split = getattr(model, "load_phases", None)
+      if isinstance(split, dict):
+        phases += " (load = " + ", ".join(f"{name} {seconds:.2f}s" for name, seconds in split.items()) + ")"
       report(f"model load phases {model_id} ({variant}): {phases}{chestnut_load_detail() if chestnut else ''}")
     return model, prepared
 
@@ -223,8 +227,11 @@ class CatalogModelState:
   def __init__(self, cam_w: int, cam_h: int, artifact_path: Path, behavior_version: str, chestnut: bool):
     from openpilot.starpilot.models.compile import _detect_vision_keys, stateful_image_shapes, stateful_host_shapes
 
+    start = time.monotonic()
     artifact = load_oob(artifact_path, chestnut)
+    loaded = time.monotonic()
     validate_artifact(artifact, behavior_version, (cam_w, cam_h))
+    validated = time.monotonic()
     self.chestnut = chestnut
     self.behavior_version = behavior_version
     self.model_type = artifact["model_type"]
@@ -265,7 +272,11 @@ class CatalogModelState:
                                    if self.image_history_pipeline == "policy" else None)
     # why Jetlink's link copies this warp's output out every frame (jetlink_warp); None once it is moved
     self.warp_copied: str | None = "Jetlink was off when the model loaded"
+    setup = time.monotonic()
     self._reset_state()
+    # startup diagnostics: runtime load, contract validation, input queue allocation
+    self.load_phases = {"oob": loaded - start, "validate": validated - loaded, "queues": time.monotonic() - setup,
+                        "other": setup - validated}
 
   def move_warp_output(self, coherent_warp: Callable[[Any], None]) -> None:
     """On a comma, move this warp's output to memory the CPU reads cached with `coherent_warp` (Jetlink's

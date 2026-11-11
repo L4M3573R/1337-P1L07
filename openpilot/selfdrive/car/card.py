@@ -1080,7 +1080,8 @@ class Car:
       lateral_armed = False
       if self.aol_card_intent is not None:
         allowed_latch, pause_lateral, pause_longitudinal = self.aol_card_intent.output(CS)
-        lateral_armed = self.aol_card_intent.allowed_latch
+        retained = getattr(self.aol_card_intent, 'lateral_arm_retained', None)
+        lateral_armed = retained() if retained is not None else self.aol_card_intent.allowed_latch
       intent_msg.aolIntentWire = encode_intent(IntentState(
         self.slc_producer_session, self.aol_sequence, int(cs_send.logMonoTime), int(cs_send.logMonoTime),
         int(cs_send.logMonoTime) + 200_000_000, allowed_latch, pause_lateral, pause_longitudinal, self.aol_qualified, lateral_armed,

@@ -280,6 +280,8 @@ def load_oob(path, chestnut=False):
         raise ValueError('Ambiguous or wrong-role Laboratory artifact')
       from openpilot.starpilot.models.runtime_bridge.dom_loader import load_admitted_dom
       return load_admitted_dom(Path(path), expected_contract=matches[0], protection=_guard(True))
+  import time
+  start = time.monotonic()
   monitoring = _selection['role'] == 'monitoring'
   authenticated = _stock_bytes(path) if monitoring else None
   from tinygrad import Context, Device
@@ -292,12 +294,17 @@ def load_oob(path, chestnut=False):
     if monitoring:
       artifact = _load_monitoring(authenticated)
     elif chestnut:
+      prepared = time.monotonic()
       artifact = _load_chestnut(path)
+      loaded = time.monotonic()
     else:
       artifact = load_pickle(path, out_of_band=True)
   if isinstance(artifact, dict) and artifact.get('artifact_abi') == 'tinygrad_single_v1_arena':
     if chestnut:
-      return protection.artifact(artifact)
+      artifact = protection.artifact(artifact)
+      # startup diagnostics: runtime setup before the load, and the captured-schedule protection after it
+      _load_chestnut.last_phases.update(prep=prepared - start, protect=time.monotonic() - loaded)
+      return artifact
     from openpilot.starpilot.models.runtime_bridge.qcom import Protection
     return Protection.artifact(protection, artifact)
   if _selection['role'] != 'monitoring':
