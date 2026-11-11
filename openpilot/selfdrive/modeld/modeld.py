@@ -52,6 +52,7 @@ from openpilot.starpilot.models.status import ModelVariant
 from openpilot.starpilot.models.startup import report_load_timeout, wait_for_chestnut_power
 from openpilot.starpilot.models.recovery import STARTUP_FALLBACK_EXIT
 from openpilot.starpilot.navigation.intent import TurnIntent, matching_turn_signal
+from openpilot.starpilot.diagnostics.features import ChangeLog, turn_decision
 from openpilot.starpilot.models.catalog import BUNDLED_CURRENT, BY_ID, DEFAULT_SMALL, DEFAULT_SMALL_SHA256
 from openpilot.starpilot.models.runner import ArtifactPrefetch, CatalogModelState, load_verified_model
 from openpilot.starpilot.models import jetlink_adapter
@@ -538,6 +539,7 @@ def main(demo=False):
   lane_clock_guard = ClockEpochGuard(initial_mono_ns, initial_boot_ns, initial_skew_ns)
   DH = DesireHelper(runtime_lane_policy)
   navigation_turn = TurnIntent(params, CP)
+  turn_log = ChangeLog('turn_intent')  # decision log for remote route review
   lane_status_session = uuid.uuid4().hex
   lane_status_sequence = 0
 
@@ -730,6 +732,7 @@ def main(demo=False):
         pm.send('laneChangeAssistWire', lane_status_msg)
       pm.send('drivingModelData', drivingdata_send)
       pm.send('cameraOdometry', posenet_send)
+      turn_log.observe(turn_decision(navigation_turn, desire), {'v_ego': round(float(v_ego), 2)})
     last_vipc_frame_id = meta_main.frame_id
 
 if __name__ == "__main__":

@@ -20,11 +20,33 @@ PULSE_ACCEL_V = [0.8, 0.6, 0.45]
 PULSE_ARRIVAL_GAIN = 1.5
 # Far below the band (after slowing for traffic), ordinary cruise owns the return.
 PULSE_ENTRY_MARGIN = 1.0
+# The band is the full set speed down to set - delta: the pulse runs until the set speed is reached
+# (less a hair, since its arrival easing approaches the set speed asymptotically), and the glide runs
+# all the way to the bottom.
+GLIDE_START_MARGIN = 0.1
+GLIDE_END_MARGIN = 0.0
+# The band follows the dash speedometer (what the driver set and sees), not the slightly lower wheel
+# speed. Plausible dash/wheel ratios only; anything else falls back to wheel speed.
+CLUSTER_RATIO_MIN = 0.95
+CLUSTER_RATIO_MAX = 1.10
+CLUSTER_RATIO_MIN_SPEED = 5.0
 
 
 def glide_accel(speed_mps, pitch):
   grade = G * math.sin(pitch) if type(pitch) in (int, float) and math.isfinite(pitch) else 0.0
   return -(GLIDE_C0 + GLIDE_C2 * speed_mps ** 2) - grade
+
+
+def cluster_ratio(car_state) -> float:
+  """Dash speedometer / wheel speed (Hyundai's dash reads about 2.7% high); 1.0 when unknown."""
+  try:
+    v, dash = float(car_state.vEgo), float(car_state.vEgoCluster)
+  except (AttributeError, TypeError, ValueError):
+    return 1.0
+  if not (math.isfinite(v) and math.isfinite(dash)) or v < CLUSTER_RATIO_MIN_SPEED:
+    return 1.0
+  ratio = dash / v
+  return ratio if CLUSTER_RATIO_MIN <= ratio <= CLUSTER_RATIO_MAX else 1.0
 
 
 def pulse_accel(speed_mps):
@@ -46,6 +68,10 @@ class CoastPlan:
   # Cruise acceleration target while Pulse and Glide owns the cruise speed (pulse or glide).
   accel_target: float | None = None
   pulsing: bool = False
+  # Logging only: the band in wheel speed while Pulse and Glide is enabled, and the hill pause.
+  band_top_mps: float | None = None
+  band_bottom_mps: float | None = None
+  hill_paused: bool = False
 
 
 class CoastOwner:
@@ -80,6 +106,7 @@ class CoastOwner:
       return CoastPlan()
     accel_target = None
     pulsing = False
+    band = (None, None)
     if not self.pulse_glide:
       self.coasting = False
       self.hill_paused = False
@@ -91,14 +118,15 @@ class CoastOwner:
         elif abs(pitch) >= math.radians(3.0):
           self.hill_paused = True
       lower = target_mps - delta_mps
+      band = (target_mps, lower)
       available = not (self.hill_paused or target_mps <= 5.0 or lower < 3.0 or delta_mps <= 0 or
                        lead_relevant or stop_context)
       if not available:
         self.coasting = False
       elif self.coasting:
-        if speed_mps <= lower + 0.25:
+        if speed_mps <= lower + GLIDE_END_MARGIN:
           self.coasting = False
-      elif speed_mps >= target_mps - 0.25:
+      elif speed_mps >= target_mps - GLIDE_START_MARGIN:
         self.coasting = True
       if available and self.coasting:
         accel_target = min(glide_accel(speed_mps, pitch), GLIDE_SET_SPEED_GAIN * (target_mps - speed_mps))
@@ -106,9 +134,10 @@ class CoastOwner:
         pulsing = True
         accel_target = min(pulse_accel(speed_mps), PULSE_ARRIVAL_GAIN * max(0.0, target_mps - speed_mps))
     if self.force_coast:
-      return CoastPlan(True, -0.6, None, self.coasting)
+      return CoastPlan(True, -0.6, None, self.coasting, band_top_mps=band[0], band_bottom_mps=band[1],
+                       hill_paused=self.hill_paused)
     brake_floor = accel_target - GLIDE_FLOOR_MARGIN if self.coasting and accel_target is not None else None
-    return CoastPlan(False, brake_floor, None, self.coasting, accel_target, pulsing)
+    return CoastPlan(False, brake_floor, None, self.coasting, accel_target, pulsing, band[0], band[1], self.hill_paused)
 
 
 class CoastRuntime:
@@ -121,6 +150,7 @@ class CoastRuntime:
     self.traffic_toggles = 0
     self.cp_signature = None
     self.conditional_stop = False
+    self.cluster_ratio = 1.0  # logging: the dash/wheel ratio used by the last sample
 
   def receive(self, event, params, cp, sm, *, now_ns):
     command = self.consumer.accept(event, params, cp, sm, now_ns=now_ns)
@@ -186,7 +216,26 @@ class CoastRuntime:
                     math.isfinite(delta) and 0.5 <= delta <= 30.0)
     state, control = sm["carState"], sm["carControl"]
     pitch = control.orientationNED[1] if len(control.orientationNED) == 3 else None
+    # Express the dash-speed band in wheel speed: the set speed and delta the driver sees on the dash.
+    ratio = cluster_ratio(state)
+    self.cluster_ratio = ratio
     return self.owner.sample(admitted=admitted, active=bool(control.enabled and control.longActive),
                              gas=bool(state.gasPressed), brake=bool(state.brakePressed), speed_mps=float(state.vEgo),
-                             target_mps=target_mps, delta_mps=delta * (1 / 3.6 if units == b"1" else 0.44704),
+                             target_mps=target_mps / ratio,
+                             delta_mps=delta * (1 / 3.6 if units == b"1" else 0.44704) / ratio,
                              pitch=pitch, lead_relevant=lead_relevant, stop_context=bool(stop_context or self.conditional_stop))
+
+
+def plan_log_fields(plan: CoastPlan | None, runtime=None) -> dict:
+  """Pulse and Glide fields for starpilotLongitudinalPlan (all off when the mode is off)."""
+  enabled = bool(runtime is not None and getattr(getattr(runtime, 'owner', None), 'pulse_glide', False))
+  if plan is None:
+    return {'pulseGlideEnabled': enabled, 'pulseGlidePhase': 'off'}
+  phase = ('forceCoast' if plan.force_decel else 'glide' if plan.pulse_coasting and plan.accel_target is not None else
+           'pulse' if plan.pulsing else 'off')
+  finite = lambda v: float(v) if isinstance(v, (int, float)) and math.isfinite(v) else 0.0  # noqa: E731
+  return {'pulseGlideEnabled': enabled, 'pulseGlidePhase': phase,
+          'pulseGlideAccelTarget': finite(plan.accel_target), 'pulseGlideBandTop': finite(plan.band_top_mps),
+          'pulseGlideBandBottom': finite(plan.band_bottom_mps),
+          'pulseGlideClusterRatio': finite(getattr(runtime, 'cluster_ratio', 1.0)),
+          'pulseGlideHillPaused': bool(plan.hill_paused)}

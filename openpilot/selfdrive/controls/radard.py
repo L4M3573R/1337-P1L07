@@ -418,14 +418,15 @@ def main() -> None:
   # *** setup messaging
   sm = messaging.SubMaster(['modelV2', 'carState', 'radarTracks'], poll='modelV2')
   adjacent_enabled = feature_enabled(params, CP, 'conditional', os.environ) and 'REPLAY' not in os.environ
-  pm = messaging.PubMaster(['radarState', 'starpilotRadarState'] if adjacent_enabled else ['radarState'])
-
   from opendbc.car.honda.bosch_a_radar import VERIFIED_BOSCH_A_CARS
   honda_bosch_a = CP.brand == "honda" and CP.carFingerprint in VERIFIED_BOSCH_A_CARS and not CP.radarUnavailable
   from openpilot.starpilot.car.hyundai.radar_fusion import supported as tandem_supported
   RD = RadarD(CP.radarDelay, adjacent_enabled=adjacent_enabled, radar_available=not CP.radarUnavailable,
               honda_bosch_a_radar=honda_bosch_a, use_voacc=voacc_selected(params, CP),
               tandem_fusion=tandem_supported(CP.carFingerprint, CP.radarUnavailable))
+  pm = messaging.PubMaster(['radarState', 'starpilotRadarState'] if adjacent_enabled else ['radarState'])
+  from openpilot.starpilot.diagnostics.features import ChangeLog, radar_context, radar_decision
+  fusion_log = ChangeLog('tandem_fusion')  # decision log for remote route review
   set_core_affinity([3, 5])
 
   while 1:
@@ -433,6 +434,8 @@ def main() -> None:
 
     RD.update(sm, sm['radarTracks'])
     RD.publish(pm)
+    if RD.tandem is not None and RD.radar_state is not None:
+      fusion_log.observe(radar_decision(RD.tandem), radar_context(RD.tandem, RD.radar_state.leadOne))
 
 
 if __name__ == "__main__":

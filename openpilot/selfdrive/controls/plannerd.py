@@ -601,6 +601,10 @@ def starpilot_main():
           pm.send('slcState', planner_status)
         if current_start_ns > 0:
           drive_start_ns = current_start_ns
+        # CEM stop detection decision log rides on starpilotLongitudinalPlan.
+        projector = getattr(getattr(conditional_host, 'mode', None), 'projector', None)
+        longitudinal_planner.cem_stop_log = ((projector.last_stop_observation, projector.stop_detector)
+                                             if projector is not None else (None, None))
         longitudinal_planner.publish(sm, pm)
 
         ldw.update(sm.frame, sm['modelV2'], sm['carState'], sm['carControl'])

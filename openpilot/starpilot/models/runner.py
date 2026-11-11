@@ -22,6 +22,8 @@ from openpilot.starpilot.models.receipt import PreparedArtifact, artifact_identi
 from openpilot.system.camerad.cameras.nv12_info import get_nv12_info
 
 PREFETCH_WAIT_S = 30.0
+# Latest "model load phases" line per variant ("small", "chestnut"); the line itself is logged by modeld.
+LOAD_REPORTS: dict[str, str] = {}
 
 
 def chestnut_load_detail() -> str:
@@ -123,14 +125,16 @@ def load_verified_model(cam_w: int, cam_h: int, artifact_path: Path, behavior_ve
     if artifact_identity(artifact_path) != identity:
       raise ValueError("selected catalog model changed while loading")
     model.model_id = model_id
+    early = f", hashed early in {prefetch.seconds:.2f}s" if reused and prefetch.seconds is not None else ""
+    variant = 'chestnut' if chestnut else 'small'
+    phases = f"verify {t1 - t0:.2f}s{early}, load {t2 - t1:.2f}s, warmup {t3 - t2:.2f}s"
+    split = getattr(model, "load_phases", None)
+    if isinstance(split, dict):
+      phases += " (load = " + ", ".join(f"{name} {seconds:.2f}s" for name, seconds in split.items()) + ")"
+    line = f"model load phases {model_id} ({variant}): {phases}{chestnut_load_detail() if chestnut else ''}"
+    LOAD_REPORTS[variant] = line
     if report is not None:
-      early = f", hashed early in {prefetch.seconds:.2f}s" if reused and prefetch.seconds is not None else ""
-      variant = 'chestnut' if chestnut else 'small'
-      phases = f"verify {t1 - t0:.2f}s{early}, load {t2 - t1:.2f}s, warmup {t3 - t2:.2f}s"
-      split = getattr(model, "load_phases", None)
-      if isinstance(split, dict):
-        phases += " (load = " + ", ".join(f"{name} {seconds:.2f}s" for name, seconds in split.items()) + ")"
-      report(f"model load phases {model_id} ({variant}): {phases}{chestnut_load_detail() if chestnut else ''}")
+      report(line)
     return model, prepared
 
 

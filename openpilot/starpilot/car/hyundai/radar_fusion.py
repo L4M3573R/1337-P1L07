@@ -58,6 +58,10 @@ class TandemLeadPolicy:
   def __init__(self) -> None:
     self.in_path_frames: dict[int, int] = {}
     self.held = _HeldLead()
+    # Decision log for remote review: "camera", "hold", "pickup" or "none" for the last frame.
+    self.last_action = 'none'
+    self.last_pickup_id = -1
+    self.last_lead_prob = 0.0
 
   def _update_in_path(self, tracks: dict, model) -> None:
     for track_id in list(self.in_path_frames):
@@ -83,7 +87,9 @@ class TandemLeadPolicy:
 
     camera_confident = lead_prob > CONFIRM_PROB
     lead = base
+    self.last_action, self.last_pickup_id, self.last_lead_prob = 'none', -1, float(lead_prob)
     if camera_confirmed:
+      self.last_action = 'camera'
       self.held = _HeldLead(int(base['radarTrackId']), 0)
     else:
       held = tracks.get(self.held.track_id)
@@ -96,6 +102,7 @@ class TandemLeadPolicy:
       if (held is not None and self.held.frames_without_camera <= HOLD_MAX_FRAMES and
           path_offset(held, model) < HOLD_PATH_HALF_WIDTH and (dropout or same_car)):
         lead = held.get_RadarState(lead_prob)
+        self.last_action = 'hold'
       else:
         self.held = _HeldLead()
 
@@ -105,4 +112,6 @@ class TandemLeadPolicy:
       pickup = self._pickup(tracks)
       if pickup is not None and (not lead.get('present', False) or pickup.dRel < lead['dRel'] - PICKUP_CLOSER_MARGIN):
         lead = pickup.get_RadarState(lead_prob)
+        self.last_action = 'pickup'
+        self.last_pickup_id = int(getattr(pickup, 'identifier', -1))
     return lead

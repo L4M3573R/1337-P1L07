@@ -307,6 +307,7 @@ class SceneProjector:
     self.signal_lane_tracker = SignalLaneTracker()
     self.last_model_stamp_ns: int | None = None
     self.last_stop_stamp_s: float | None = None
+    self.last_stop_observation: StopObservation | None = None  # decision log for remote review
     self.last_slower_stamp_s: float | None = None
     self.adjacent_session: str | None = None
     self.adjacent_sequence = 0
@@ -653,6 +654,7 @@ class SceneProjector:
       stop_observation = StopObservation(None, None, None, None)
     else:
       stop_observation = self.stop_detector.step(stop_frame)
+    self.last_stop_observation = stop_observation
     # Dashboard/pedal evidence is decisive only while stopped. The detector
     # checks both then; stale values cannot become a false hold observation.
 

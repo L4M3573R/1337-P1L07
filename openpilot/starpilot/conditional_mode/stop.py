@@ -360,3 +360,18 @@ class StopLightDetector:
     self.light_detected = bool(self.committed or active or (hold_context and now < self.light_hold_until_s))
     hold, reason = self._standstill(frame, model_stopped)
     return StopObservation(self.light_detected, hold, reason, model_stopping)
+
+
+def stop_log_fields(observation: StopObservation | None, detector=None) -> dict:
+  """CEM stop detection fields for starpilotLongitudinalPlan (cemStopKnown False when withheld or absent)."""
+  fields = {'cemStopKnown': False}
+  if detector is not None:
+    light = getattr(getattr(detector, 'light_filter', None), 'x', 0.0)
+    fields['cemLightFilter'] = float(light) if isinstance(light, (int, float)) and math.isfinite(light) else 0.0
+    fields['cemStopCommitted'] = bool(getattr(detector, 'committed', False))
+  if observation is None or observation.light_detected is None:
+    return fields
+  fields.update(cemStopKnown=True, cemStopLightDetected=bool(observation.light_detected),
+                cemStopModelStopping=bool(observation.model_stopping), cemStandstillHold=bool(observation.standstill_hold),
+                cemStopReason=str(observation.standstill_reason or ''))
+  return fields

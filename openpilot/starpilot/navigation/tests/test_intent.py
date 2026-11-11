@@ -165,9 +165,9 @@ def test_signal_turn_guidance_resumes_after_stopping_at_the_turn(sm):
   assert sample() == log.Desire.none
 
 
-def test_signal_turn_guidance_survives_a_brief_stop_prediction_while_rolling(sm):
-  """Rolling turn, never stopping: a momentary stop prediction pauses guidance for 1 s, not the whole turn."""
-  from openpilot.starpilot.navigation.intent import SIGNAL_STOP_RELEASE_NS, TurnIntent
+def test_signal_turn_holds_a_predicted_stop_until_standstill_like_starpilot(sm):
+  """StarPilot turn desires: a stop predicted short of the turn holds guidance until the car stops or the blinker ends."""
+  from openpilot.starpilot.navigation.intent import TurnIntent
   owner = TurnIntent()
   owner.guidance = NS(sample=lambda *_, **__: NS(turn_signal_guidance=True))
   owner.steering_capable = True
@@ -175,6 +175,7 @@ def test_signal_turn_guidance_survives_a_brief_stop_prediction_while_rolling(sm)
   plan = NS(modelMonoTime=NOW, shouldStop=False)
   sm['longitudinalPlan'] = plan
   sm.valid['longitudinalPlan'] = sm.alive['longitudinalPlan'] = True
+  cs = sm['carState']
 
   def sample(now, model_stop=False):
     for name in ('carState', 'carControl', 'longitudinalPlan', 'deviceState'):
@@ -183,10 +184,17 @@ def test_signal_turn_guidance_survives_a_brief_stop_prediction_while_rolling(sm)
     return owner.select(sm, now, log.Desire.none, supported=True, model_stop=model_stop)
 
   assert sample(NOW) == log.Desire.turnRight
-  assert sample(NOW + 50_000_000, model_stop=True) == log.Desire.none  # brief stop prediction
-  assert sample(NOW + 100_000_000) == log.Desire.none  # still within the release window
-  assert sample(NOW + 50_000_000 + SIGNAL_STOP_RELEASE_NS) == log.Desire.turnRight  # rolling on: guidance resumes
-  assert sample(NOW + 2 * SIGNAL_STOP_RELEASE_NS) == log.Desire.turnRight
+  assert sample(NOW + 50_000_000, model_stop=True) == log.Desire.none  # stop predicted short of the turn
+  assert sample(NOW + 3_000_000_000) == log.Desire.none  # still rolling: held (no timed release)
+  cs.standstill, cs.vEgo = True, 0.
+  assert sample(NOW + 3_100_000_000) == log.Desire.none  # stopped: hold released, but no turn at standstill
+  cs.standstill, cs.vEgo = False, 2.
+  assert sample(NOW + 3_200_000_000) == log.Desire.turnRight  # pulling away into the turn
+  assert sample(NOW + 3_250_000_000, model_stop=True) == log.Desire.none
+  cs.rightBlinker = False
+  sample(NOW + 3_300_000_000)
+  cs.rightBlinker = True
+  assert sample(NOW + 3_350_000_000) == log.Desire.turnRight  # a fresh signal starts clear
 
 
 def test_approaching_turn_does_not_start_or_replace_lane_change(sm):
@@ -209,3 +217,29 @@ def test_approaching_turn_does_not_start_or_replace_lane_change(sm):
   helper.update(cs, True, 1., navigation_turn=turn)
   assert helper.lane_change_state == log.LaneChangeState.laneChangeStarting
   assert helper.desire == log.Desire.laneChangeRight
+
+
+def test_turn_decision_log_names_the_source_or_the_gate_that_held_it_back(sm):
+  from openpilot.starpilot.navigation.intent import TurnIntent
+  owner = TurnIntent()
+  owner.guidance = NS(sample=lambda *_, **__: NS(turn_signal_guidance=True))
+  owner.steering_capable = True
+  sm['starpilotNavigation'].navigation.enabled = False
+  sm['longitudinalPlan'] = NS(modelMonoTime=NOW, shouldStop=False)
+  sm.logMonoTime['longitudinalPlan'] = NOW
+  sm.valid['longitudinalPlan'] = sm.alive['longitudinalPlan'] = True
+  cs = sm['carState']
+
+  def sample():
+    return owner.select(sm, NOW, log.Desire.none, supported=True, model_stop=False)
+
+  assert sample() == log.Desire.turnRight and (owner.source, owner.blocked_by) == ('blinker', '')
+  cs.vEgo = 25 * CV.MPH_TO_MS
+  assert sample() == log.Desire.none and owner.blocked_by == 'speed outside 0.1-20 mph' and owner.source == ''
+  cs.vEgo = 5.
+  sm['longitudinalPlan'].shouldStop = True
+  assert sample() == log.Desire.none and owner.blocked_by == 'stop predicted'
+  sm['longitudinalPlan'].shouldStop = False
+  cs.rightBlinker = False
+  owner.signal_stop_hold = False
+  assert sample() == log.Desire.none and owner.blocked_by == ''  # no blinker: nothing to explain

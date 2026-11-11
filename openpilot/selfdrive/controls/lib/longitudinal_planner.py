@@ -303,6 +303,7 @@ class LongitudinalPlanner:
     if navigation_target is not None:
       v_cruise = min(v_cruise, navigation_target)
     coast_plan = None
+    self.coast_log = (None, None)
     if wheel_coast is not None:
       owner, wheel_params = wheel_coast
       pulse_lead = any(lead.present and (v_ego - lead.vLead > 0.5 or lead.aLeadK < -0.4 or
@@ -311,6 +312,7 @@ class LongitudinalPlanner:
       coast_plan = owner.sample(wheel_params, self.CP, sm, now_ns=sample_now_ns, target_mps=v_cruise,
         lead_relevant=bool(pulse_lead), stop_context=bool(sm['carState'].standstill or sm['controlsState'].forceDecel or
         self.force_stop_plan.forcing or sm['modelV2'].action.shouldStop or not self.allow_throttle))
+      self.coast_log = (coast_plan, owner)
       if coast_plan.speed_ceiling_mps is not None:
         v_cruise = min(v_cruise, coast_plan.speed_ceiling_mps)
     if sm['controlsState'].forceDecel or coast_plan is not None and coast_plan.force_decel:
@@ -523,6 +525,12 @@ class LongitudinalPlanner:
     hold.forceStopBraking = bool(self.ioniq6_throttle_gate_enabled and self.force_stop_plan.forcing and
                                 self.force_stop_plan.should_stop)
     hold.forceStopEpisodeMonoTime = self.force_stop_plan.episode_ns
+    from openpilot.starpilot.controllers.coast import plan_log_fields
+    for field, value in plan_log_fields(*getattr(self, 'coast_log', (None, None))).items():
+      setattr(hold, field, value)
+    from openpilot.starpilot.conditional_mode.stop import stop_log_fields
+    for field, value in stop_log_fields(*getattr(self, 'cem_stop_log', (None, None))).items():
+      setattr(hold, field, value)
     pm.send('longitudinalPlan', plan_send)
     pm.send('starpilotLongitudinalPlan', companion)
 

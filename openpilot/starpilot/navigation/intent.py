@@ -9,7 +9,7 @@ from openpilot.starpilot.navigation.wire import navigation_state
 
 SERVICE = 'starpilotNavigation'
 MAX_AGE_NS = 2_500_000_000
-SIGNAL_STOP_RELEASE_NS = 1_000_000_000  # blinker guidance resumes 1 s after stop predictions end
+SIGNAL_STOP_RELEASE_NS = 1_000_000_000  # retired: StarPilot holds a predicted stop until standstill
 TARGET_MPH = {'uturn': 5., 'sharpLeft': 10., 'sharpRight': 10., 'left': 14., 'right': 14.}
 
 
@@ -108,8 +108,12 @@ class TurnIntent:
     self.signal_stop_seen_ns = 0
     self.key = None
     self.stop_hold = False
+    # Decision log for remote review: where this frame's turn desire came from, or what held it back.
+    self.source = ''
+    self.blocked_by = ''
 
   def select(self, sm, now_ns: int, current_desire, *, supported: bool, model_stop: bool):
+    self.source, self.blocked_by = '', ''
     nav = current_instruction(sm, now_ns) if supported else None
     key = (nav.sessionId, nav.startedMonoTime) if nav is not None else None
     if key != self.key:
@@ -129,9 +133,12 @@ class TurnIntent:
     elif model_stop or (plan_valid and plan.shouldStop):
       self.stop_hold = True
     if self.stop_hold or not plan_valid:
+      self.blocked_by = 'navigation stop hold' if self.stop_hold else 'plan not current'
       return current_desire
     selected = turn_desire(sm, now_ns, current_desire, supported=supported)
     if selected != log.Desire.none:
+      if selected != current_desire:
+        self.source = 'navigation'
       return selected
     return self.signal_desire(sm, now_ns, current_desire, supported=supported, model_stop=model_stop)
 
@@ -143,36 +150,43 @@ class TurnIntent:
       signaling = bool(cs.leftBlinker or cs.rightBlinker)
       policy = self.guidance.sample(now_ns, signaling=signaling,
                                     maneuver_active=current_desire != log.Desire.none)
-      # Guidance is speed based: hold only while a stop is being predicted short of the turn.
-      # Release once stopped (a stopped car's planner keeps reporting shouldStop) or once no
-      # stop has been predicted for SIGNAL_STOP_RELEASE_NS, so a brief stop prediction while
-      # rolling through a turn cannot withhold guidance for the rest of it.
+      # StarPilot turn desires: once a stop is predicted short of the turn, hold the turn until the
+      # car stops (a stopped car's planner keeps reporting shouldStop) or the blinker turns off.
       stop_predicted = bool(model_stop or plan.shouldStop)
       if not signaling or cs.standstill:
         self.signal_stop_hold = False
       elif stop_predicted:
         self.signal_stop_hold = True
         self.signal_stop_seen_ns = now_ns
-      elif self.signal_stop_hold and now_ns - self.signal_stop_seen_ns >= SIGNAL_STOP_RELEASE_NS:
-        self.signal_stop_hold = False
-      if (not supported or not self.steering_capable or not policy.turn_signal_guidance or
-          current_desire != log.Desire.none or self.signal_stop_hold or not cc.latActive or
-          not cs.canValid or cs.canTimeout or str(cs.gearShifter) != 'drive' or cs.standstill or
-          not math.isfinite(cs.vEgo) or not 0.1 < cs.vEgo < 20 * CV.MPH_TO_MS or
-          cs.leftBlinker == cs.rightBlinker or not device.started):
+      # The first gate that fails is logged (blockedBy) when exactly one blinker is on.
+      gates = (('unsupported model', not supported), ('car cannot steer', not self.steering_capable),
+               ('guidance off', not policy.turn_signal_guidance), ('other maneuver', current_desire != log.Desire.none),
+               ('stop predicted', self.signal_stop_hold), ('steering inactive', not cc.latActive),
+               ('CAN invalid', not cs.canValid or cs.canTimeout), ('not in drive', str(cs.gearShifter) != 'drive'),
+               ('standstill', cs.standstill),
+               ('speed outside 0.1-20 mph', not math.isfinite(cs.vEgo) or not 0.1 < cs.vEgo < 20 * CV.MPH_TO_MS),
+               ('no single blinker', cs.leftBlinker == cs.rightBlinker), ('not started', not device.started))
+      blocked = next((name for name, failed in gates if failed), None)
+      if blocked is not None:
+        self.blocked_by = blocked if cs.leftBlinker != cs.rightBlinker else ''
         return current_desire
       for service, age in (('carState', 100_000_000), ('carControl', 100_000_000),
                            ('longitudinalPlan', 150_000_000), ('deviceState', 2_000_000_000)):
         stamp = sm.logMonoTime[service]
         if (not sm.valid[service] or not sm.alive[service] or
             not 0 < device.startedMonoTime <= stamp <= now_ns <= stamp + age):
+          self.blocked_by = f'stale {service}'
           return current_desire
       if not device.startedMonoTime <= plan.modelMonoTime <= sm.logMonoTime['longitudinalPlan']:
+        self.blocked_by = 'stale plan'
         return current_desire
       if cs.leftBlinker and not cs.leftBlindspot:
+        self.source = 'blinker'
         return log.Desire.turnLeft
       if cs.rightBlinker and not cs.rightBlindspot:
+        self.source = 'blinker'
         return log.Desire.turnRight
+      self.blocked_by = 'blind spot'
     except (KeyError, AttributeError, TypeError, ValueError):
       pass
     return current_desire

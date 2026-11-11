@@ -1087,6 +1087,17 @@ class Car:
         int(cs_send.logMonoTime) + 200_000_000, allowed_latch, pause_lateral, pause_longitudinal, self.aol_qualified, lateral_armed,
         bool(getattr(self.aol_card_intent, "optional_set_release_policy", lambda: False)())))
       self.pm.send('aolIntentWire', intent_msg)
+      # AOL latch decision log for remote route review (on change and at 1 Hz).
+      # Logging never interrupts card: any failure only drops this record.
+      if self.aol_card_intent is not None:
+        try:
+          if getattr(self, 'aol_log', None) is None:
+            from openpilot.starpilot.diagnostics.features import ChangeLog
+            self.aol_log = ChangeLog('aol')
+          from openpilot.starpilot.diagnostics.features import aol_decision
+          self.aol_log.observe(aol_decision(self.aol_card_intent), {'gear': str(CS.gearShifter)})
+        except Exception:
+          pass
 
     # carState wakes selfdrived. Commit its companion intent first, so a
     # consumer scheduled at the wakeup cannot sample the preceding intent.

@@ -80,6 +80,14 @@ CAPNP_DECLARE_SCHEMA(911f05bba9c1fc1f);
 CAPNP_DECLARE_SCHEMA(918d19aa5875c92d);
 CAPNP_DECLARE_SCHEMA(de92e382e2400293);
 CAPNP_DECLARE_SCHEMA(da96579883444c35);
+CAPNP_DECLARE_SCHEMA(ee398bcf58da3efd);
+enum class PulseGlidePhase_ee398bcf58da3efd: uint16_t {
+  OFF,
+  PULSE,
+  GLIDE,
+  FORCE_COAST,
+};
+CAPNP_DECLARE_ENUM(PulseGlidePhase, ee398bcf58da3efd);
 CAPNP_DECLARE_SCHEMA(a1680744031fdb2d);
 CAPNP_DECLARE_SCHEMA(a7940385bedd1d4c);
 CAPNP_DECLARE_SCHEMA(f58695a93b568caf);
@@ -727,9 +735,11 @@ struct StarPilotLongitudinalPlan {
   class Reader;
   class Builder;
   class Pipeline;
+  typedef ::capnp::schemas::PulseGlidePhase_ee398bcf58da3efd PulseGlidePhase;
+
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(da96579883444c35, 5, 0)
+    CAPNP_DECLARE_STRUCT_HEADER(da96579883444c35, 8, 1)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -4302,6 +4312,35 @@ public:
 
   inline  ::uint64_t getForceStopEpisodeMonoTime() const;
 
+  inline bool getPulseGlideEnabled() const;
+
+  inline  ::cereal::StarPilotLongitudinalPlan::PulseGlidePhase getPulseGlidePhase() const;
+
+  inline float getPulseGlideAccelTarget() const;
+
+  inline float getPulseGlideBandTop() const;
+
+  inline float getPulseGlideBandBottom() const;
+
+  inline float getPulseGlideClusterRatio() const;
+
+  inline bool getPulseGlideHillPaused() const;
+
+  inline bool getCemStopKnown() const;
+
+  inline bool getCemStopLightDetected() const;
+
+  inline bool getCemStopModelStopping() const;
+
+  inline bool getCemStandstillHold() const;
+
+  inline bool hasCemStopReason() const;
+  inline  ::capnp::Text::Reader getCemStopReason() const;
+
+  inline float getCemLightFilter() const;
+
+  inline bool getCemStopCommitted() const;
+
 private:
   ::capnp::_::StructReader _reader;
   template <typename, ::capnp::Kind>
@@ -4350,6 +4389,52 @@ public:
 
   inline  ::uint64_t getForceStopEpisodeMonoTime();
   inline void setForceStopEpisodeMonoTime( ::uint64_t value);
+
+  inline bool getPulseGlideEnabled();
+  inline void setPulseGlideEnabled(bool value);
+
+  inline  ::cereal::StarPilotLongitudinalPlan::PulseGlidePhase getPulseGlidePhase();
+  inline void setPulseGlidePhase( ::cereal::StarPilotLongitudinalPlan::PulseGlidePhase value);
+
+  inline float getPulseGlideAccelTarget();
+  inline void setPulseGlideAccelTarget(float value);
+
+  inline float getPulseGlideBandTop();
+  inline void setPulseGlideBandTop(float value);
+
+  inline float getPulseGlideBandBottom();
+  inline void setPulseGlideBandBottom(float value);
+
+  inline float getPulseGlideClusterRatio();
+  inline void setPulseGlideClusterRatio(float value);
+
+  inline bool getPulseGlideHillPaused();
+  inline void setPulseGlideHillPaused(bool value);
+
+  inline bool getCemStopKnown();
+  inline void setCemStopKnown(bool value);
+
+  inline bool getCemStopLightDetected();
+  inline void setCemStopLightDetected(bool value);
+
+  inline bool getCemStopModelStopping();
+  inline void setCemStopModelStopping(bool value);
+
+  inline bool getCemStandstillHold();
+  inline void setCemStandstillHold(bool value);
+
+  inline bool hasCemStopReason();
+  inline  ::capnp::Text::Builder getCemStopReason();
+  inline void setCemStopReason( ::capnp::Text::Reader value);
+  inline  ::capnp::Text::Builder initCemStopReason(unsigned int size);
+  inline void adoptCemStopReason(::capnp::Orphan< ::capnp::Text>&& value);
+  inline ::capnp::Orphan< ::capnp::Text> disownCemStopReason();
+
+  inline float getCemLightFilter();
+  inline void setCemLightFilter(float value);
+
+  inline bool getCemStopCommitted();
+  inline void setCemStopCommitted(bool value);
 
 private:
   ::capnp::_::StructBuilder _builder;
@@ -18994,6 +19079,222 @@ inline  ::uint64_t StarPilotLongitudinalPlan::Builder::getForceStopEpisodeMonoTi
 inline void StarPilotLongitudinalPlan::Builder::setForceStopEpisodeMonoTime( ::uint64_t value) {
   _builder.setDataField< ::uint64_t>(
       ::capnp::bounded<4>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool StarPilotLongitudinalPlan::Reader::getPulseGlideEnabled() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<18>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotLongitudinalPlan::Builder::getPulseGlideEnabled() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<18>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setPulseGlideEnabled(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<18>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::cereal::StarPilotLongitudinalPlan::PulseGlidePhase StarPilotLongitudinalPlan::Reader::getPulseGlidePhase() const {
+  return _reader.getDataField< ::cereal::StarPilotLongitudinalPlan::PulseGlidePhase>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+
+inline  ::cereal::StarPilotLongitudinalPlan::PulseGlidePhase StarPilotLongitudinalPlan::Builder::getPulseGlidePhase() {
+  return _builder.getDataField< ::cereal::StarPilotLongitudinalPlan::PulseGlidePhase>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setPulseGlidePhase( ::cereal::StarPilotLongitudinalPlan::PulseGlidePhase value) {
+  _builder.setDataField< ::cereal::StarPilotLongitudinalPlan::PulseGlidePhase>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS, value);
+}
+
+inline float StarPilotLongitudinalPlan::Reader::getPulseGlideAccelTarget() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<10>() * ::capnp::ELEMENTS);
+}
+
+inline float StarPilotLongitudinalPlan::Builder::getPulseGlideAccelTarget() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<10>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setPulseGlideAccelTarget(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<10>() * ::capnp::ELEMENTS, value);
+}
+
+inline float StarPilotLongitudinalPlan::Reader::getPulseGlideBandTop() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<11>() * ::capnp::ELEMENTS);
+}
+
+inline float StarPilotLongitudinalPlan::Builder::getPulseGlideBandTop() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<11>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setPulseGlideBandTop(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<11>() * ::capnp::ELEMENTS, value);
+}
+
+inline float StarPilotLongitudinalPlan::Reader::getPulseGlideBandBottom() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
+}
+
+inline float StarPilotLongitudinalPlan::Builder::getPulseGlideBandBottom() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setPulseGlideBandBottom(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS, value);
+}
+
+inline float StarPilotLongitudinalPlan::Reader::getPulseGlideClusterRatio() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<13>() * ::capnp::ELEMENTS);
+}
+
+inline float StarPilotLongitudinalPlan::Builder::getPulseGlideClusterRatio() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<13>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setPulseGlideClusterRatio(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<13>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool StarPilotLongitudinalPlan::Reader::getPulseGlideHillPaused() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<19>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotLongitudinalPlan::Builder::getPulseGlideHillPaused() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<19>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setPulseGlideHillPaused(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<19>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool StarPilotLongitudinalPlan::Reader::getCemStopKnown() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<20>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotLongitudinalPlan::Builder::getCemStopKnown() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<20>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setCemStopKnown(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<20>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool StarPilotLongitudinalPlan::Reader::getCemStopLightDetected() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<21>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotLongitudinalPlan::Builder::getCemStopLightDetected() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<21>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setCemStopLightDetected(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<21>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool StarPilotLongitudinalPlan::Reader::getCemStopModelStopping() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<22>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotLongitudinalPlan::Builder::getCemStopModelStopping() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<22>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setCemStopModelStopping(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<22>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool StarPilotLongitudinalPlan::Reader::getCemStandstillHold() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<23>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotLongitudinalPlan::Builder::getCemStandstillHold() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<23>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setCemStandstillHold(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<23>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool StarPilotLongitudinalPlan::Reader::hasCemStopReason() const {
+  return !_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline bool StarPilotLongitudinalPlan::Builder::hasCemStopReason() {
+  return !_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS).isNull();
+}
+inline  ::capnp::Text::Reader StarPilotLongitudinalPlan::Reader::getCemStopReason() const {
+  return ::capnp::_::PointerHelpers< ::capnp::Text>::get(_reader.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline  ::capnp::Text::Builder StarPilotLongitudinalPlan::Builder::getCemStopReason() {
+  return ::capnp::_::PointerHelpers< ::capnp::Text>::get(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+inline void StarPilotLongitudinalPlan::Builder::setCemStopReason( ::capnp::Text::Reader value) {
+  ::capnp::_::PointerHelpers< ::capnp::Text>::set(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), value);
+}
+inline  ::capnp::Text::Builder StarPilotLongitudinalPlan::Builder::initCemStopReason(unsigned int size) {
+  return ::capnp::_::PointerHelpers< ::capnp::Text>::init(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), size);
+}
+inline void StarPilotLongitudinalPlan::Builder::adoptCemStopReason(
+    ::capnp::Orphan< ::capnp::Text>&& value) {
+  ::capnp::_::PointerHelpers< ::capnp::Text>::adopt(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS), kj::mv(value));
+}
+inline ::capnp::Orphan< ::capnp::Text> StarPilotLongitudinalPlan::Builder::disownCemStopReason() {
+  return ::capnp::_::PointerHelpers< ::capnp::Text>::disown(_builder.getPointerField(
+      ::capnp::bounded<0>() * ::capnp::POINTERS));
+}
+
+inline float StarPilotLongitudinalPlan::Reader::getCemLightFilter() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<14>() * ::capnp::ELEMENTS);
+}
+
+inline float StarPilotLongitudinalPlan::Builder::getCemLightFilter() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<14>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setCemLightFilter(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<14>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool StarPilotLongitudinalPlan::Reader::getCemStopCommitted() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<24>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotLongitudinalPlan::Builder::getCemStopCommitted() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<24>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setCemStopCommitted(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<24>() * ::capnp::ELEMENTS, value);
 }
 
 inline bool SlcState::Reader::hasSlotId() const {

@@ -279,6 +279,29 @@ struct StarPilotLongitudinalPlan @0xda96579883444c35 {
   forceStopHolding @4 :Bool;
   forceStopBraking @5 :Bool;
   forceStopEpisodeMonoTime @6 :UInt64;
+  # Pulse and Glide, logged every plan for tuning (all zero when the mode is off)
+  pulseGlideEnabled @7 :Bool;
+  pulseGlidePhase @8 :PulseGlidePhase;
+  pulseGlideAccelTarget @9 :Float32;  # m/s^2 the mode asked the cruise for
+  pulseGlideBandTop @10 :Float32;  # m/s wheel speed (the dash set speed / clusterRatio)
+  pulseGlideBandBottom @11 :Float32;  # m/s wheel speed
+  pulseGlideClusterRatio @12 :Float32;  # dash speedometer / wheel speed used for the band
+  pulseGlideHillPaused @13 :Bool;
+  # CEM stop detection, logged every plan (cemStopKnown is false when the detector withheld an observation)
+  cemStopKnown @14 :Bool;
+  cemStopLightDetected @15 :Bool;
+  cemStopModelStopping @16 :Bool;
+  cemStandstillHold @17 :Bool;
+  cemStopReason @18 :Text;
+  cemLightFilter @19 :Float32;
+  cemStopCommitted @20 :Bool;
+
+  enum PulseGlidePhase {
+    off @0;  # disabled, or unavailable (lead, stop, hill, below the band)
+    pulse @1;
+    glide @2;
+    forceCoast @3;
+  }
 }
 
 struct SlcState @0xa1680744031fdb2d {

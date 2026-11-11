@@ -134,3 +134,14 @@ def test_radard_enables_tandem_only_when_asked_and_not_with_vision_only_acc():
   assert RadarD(radar_available=True, tandem_fusion=True).tandem is not None
   assert RadarD(radar_available=True).tandem is None
   assert RadarD(radar_available=True, tandem_fusion=True, use_voacc=True).tandem is None
+
+
+def test_decision_log_records_camera_hold_and_pickup():
+  policy, car = rf.TandemLeadPolicy(), track(1, 40.0, v_lead=0.0)
+  policy.lead_one(camera_lead(car), {1: car}, STRAIGHT, 0.9)
+  assert policy.last_action == 'camera'
+  policy.lead_one(NO_LEAD, {1: car}, STRAIGHT, 0.2)
+  assert policy.last_action == 'hold' and policy.held.track_id == 1 and policy.last_lead_prob == 0.2
+  picker, mover = rf.TandemLeadPolicy(), track(7, 50.0, v_lead=15.0)
+  run(picker, rf.PICKUP_MIN_FRAMES, NO_LEAD, {7: mover})
+  assert picker.last_action == 'pickup' and picker.last_pickup_id == 7
