@@ -34,6 +34,19 @@ class Sample:
   battery_raw: float | None = None  # uncalibrated hybrid battery signal, logged for later calibration
 
 
+def make_sample(t: float, mass: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, live_pose=None,
+                battery_raw: float | None = None) -> Sample:
+  """Build one ledger sample from the latest messages (shared by the on-device daemon and the log report)."""
+  cs, cc = car_state, car_control
+  pitch = cc.orientationNED[1] if cc is not None and len(cc.orientationNED) == 3 else None
+  yaw_rate = live_pose.angularVelocityDevice.z if live_pose is not None else 0.0
+  lead = radar_state.leadOne if radar_state is not None else None
+  return Sample(t=t, speed=cs.vEgo, accel=cs.aEgo, pitch=pitch, mass=mass, curvature=abs(yaw_rate) / max(cs.vEgo, 1.0),
+                lead=bool(lead is not None and lead.present and lead.dRel < 80.0), standstill=bool(cs.standstill),
+                long_active=bool(cc is not None and cc.longActive),
+                experimental=bool(selfdrive_state is not None and selfdrive_state.experimentalMode), battery_raw=battery_raw)
+
+
 def mode_of(sample: Sample) -> str:
   if not sample.long_active:
     return "driver"

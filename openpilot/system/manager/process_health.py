@@ -3,7 +3,8 @@
 # Projection and local phone access are optional even when requested.
 # Their lifecycles remain visible in managerState and their own status.
 # A dead Jetlink owner sends the drive back to the small model.
-ANCILLARY_PROCESSES = frozenset({'starportd', 'galaxy_hotspot', 'jetlinkd'})
+# The energy ledger only observes; its absence must never block or disengage driving.
+ANCILLARY_PROCESSES = frozenset({'starportd', 'galaxy_hotspot', 'jetlinkd', 'efficiencyd'})
 
 
 def driving_process_failures(processes) -> set[str]:

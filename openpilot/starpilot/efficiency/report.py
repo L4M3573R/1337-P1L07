@@ -12,7 +12,7 @@ import argparse
 import math
 from pathlib import Path
 
-from openpilot.starpilot.efficiency.ledger import Ledger, Sample, Totals, summarize
+from openpilot.starpilot.efficiency.ledger import Ledger, Totals, make_sample, summarize
 
 SAMPLE_PERIOD_S = 0.05
 BATTERY_ADDR = 0x595  # Elantra Hybrid: byte 2 (signed) tracks hybrid battery current; uncalibrated
@@ -59,13 +59,7 @@ def samples(files: list[Path]):
         if mass is None or 0.0 <= t - last_t < SAMPLE_PERIOD_S:
           continue
         last_t = t
-        pitch = cc.orientationNED[1] if cc is not None and len(cc.orientationNED) == 3 else None
-        yaw_rate = pose.angularVelocityDevice.z if pose is not None else 0.0
-        yield Sample(t=t, speed=cs.vEgo, accel=cs.aEgo, pitch=pitch, mass=mass,
-                     curvature=abs(yaw_rate) / max(cs.vEgo, 1.0),
-                     lead=bool(radar is not None and radar.leadOne.present and radar.leadOne.dRel < 80.0),
-                     standstill=bool(cs.standstill), long_active=bool(cc is not None and cc.longActive),
-                     experimental=bool(sd is not None and sd.experimentalMode), battery_raw=battery)
+        yield make_sample(t, mass, cs, cc, radar, sd, pose, battery)
 
 
 def line(name: str, t: Totals) -> str:
@@ -101,12 +95,28 @@ def report(paths: list[str], min_km: float = 1.0) -> str:
   return "\n".join(out)
 
 
+def stored_report(root: Path | None = None, min_km: float = 1.0) -> str:
+  """Totals the on-device ledger (efficiencyd) has accumulated across drives."""
+  from openpilot.starpilot.efficiency.store import KEY_SEPARATOR, load_totals
+  total, contexts, drives = load_totals(root)
+  out = [f"{drives} drives recorded", line("ALL DRIVING", total), "",
+         f"Contexts with the most waste per km (speed changes + friction braking), at least {min_km:g} km:"]
+  ranked = sorted(((k, v) for k, v in contexts.items() if v.distance >= min_km * 1000),
+                  key=lambda kv: -(kv[1].excess + kv[1].friction) / kv[1].distance)
+  out += [line("  " + " / ".join(k.split(KEY_SEPARATOR)), v) for k, v in ranked[:12]]
+  return "\n".join(out)
+
+
 def main() -> None:
   parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-  parser.add_argument('paths', nargs='+')
+  parser.add_argument('paths', nargs='*', help='rlog files or folders')
+  parser.add_argument('--stored', action='store_true', help='report the drives efficiencyd recorded on this device')
   parser.add_argument('--min-km', type=float, default=1.0)
   args = parser.parse_args()
-  print(report(args.paths, args.min_km))
+  if args.stored or not args.paths:
+    print(stored_report(min_km=args.min_km))
+  else:
+    print(report(args.paths, args.min_km))
 
 
 if __name__ == '__main__':
