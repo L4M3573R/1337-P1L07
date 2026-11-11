@@ -33,6 +33,8 @@ def chestnut_load_detail() -> str:
     boot = f"header {p['header']:.2f}s, gpu boot+arena {p['gpu_boot_alloc']:.2f}s"
     upload = f"upload {p['upload']:.2f}s ({p['upload_mb']:.0f} MB at {upload_rate:.0f} MB/s)"
     wrap = f", prep {p['prep']:.2f}s, protect {p['protect']:.2f}s" if 'prep' in p and 'protect' in p else ""
+    if 'protect_calls' in p:
+      wrap += f" ({p['protect_call_count']} host rewrites {p['protect_calls']:.2f}s, graph+hashing {p['protect_graph']:.2f}s)"
     return f" [{boot}, {upload}, unpickle {p['unpickle']:.2f}s{wrap}]"
   except (AttributeError, ImportError, KeyError, TypeError, ZeroDivisionError):
     return ""
@@ -273,10 +275,19 @@ class CatalogModelState:
     # why Jetlink's link copies this warp's output out every frame (jetlink_warp); None once it is moved
     self.warp_copied: str | None = "Jetlink was off when the model loaded"
     setup = time.monotonic()
+    if chestnut:
+      # Startup diagnostics: drain the device queue first, so outstanding upload work (if any is still in
+      # flight) is timed separately from allocating the inputs. The first realize below would wait anyway.
+      from tinygrad import Device
+      try:
+        Device[self.queue_device].synchronize()
+      except Exception:
+        pass  # diagnostics only; the first realize below synchronizes and reports any real device failure
+    drained = time.monotonic()
     self._reset_state()
-    # startup diagnostics: runtime load, contract validation, input queue allocation
-    self.load_phases = {"oob": loaded - start, "validate": validated - loaded, "queues": time.monotonic() - setup,
-                        "other": setup - validated}
+    # startup diagnostics: runtime load, contract validation, device drain, input queue allocation
+    self.load_phases = {"oob": loaded - start, "validate": validated - loaded, "drain": drained - setup,
+                        "queues": time.monotonic() - drained, "other": setup - validated}
 
   def move_warp_output(self, coherent_warp: Callable[[Any], None]) -> None:
     """On a comma, move this warp's output to memory the CPU reads cached with `coherent_warp` (Jetlink's

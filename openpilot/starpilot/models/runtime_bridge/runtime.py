@@ -301,9 +301,25 @@ def load_oob(path, chestnut=False):
       artifact = load_pickle(path, out_of_band=True)
   if isinstance(artifact, dict) and artifact.get('artifact_abi') == 'tinygrad_single_v1_arena':
     if chestnut:
-      artifact = protection.artifact(artifact)
-      # startup diagnostics: runtime setup before the load, and the captured-schedule protection after it
-      _load_chestnut.last_phases.update(prep=prepared - start, protect=time.monotonic() - loaded)
+      # Startup diagnostics: time the per-call host rewrite inside the (pinned, unmodified) protection by
+      # wrapping the bound method for this one call; the remainder is graph traversal and payload hashing.
+      call_seconds = [0.0, 0]
+      original_protect_call = protection.protect_call
+      def timed_protect_call(*args, **kwargs):
+        t = time.monotonic()
+        try:
+          return original_protect_call(*args, **kwargs)
+        finally:
+          call_seconds[0] += time.monotonic() - t
+          call_seconds[1] += 1
+      protection.protect_call = timed_protect_call
+      try:
+        artifact = protection.artifact(artifact)
+      finally:
+        del protection.protect_call
+      protect = time.monotonic() - loaded
+      _load_chestnut.last_phases.update(prep=prepared - start, protect=protect, protect_calls=call_seconds[0],
+                                        protect_call_count=call_seconds[1], protect_graph=protect - call_seconds[0])
       return artifact
     from openpilot.starpilot.models.runtime_bridge.qcom import Protection
     return Protection.artifact(protection, artifact)
