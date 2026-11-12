@@ -46,10 +46,3 @@ def test_lane_offset_options_keep_an_odd_current_value(tmp_path):
   with pytest.raises(ValueError):
     s.set_lane_offset(p, 0.5)
 
-
-def test_conditional_experimental_switches_through_the_locked_commit(tmp_path):
-  p = Params(str(tmp_path))
-  assert not s.cem_on(p)
-  assert s.set_cem(p, True, authorized=lambda: True) and s.cem_on(p)
-  assert s.set_cem(p, False, authorized=lambda: True) and not s.cem_on(p)
-  assert not s.set_cem(p, True, authorized=lambda: False) and not s.cem_on(p)   # refused while not allowed

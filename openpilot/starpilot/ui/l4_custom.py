@@ -1,5 +1,5 @@
-"""Settings behind the "L4 custom" tile: personal steering (NNLC), curve guard, Pulse and Glide band,
-Conditional Experimental mode and lane offset.
+"""Settings behind the "L4 custom" tile: personal steering (NNLC), curve guard, Pulse and Glide band and
+lane offset. (Conditional Experimental keeps its own selector.)
 
 Each read falls back to the default when its source is missing or malformed; each write is atomic.
 Personal steering and the curve guard take effect at the start of the next drive; the rest apply live.
@@ -121,36 +121,3 @@ def set_lane_offset(params, value: float) -> None:
     raise ValueError('offset outside -0.3..0.3 m')
   params.put('LaneCenterOffset', float(value), block=True)
 
-
-# ---------- Conditional Experimental ----------
-def cem_on(params) -> bool:
-  from openpilot.starpilot.conditional_mode.actions import DOCUMENT_KEY, MAX_DOCUMENT_BYTES
-  from openpilot.starpilot.saved_source import read_saved
-  document, ok = read_saved(params, DOCUMENT_KEY, MAX_DOCUMENT_BYTES)
-  if not ok or document is None:
-    return False
-  try:
-    return json.loads(document).get('mode') == 'conditional_experimental'
-  except (ValueError, AttributeError):
-    return False
-
-
-def set_cem(params, on: bool, authorized) -> bool:
-  """Switch between Conditional Experimental and stock through the same locked commit the other selectors use."""
-  from openpilot.starpilot.conditional_mode.actions import DOCUMENT_KEY, MAX_DOCUMENT_BYTES, MODE, commit_mode, edit
-  from openpilot.starpilot.conditional_mode.preferences import PreferenceError, SavedPreferences, decode_preferences
-  from openpilot.starpilot.saved_source import read_saved
-  document, ok1 = read_saved(params, DOCUMENT_KEY, MAX_DOCUMENT_BYTES)
-  baseline, ok2 = read_saved(params, 'ExperimentalMode', 8)
-  safe, ok3 = read_saved(params, 'SafeMode', 8)
-  units, ok4 = read_saved(params, 'IsMetric', 8)
-  if not (ok1 and ok2 and ok3 and ok4):
-    return False
-  try:
-    preferences = SavedPreferences() if document is None else decode_preferences(document)
-    raw = edit(preferences, MODE, 'Conditional Experimental' if on else 'Stock', metric=units == b'1')
-  except PreferenceError:
-    return False
-  result = commit_mode(params, raw, baseline or b'0', expected=document, expected_baseline=baseline,
-                       expected_units=units, expected_safe=safe, authorized=authorized)
-  return bool(result.committed)
