@@ -8,6 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from openpilot.starpilot.efficiency.energy import step
+from openpilot.starpilot.efficiency.hybrid import POWER_METER_NEUTRAL
 
 MPH = 0.44704
 STRETCH_M = 250.0
@@ -17,6 +18,12 @@ SPEED_BANDS = ((15 * MPH, "<15 mph"), (30 * MPH, "15-30 mph"), (45 * MPH, "30-45
 GRADE_BAND = 0.02  # +-2 % grade separates uphill / flat / downhill
 CURVE_GENTLE = 0.002  # 1/m (500 m radius)
 CURVE_TIGHT = 0.01  # 1/m (100 m radius)
+G = 9.81
+FLOW_SPEED_BIN_MPH = 2.0
+FLOW_ACCEL_BIN = 0.05  # m/s^2, acceleration with the road slope removed
+# The fuel counter dips slightly when the dash refreshes its average (a correction, kept so the sum
+# stays exact); a drop larger than this is a fill-up or a reseed, which is never bridged.
+FUEL_RESET_DROP_GAL = 0.05
 
 
 @dataclass(frozen=True)
@@ -32,10 +39,15 @@ class Sample:
   long_active: bool = False
   experimental: bool = False
   battery_raw: float | None = None  # uncalibrated hybrid battery signal, logged for later calibration
+  fuel_gal: float | None = None  # gallons used since the last fill-up (dash average), None when unknown
+  flow: str | None = None  # hybrid power-flow class (hybrid.FLOW_CLASSES)
+  power_meter: float | None = None  # 211 = no battery flow; lower = battery driving, higher = charging
+  pulse_glide: str | None = None  # Pulse and Glide phase when the mode is enabled ('off', 'pulse', 'glide', ...)
 
 
 def make_sample(t: float, mass: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, device_motion=None,
-                battery_raw: float | None = None) -> Sample:
+                battery_raw: float | None = None, fuel_gal: float | None = None, power_flow=None,
+                pulse_glide: str | None = None) -> Sample:
   """Build one ledger sample from the latest messages (shared by the on-device daemon and the log report)."""
   cs, cc = car_state, car_control
   pitch = cc.orientationNED[1] if cc is not None and len(cc.orientationNED) == 3 else None
@@ -44,12 +56,16 @@ def make_sample(t: float, mass: float, car_state, car_control=None, radar_state=
   return Sample(t=t, speed=cs.vEgo, accel=cs.aEgo, pitch=pitch, mass=mass, curvature=abs(yaw_rate) / max(cs.vEgo, 1.0),
                 lead=bool(lead is not None and lead.present and lead.dRel < 80.0), standstill=bool(cs.standstill),
                 long_active=bool(cc is not None and cc.longActive),
-                experimental=bool(selfdrive_state is not None and selfdrive_state.experimentalMode), battery_raw=battery_raw)
+                experimental=bool(selfdrive_state is not None and selfdrive_state.experimentalMode), battery_raw=battery_raw,
+                fuel_gal=fuel_gal, flow=power_flow.flow if power_flow is not None else None,
+                power_meter=float(power_flow.meter) if power_flow is not None else None, pulse_glide=pulse_glide)
 
 
 def mode_of(sample: Sample) -> str:
   if not sample.long_active:
     return "driver"
+  if sample.pulse_glide is not None:
+    return "pulse-glide"
   return "experimental" if sample.experimental else "chill"
 
 
@@ -69,6 +85,21 @@ class Stretch:
   stopped: bool = False
   battery_sum: float = 0.0
   battery_n: int = 0
+  fuel_first: float | None = None  # gallons-since-fill at the stretch start (carried from the previous stretch)
+  fuel_last: float | None = None
+  ev_s: float = 0.0
+  regen_s: float = 0.0
+  engine_s: float = 0.0
+  meter_sum: float = 0.0
+  meter_n: int = 0
+
+  @property
+  def fuel_gal(self) -> float:
+    """Real fuel burned in this stretch (dash average), 0 when unknown. A stretch that only holds a
+    dash refresh correction can be slightly negative; summed over a drive the corrections cancel."""
+    if self.fuel_first is None or self.fuel_last is None:
+      return 0.0
+    return self.fuel_last - self.fuel_first
 
   @property
   def duration(self) -> float:
@@ -91,19 +122,36 @@ class Stretch:
 @dataclass
 class Ledger:
   stretches: list[Stretch] = field(default_factory=list)
+  # Power-flow histogram for learning where the hybrid stays electric: key -> [samples, ev, regen, engine, meter sum].
+  flow_hist: dict[str, list[float]] = field(default_factory=dict)
   _open: Stretch | None = None
   _last: Sample | None = None
+  _fuel_carry: float | None = None
+
+  def _new(self, mode: str, t: float) -> Stretch:
+    return Stretch(mode, t, t, fuel_first=self._fuel_carry, fuel_last=self._fuel_carry)
 
   def add(self, sample: Sample) -> None:
     last, self._last = self._last, sample
     mode = mode_of(sample)
+    if sample.fuel_gal is not None and math.isfinite(sample.fuel_gal):
+      if self._fuel_carry is not None and sample.fuel_gal < self._fuel_carry - FUEL_RESET_DROP_GAL:
+        self._fuel_carry = None  # the counter went backwards (fill-up or reseed): do not bridge it
+        if self._open is not None:
+          self._open.fuel_first = None
+      if self._open is not None and self._open.fuel_first is None:
+        self._open.fuel_first = sample.fuel_gal
+      self._fuel_carry = sample.fuel_gal
+      if self._open is not None:
+        self._open.fuel_last = sample.fuel_gal
     if self._open is None:
-      self._open = Stretch(mode, sample.t, sample.t)
+      self._open = self._new(mode, sample.t)
       return
     dt = sample.t - last.t if last is not None else 0.0
     if not 0.0 < dt <= 1.0:  # gap in the log: start a fresh stretch
       self._close(last.t if last is not None else sample.t)
-      self._open = Stretch(mode, sample.t, sample.t)
+      self._fuel_carry = None
+      self._open = self._new(mode, sample.t)
       return
     s = self._open
     speed = 0.5 * (sample.speed + last.speed)
@@ -122,9 +170,30 @@ class Ledger:
     if sample.battery_raw is not None and math.isfinite(sample.battery_raw):
       s.battery_sum += sample.battery_raw
       s.battery_n += 1
+    if sample.flow is not None:
+      s.ev_s += dt if sample.flow == 'ev' else 0.0
+      s.regen_s += dt if sample.flow == 'regen' else 0.0
+      s.engine_s += dt if sample.flow == 'engine' else 0.0
+      if sample.long_active and sample.speed > 5.0:
+        self._observe_flow(sample)
+    if sample.power_meter is not None and math.isfinite(sample.power_meter):
+      s.meter_sum += sample.power_meter
+      s.meter_n += 1
     if mode != s.mode or s.distance >= STRETCH_M or s.duration >= STRETCH_S:
       self._close(sample.t)
-      self._open = Stretch(mode, sample.t, sample.t)
+      self._open = self._new(mode, sample.t)
+
+  def _observe_flow(self, sample: Sample) -> None:
+    flat_accel = sample.accel + (G * math.sin(sample.pitch) if sample.pitch is not None else 0.0)
+    speed_bin = math.floor(sample.speed / MPH / FLOW_SPEED_BIN_MPH) * FLOW_SPEED_BIN_MPH
+    accel_bin = round(math.floor(flat_accel / FLOW_ACCEL_BIN) * FLOW_ACCEL_BIN, 2)
+    key = f"{speed_bin:g}|{accel_bin:+.2f}|{sample.pulse_glide or mode_of(sample)}"
+    entry = self.flow_hist.setdefault(key, [0, 0, 0, 0, 0.0])
+    entry[0] += 1
+    entry[1] += sample.flow == 'ev'
+    entry[2] += sample.flow == 'regen'
+    entry[3] += sample.flow == 'engine'
+    entry[4] += sample.power_meter if sample.power_meter is not None else POWER_METER_NEUTRAL
 
   def finish(self) -> list[Stretch]:
     if self._open is not None and self._last is not None:
@@ -146,6 +215,11 @@ class Totals:
   regen: float = 0.0
   friction: float = 0.0
   steady: float = 0.0
+  fuel_gal: float = 0.0  # real fuel (dash average) over the stretches where it was known
+  fuel_distance: float = 0.0  # metres covered by those stretches
+  ev_s: float = 0.0
+  regen_s: float = 0.0
+  engine_s: float = 0.0
 
   def add(self, s: Stretch) -> None:
     self.distance += s.distance
@@ -154,6 +228,24 @@ class Totals:
     self.regen += s.regen
     self.friction += s.friction
     self.steady += s.steady
+    if s.fuel_first is not None and s.fuel_last is not None:
+      self.fuel_gal += s.fuel_gal
+      self.fuel_distance += s.distance
+    self.ev_s += s.ev_s
+    self.regen_s += s.regen_s
+    self.engine_s += s.engine_s
+
+  def add_totals(self, other: Totals) -> None:
+    for name in ('distance', 'duration', 'propulsion', 'regen', 'friction', 'steady', 'fuel_gal', 'fuel_distance',
+                 'ev_s', 'regen_s', 'engine_s'):
+      setattr(self, name, getattr(self, name) + getattr(other, name))
+
+  @property
+  def mpg(self) -> float | None:
+    """Real MPG where the dash fuel was known (None until there is enough of it)."""
+    if self.fuel_gal <= 0.0 or self.fuel_distance < 100.0:
+      return None
+    return self.fuel_distance / 1609.344 / self.fuel_gal
 
   def per_km(self, joules: float) -> float:
     return joules / 3600.0 / (self.distance / 1000.0) if self.distance > 0 else 0.0  # Wh/km

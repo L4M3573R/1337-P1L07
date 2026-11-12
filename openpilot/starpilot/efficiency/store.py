@@ -27,10 +27,13 @@ def _totals_dict(t: Totals) -> dict[str, float]:
   return {f.name: round(getattr(t, f.name), 3) for f in fields(Totals)}
 
 
-def drive_document(drive_id: str, stretches: list[Stretch]) -> dict:
+def drive_document(drive_id: str, stretches: list[Stretch], flow: dict | None = None) -> dict:
   total, by_context = summarize(stretches)
-  return {"version": VERSION, "drive": drive_id, "total": _totals_dict(total),
-          "contexts": {KEY_SEPARATOR.join(key): _totals_dict(t) for key, t in sorted(by_context.items())}}
+  doc = {"version": VERSION, "drive": drive_id, "total": _totals_dict(total),
+         "contexts": {KEY_SEPARATOR.join(key): _totals_dict(t) for key, t in sorted(by_context.items())}}
+  if flow:
+    doc["flow"] = {k: [round(x, 1) for x in v] for k, v in sorted(flow.items())}
+  return doc
 
 
 def _atomic_write(path: Path, data: dict) -> None:
@@ -47,12 +50,12 @@ def _atomic_write(path: Path, data: dict) -> None:
       os.unlink(tmp)
 
 
-def save_drive(drive_id: str, stretches: list[Stretch], root: Path | None = None) -> Path:
+def save_drive(drive_id: str, stretches: list[Stretch], root: Path | None = None, flow: dict | None = None) -> Path:
   root = default_root() if root is None else root
   if not drive_id or any(ch in drive_id for ch in "/\\") or drive_id.startswith("."):
     raise ValueError("invalid drive id")
   path = root / "drives" / f"{drive_id}.json"
-  _atomic_write(path, drive_document(drive_id, stretches))
+  _atomic_write(path, drive_document(drive_id, stretches, flow))
   prune(root)
   return path
 
@@ -84,3 +87,21 @@ def load_totals(root: Path | None = None) -> tuple[Totals, dict[str, Totals], in
 def _add(target: Totals, values: dict) -> None:
   for name in asdict(target):
     setattr(target, name, getattr(target, name) + float(values.get(name, 0.0)))
+
+
+def load_flow(root: Path | None = None) -> dict[str, list[float]]:
+  """Power-flow histogram merged across stored drives: 'speed|accel|phase' -> [samples, ev, regen, engine, meter sum]."""
+  root = default_root() if root is None else root
+  merged: dict[str, list[float]] = {}
+  for path in sorted((root / "drives").glob("*.json")):
+    try:
+      doc = json.loads(path.read_text())
+      if doc.get("version") != VERSION:
+        continue
+      for key, values in doc.get("flow", {}).items():
+        entry = merged.setdefault(key, [0.0] * 5)
+        for i in range(5):
+          entry[i] += float(values[i])
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+      continue
+  return merged
