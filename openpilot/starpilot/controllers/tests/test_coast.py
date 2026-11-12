@@ -8,8 +8,9 @@ from openpilot.common.params import Params
 from opendbc.car.honda.interface import CarInterface
 from opendbc.car.honda.values import CAR
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
-from openpilot.starpilot.controllers.coast import (CoastOwner, CoastRuntime, FEATHER_ACCEL, FEATHER_MAX_SPEED_MPS, GLIDE_FLOOR_MARGIN,
-                                                  TRANSITION_JERK, DT, cluster_ratio, glide_accel, pulse_accel, regen_glide_accel)
+from openpilot.starpilot.controllers.coast import (CoastOwner, CoastRuntime, ClusterRatioFilter, FEATHER_ACCEL, FEATHER_MAX_SPEED_MPS,
+                                                  GLIDE_FLOOR_MARGIN, PULSE_START_LAG_S, TRANSITION_JERK, DT, carry_mps, cluster_ratio,
+                                                  glide_accel, pulse_accel, regen_glide_accel)
 from openpilot.starpilot.controllers.wheel_actions import WheelPublisher
 from openpilot.starpilot.controllers.tests.test_wheel_actions import Publisher, DRIVE, NOW
 from openpilot.starpilot.longitudinal.tests.test_cruise_ceiling import messages
@@ -27,8 +28,8 @@ def test_pulse_glide_hysteresis_grade_pause_and_band():
   assert owner.toggle(14, long_active=True)
   # At the set speed it glides; the band runs the full set speed down to set - delta (18 m/s).
   assert sample(owner).pulse_coasting
-  assert sample(owner, speed_mps=18.01).pulse_coasting
-  assert not sample(owner, speed_mps=18.0).pulse_coasting    # glide runs all the way to the bottom of the band
+  assert sample(owner, speed_mps=18.05).pulse_coasting
+  assert not sample(owner, speed_mps=18.0).pulse_coasting    # glide runs to the bottom (less the speed it still loses)
   assert sample(owner, speed_mps=19.89).pulsing             # pulse until the set speed is reached
   assert sample(owner, speed_mps=19.9).pulse_coasting
   assert not sample(owner, pitch=math.radians(3)).pulse_coasting
@@ -76,8 +77,11 @@ def test_pulse_is_steady_and_eases_only_just_below_the_set_speed():
   assert low.pulsing and mid.pulsing and not low.pulse_coasting
   assert low.accel_target == pytest.approx(pulse_accel(18.3))
   assert mid.accel_target == pytest.approx(pulse_accel(19.0))
-  near = sample(owner, speed_mps=19.6)
-  assert 0.0 < near.accel_target < pulse_accel(19.6)
+  # A pulse at full strength hands over to the glide early; entered gently near the top, it eases instead.
+  gentle = CoastOwner()
+  gentle.toggle(14, long_active=True)
+  near = sample(gentle, speed_mps=19.75)
+  assert near.pulsing and 0.0 < near.accel_target < pulse_accel(19.75)
   assert near.brake_floor is None
   assert pulse_accel(12.0) > pulse_accel(30.0) > 0.3
 
@@ -255,3 +259,51 @@ def test_regen_glide_above_the_cutoff_blends_into_the_feather_below_it():
   assert above.accel_target == pytest.approx(regen_glide_accel(top))
   below = sample(owner, speed_mps=FEATHER_MAX_SPEED_MPS - 0.1, target_mps=top, delta_mps=4.0)
   assert below.accel_target == pytest.approx(above.accel_target + TRANSITION_JERK * DT)  # eased toward the feather
+
+
+def test_glide_hands_over_to_the_pulse_early_by_the_speed_it_still_loses():
+  # A 40 mph drive dipped 0.4 mph under the band after each switch (dash 34 for a 35 bottom).
+  owner = CoastOwner()
+  owner.toggle(14, long_active=True)
+  for _ in range(5):
+    sample(owner, speed_mps=34.0, target_mps=34.0, delta_mps=4.0)   # gliding above the feather speed: regen glide
+  for _ in range(10):
+    assert sample(owner, speed_mps=30.5, target_mps=34.0, delta_mps=4.0).pulse_coasting
+  carry = carry_mps(owner.last_target, PULSE_START_LAG_S)
+  assert owner.last_target < -0.25 and carry > 0.15
+  assert sample(owner, speed_mps=30.0 + carry + 0.01, target_mps=34.0, delta_mps=4.0).pulse_coasting
+  carry = carry_mps(owner.last_target, PULSE_START_LAG_S)
+  plan = sample(owner, speed_mps=30.0 + carry - 0.005, target_mps=34.0, delta_mps=4.0)
+  assert plan.pulsing and not plan.pulse_coasting                    # before the bottom, not after it
+
+
+def test_pulse_hands_over_to_the_glide_early_by_the_speed_it_still_gains():
+  # The same drive overshot the set speed by 0.75 mph after each pulse (dash 41 for a 40 set speed).
+  owner = CoastOwner()
+  owner.toggle(14, long_active=True)
+  for speed in (17.9, 18.5, 19.0, 19.2):
+    assert sample(owner, speed_mps=speed).pulsing
+  carry = carry_mps(owner.last_target)
+  assert carry > 0.1
+  assert sample(owner, speed_mps=19.9 - carry - 0.02).pulsing
+  carry = carry_mps(owner.last_target)
+  assert sample(owner, speed_mps=19.9 - carry + 0.01).pulse_coasting  # before the set speed, not past it
+
+
+def test_carry_is_zero_for_no_or_bad_acceleration():
+  assert carry_mps(0.0) == 0.0 and carry_mps(None) == 0.0 and carry_mps(float('nan')) == 0.0
+  assert carry_mps(-0.3, 0.35) == pytest.approx(0.09 / (2 * TRANSITION_JERK) + 0.105)
+
+
+def test_cluster_ratio_filter_averages_out_whole_mph_dash_readings():
+  f = ClusterRatioFilter()
+  assert f.update(NS(vEgo=2.0, vEgoCluster=2.1)) == 1.0            # unknown until a usable sample
+  raw = []
+  for i in range(int(90 / DT)):                                     # 90 s sweeping a 35-40 mph band
+    v = 15.6 + 1.1 * (1 + math.sin(i * DT / 6.0))
+    dash = round(v * 1.027 * 2.23694) / 2.23694                     # the dash shows whole mph
+    raw.append(dash / v)
+    value = f.update(NS(vEgo=v, vEgoCluster=dash))
+  assert max(raw) - min(raw) > 0.02                                 # single samples jump around
+  assert value == pytest.approx(1.027, abs=0.004)                   # the average does not
+  assert f.update(NS(vEgo=20.0, vEgoCluster=26.0)) == pytest.approx(value)  # implausible reading ignored

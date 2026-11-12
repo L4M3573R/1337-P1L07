@@ -35,11 +35,19 @@ PULSE_ENTRY_MARGIN = 1.0
 # all the way to the bottom.
 GLIDE_START_MARGIN = 0.1
 GLIDE_END_MARGIN = 0.0
+# Switch early by the speed the car still gains or loses after a switch: easing the command at
+# TRANSITION_JERK carries it a^2 / (2 * jerk) further, and a pulse also waits on the hybrid to start
+# pushing (often an engine start). A 40 mph drive measured 0.39 mph past the glide->pulse switch
+# (accel -0.3) and 0.75 mph past the pulse->glide switch (accel +0.62), landing on dash 34 and 41.
+PULSE_START_LAG_S = 0.35
 # The band follows the dash speedometer (what the driver set and sees), not the slightly lower wheel
 # speed. Plausible dash/wheel ratios only; anything else falls back to wheel speed.
 CLUSTER_RATIO_MIN = 0.95
 CLUSTER_RATIO_MAX = 1.10
 CLUSTER_RATIO_MIN_SPEED = 5.0
+# The dash speed is whole mph, so one sample's ratio jumps about +/-2.5% at 40 mph (the band edges moved
+# +/-0.75 mph). A slow average settles on the true ratio while the speed sweeps the band.
+CLUSTER_RATIO_TAU_S = 30.0
 
 
 def glide_accel(speed_mps, pitch):
@@ -55,16 +63,42 @@ def regen_glide_accel(speed_mps):
   return -(GLIDE_C0 + GLIDE_C2 * speed_mps ** 2)
 
 
-def cluster_ratio(car_state) -> float:
-  """Dash speedometer / wheel speed (Hyundai's dash reads about 2.7% high); 1.0 when unknown."""
+def raw_cluster_ratio(car_state) -> float | None:
+  """One sample of dash speedometer / wheel speed, or None when it is not usable."""
   try:
     v, dash = float(car_state.vEgo), float(car_state.vEgoCluster)
   except (AttributeError, TypeError, ValueError):
-    return 1.0
+    return None
   if not (math.isfinite(v) and math.isfinite(dash)) or v < CLUSTER_RATIO_MIN_SPEED:
-    return 1.0
+    return None
   ratio = dash / v
-  return ratio if CLUSTER_RATIO_MIN <= ratio <= CLUSTER_RATIO_MAX else 1.0
+  return ratio if CLUSTER_RATIO_MIN <= ratio <= CLUSTER_RATIO_MAX else None
+
+
+def cluster_ratio(car_state) -> float:
+  """Dash speedometer / wheel speed (Hyundai's dash reads about 2.7% high); 1.0 when unknown."""
+  ratio = raw_cluster_ratio(car_state)
+  return 1.0 if ratio is None else ratio
+
+
+def carry_mps(accel, lag_s=0.0):
+  """Speed the car still gains (accel > 0) or loses after the command starts easing toward the other phase."""
+  if type(accel) not in (int, float) or not math.isfinite(accel):
+    return 0.0
+  return accel * accel / (2.0 * TRANSITION_JERK) + abs(accel) * lag_s
+
+
+class ClusterRatioFilter:
+  """A slow average of dash/wheel speed; 1.0 until the first plausible sample."""
+  def __init__(self, tau_s=CLUSTER_RATIO_TAU_S, dt=DT):
+    self.alpha = dt / (tau_s + dt)
+    self.value = None
+
+  def update(self, car_state) -> float:
+    ratio = raw_cluster_ratio(car_state)
+    if ratio is not None:
+      self.value = ratio if self.value is None else self.value + self.alpha * (ratio - self.value)
+    return 1.0 if self.value is None else self.value
 
 
 def pulse_accel(speed_mps):
@@ -144,10 +178,13 @@ class CoastOwner:
       if not available:
         self.coasting = False
       elif self.coasting:
-        if speed_mps <= lower + GLIDE_END_MARGIN:
+        slowing = min(self.last_target, 0.0) if self.last_target is not None else 0.0
+        if speed_mps - carry_mps(slowing, PULSE_START_LAG_S) <= lower + GLIDE_END_MARGIN:
           self.coasting = False
-      elif speed_mps >= target_mps - GLIDE_START_MARGIN:
-        self.coasting = True
+      else:
+        gaining = max(self.last_target, 0.0) if self.last_target is not None else 0.0
+        if speed_mps + carry_mps(gaining) >= target_mps - GLIDE_START_MARGIN:
+          self.coasting = True
       if available and self.coasting:
         accel_target = min(glide_accel(speed_mps, pitch), GLIDE_SET_SPEED_GAIN * (target_mps - speed_mps))
       elif available and speed_mps >= lower - PULSE_ENTRY_MARGIN:
@@ -175,6 +212,7 @@ class CoastRuntime:
     self.cp_signature = None
     self.conditional_stop = False
     self.cluster_ratio = 1.0  # logging: the dash/wheel ratio used by the last sample
+    self.ratio_filter = ClusterRatioFilter()
 
   def receive(self, event, params, cp, sm, *, now_ns):
     command = self.consumer.accept(event, params, cp, sm, now_ns=now_ns)
@@ -241,7 +279,8 @@ class CoastRuntime:
     state, control = sm["carState"], sm["carControl"]
     pitch = control.orientationNED[1] if len(control.orientationNED) == 3 else None
     # Express the dash-speed band in wheel speed: the set speed and delta the driver sees on the dash.
-    ratio = cluster_ratio(state)
+    ratio_filter = getattr(self, 'ratio_filter', None)
+    ratio = ratio_filter.update(state) if ratio_filter is not None else cluster_ratio(state)
     self.cluster_ratio = ratio
     return self.owner.sample(admitted=admitted, active=bool(control.enabled and control.longActive),
                              gas=bool(state.gasPressed), brake=bool(state.brakePressed), speed_mps=float(state.vEgo),
