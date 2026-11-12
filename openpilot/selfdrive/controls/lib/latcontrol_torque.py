@@ -80,6 +80,8 @@ class LatControlTorque(LatControl):
     self.native_learning_provenance = ()
     self.native_learning_last_tick = 0
     self.native_learning_source = None
+    # Personal NNLC feedforward; set by controlsd only on drives the NNLC trial selects.
+    self.nnlc = None
 
   def update_torque_parameters(self, latAccelFactor, latAccelOffset, friction):
     if self.starpilot_extension is not None:
@@ -167,6 +169,15 @@ class LatControlTorque(LatControl):
     ff += auto_stages.apply_selected_friction(
       self, CS, setpoint, float(selected_friction), active=active, limited=steer_limited_by_safety or curvature_limited, curvature_limited=curvature_limited
     )
+    nnlc = getattr(self, 'nnlc', None)
+    if nnlc is not None:
+      # NNLC replaces only the feedforward (friction included); the PID and every limit below are unchanged.
+      nnlc.observe(future_desired_lateral_accel, params.roll)
+      if active:
+        baseline_torque = self.torque_from_lateral_accel(ff, self.torque_params)
+        nnlc_torque = nnlc.torque(CS.vEgo, CS.aEgo, future_desired_lateral_accel, desired_lateral_jerk, params.roll, lat_delay, baseline_torque)
+        if nnlc_torque is not None:
+          ff = self.lateral_accel_from_torque(nnlc_torque, self.torque_params)
 
     if not active:
       output_torque = 0.0

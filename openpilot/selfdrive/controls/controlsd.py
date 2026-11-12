@@ -171,14 +171,18 @@ class Controls:
           "startupPidLimits": [self.LaC.pid.neg_limit, self.LaC.pid.pos_limit],
         }
       )
+      self.nnlc_drive = self._select_nnlc()
 
     from openpilot.starpilot.flm.live_trial_store import load_confirmed_history
     from openpilot.starpilot.lateral.learning_preferences import read_preference
 
     preference = read_preference(self.params, self.CP)
     route_effects, self.route_flm_status = self._configure_route_tune(manual_status)
+    # Steering learning pauses on NNLC drives so it never learns from the network's behavior.
     self.global_learning = (
-      GlobalRuntime(self.CP, self.CI, self.LaC, confirmed_live_history=load_confirmed_history(self.params)) if preference.valid and preference.enabled else None
+      GlobalRuntime(self.CP, self.CI, self.LaC, confirmed_live_history=load_confirmed_history(self.params))
+      if preference.valid and preference.enabled and not getattr(self, 'nnlc_drive', False)
+      else None
     )
     # Load optional capture and live-trial code before the first control command.
     # Engagement must not compile/import replay and feedback modules in the loop.
@@ -193,6 +197,26 @@ class Controls:
 
     assist_enabled = self.vehicle_startup_preferences.turn_assist and model_turn_assist_supported(self.CP)
     self.turn_assist_enabled = lambda: assist_enabled
+
+  def _select_nnlc(self) -> bool:
+    """Once per drive: does the personal NNLC feedforward steer this drive? Any failure means no."""
+    self.LaC.nnlc = None
+    if self.CP.steerControlType != car.CarParams.SteerControlType.torque:
+      return False
+    try:
+      from openpilot.starpilot.lateral.nnlc.feedforward import NnlcFeedforward
+      from openpilot.starpilot.lateral.nnlc.trial import NNLC, choose_for_drive
+
+      choice = choose_for_drive()
+      cloudlog.event('starpilot_feature', feature='nnlc', mode=choice.mode, reason=choice.reason,
+                     model_sha256=choice.model_sha256, drive=choice.drive)
+      if choice.mode == NNLC and choice.model is not None:
+        self.LaC.nnlc = NnlcFeedforward(choice.model, DT_CTRL, choice.model_sha256)
+        return True
+    except Exception:
+      cloudlog.exception('nnlc selection failed; standard drive')
+      self.LaC.nnlc = None
+    return False
 
   def _configure_route_tune(self, manual_status):
     from openpilot.starpilot.flm.offroad_runtime import configure
@@ -606,6 +630,9 @@ class Controls:
         automatic = None
     if cycle_timing is not None:
       cycle_timing.mark()
+    nnlc = getattr(self.LaC, 'nnlc', None)
+    if nnlc is not None:
+      nnlc.set_plan(model_v2)
     steer, lateral_output, lac_log = self.LaC.update(
       CC.latActive, CS, self.VM, lp, self.steer_limited_by_safety, self.desired_curvature, curvature_limited, lat_delay
     )
