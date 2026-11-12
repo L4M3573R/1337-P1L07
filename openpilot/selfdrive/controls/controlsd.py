@@ -122,6 +122,7 @@ class Controls:
     self.lane_centering_controller = (
       LaneCenteringController(body=interface_dimensions(self.CI, self.CP), body_required=True) if predict_lane_clearance else LaneCenteringController()
     )
+    self.curve_guard = self._create_curve_guard()
     self.lateral_pause = LateralPause(read_lateral_pause(self.params), self.params)
     self.lane_change_preferences = LiveLaneChangePolicy(self.params, now_ns=0 if os.getenv('REPLAY') == '1' else time.monotonic_ns())
     self.lane_change_policy = self.lane_change_preferences.applied
@@ -197,6 +198,51 @@ class Controls:
 
     assist_enabled = self.vehicle_startup_preferences.turn_assist and model_turn_assist_supported(self.CP)
     self.turn_assist_enabled = lambda: assist_enabled
+
+  def _create_curve_guard(self):
+    """The curve guard, or None if it cannot be set up. Opt-in: on only when <starpilot storage>/curve_guard.json says {"enabled": true}."""
+    try:
+      import json
+      from pathlib import Path
+      from openpilot.starpilot.diagnostics.features import ChangeLog
+      from openpilot.starpilot.lateral.curve_guard import CurveGuard
+      from openpilot.starpilot.storage import starpilot_storage_root
+
+      enabled = False
+      try:
+        doc = json.loads((starpilot_storage_root() / 'curve_guard.json').read_bytes()[:4096])
+        enabled = isinstance(doc, dict) and doc.get('enabled') is True
+      except (OSError, ValueError):
+        pass
+      if not enabled:
+        return None
+      # LaneCenterOffset places the comma's lens relative to the lane center (-0.23 = lens 0.23 m left of the car center).
+      try:
+        offset = float(Path(self.params.get_param_path('LaneCenterOffset')).read_bytes())
+      except (OSError, ValueError):
+        offset = 0.0
+      body = interface_dimensions(self.CI, self.CP)
+      self.curve_guard_log = ChangeLog('curve_guard')
+      return CurveGuard(body.width if body is not None else None, camera_offset_left_m=-offset, enabled=enabled)
+    except Exception:
+      cloudlog.exception('curve guard setup failed; off')
+      return None
+
+  def _apply_curve_guard(self, CS, CC, model_v2, curvature):
+    guard = getattr(self, 'curve_guard', None)
+    if guard is None:
+      return curvature
+    try:
+      result = guard.update(model_v2, curvature, CS.vEgo, lat_active=bool(CC.latActive),
+                            blinker=bool(CS.leftBlinker or CS.rightBlinker),
+                            lane_change=model_v2.meta.laneChangeState != log.LaneChangeState.off)
+      self.curve_guard_log.observe({'active': result.active, 'inside': result.inside if result.active else ''},
+                                   {'gap_m': result.gap_m, 'shift_m': result.shift_m, 'reason': result.reason,
+                                    'v_ego': CS.vEgo, 'curvature': curvature, 'guarded': result.curvature})
+      return result.curvature
+    except Exception:
+      guard.reset()
+      return curvature
 
   def _select_nnlc(self) -> bool:
     """Once per drive: does the personal NNLC feedforward steer this drive? Any failure means no."""
@@ -521,6 +567,8 @@ class Controls:
     elif getattr(self, 'model_turn_assist', None) is not None:
       self.model_turn_assist.reset()
       self.model_turn_assist.twitch_guard_armed = update_twitch_guard(False, CS.vEgo, CS.standstill)
+    if not self.sm.valid['lateralManeuverPlan']:
+      new_desired_curvature = self._apply_curve_guard(CS, CC, model_v2, new_desired_curvature)
     lane_base_curvature = new_desired_curvature
     self.lane_centering_applied = 0.0
     self.lane_centering_inactive_reason = 'inactive'
