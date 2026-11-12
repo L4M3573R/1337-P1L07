@@ -37,12 +37,3 @@ def test_pulse_glide_band_and_units(tmp_path):
   p.put_bool('IsMetric', True, block=True)
   assert s.pg_delta_options(p) == s.PG_DELTAS_KPH
 
-
-def test_lane_offset_options_keep_an_odd_current_value(tmp_path):
-  p = Params(str(tmp_path))
-  assert s.lane_offset(p) == 0.0 and s.lane_offset_options(p) == (-0.23, -0.12, 0.0)
-  s.set_lane_offset(p, -0.05)
-  assert s.lane_offset(p) == pytest.approx(-0.05) and -0.05 in s.lane_offset_options(p)
-  with pytest.raises(ValueError):
-    s.set_lane_offset(p, 0.5)
-

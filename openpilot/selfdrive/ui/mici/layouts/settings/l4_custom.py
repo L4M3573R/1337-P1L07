@@ -8,12 +8,8 @@ def _fmt_delta(value: float, metric: bool) -> str:
   return f"{value:g} {'km/h' if metric else 'mph'}"
 
 
-def _fmt_offset(value: float) -> str:
-  return f"{value:+.2f} m"
-
-
 class L4CustomLayoutMici(NavScroller):
-  """One tile per L4 setting. Personal steering and curve guard apply from the next drive; the rest apply live."""
+  """One tile per L4 setting. Personal steering and curve guard apply from the next drive; the P&G band applies live."""
 
   def __init__(self):
     super().__init__()
@@ -31,12 +27,7 @@ class L4CustomLayoutMici(NavScroller):
     self._pg_options = settings.pg_delta_options(params)
     self._pg = BigMultiToggle("pulse & glide band", [_fmt_delta(v, self._metric) for v in self._pg_options], select_callback=self._on_pg,
                               description="How far below the set speed each glide coasts before the next pulse.")
-    self._offset_options = settings.lane_offset_options(params)
-    self._offset = BigMultiToggle("lane offset", [_fmt_offset(v) for v in self._offset_options], select_callback=self._on_offset,
-                                  description="Where the comma sits relative to the car's center (negative: left of center).\n" +
-                                              "-0.23 m matches a comma mounted 9 in left. Also used by the curve guard.")
-
-    self._scroller.add_widgets([self._nnlc, self._curve_guard, self._pg, self._offset])
+    self._scroller.add_widgets([self._nnlc, self._curve_guard, self._pg])
 
   def show_event(self):
     super().show_event()
@@ -48,8 +39,6 @@ class L4CustomLayoutMici(NavScroller):
     self._curve_guard.set_checked(settings.curve_guard_enabled())
     pg = settings.pg_delta(params)
     self._pg.set_value(_fmt_delta(min(self._pg_options, key=lambda v: abs(v - pg)), self._metric))
-    offset = settings.lane_offset(params)
-    self._offset.set_value(_fmt_offset(min(self._offset_options, key=lambda v: abs(v - offset))))
 
   def _on_nnlc(self, value: str):
     settings.set_nnlc_override(value)
@@ -59,6 +48,3 @@ class L4CustomLayoutMici(NavScroller):
 
   def _on_pg(self, label: str):
     settings.set_pg_delta(ui_state.params, self._pg_options[[_fmt_delta(v, self._metric) for v in self._pg_options].index(label)])
-
-  def _on_offset(self, label: str):
-    settings.set_lane_offset(ui_state.params, self._offset_options[[_fmt_offset(v) for v in self._offset_options].index(label)])

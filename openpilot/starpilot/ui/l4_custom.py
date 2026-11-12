@@ -1,5 +1,5 @@
-"""Settings behind the "L4 custom" tile: personal steering (NNLC), curve guard, Pulse and Glide band and
-lane offset. (Conditional Experimental keeps its own selector.)
+"""Settings behind the "L4 custom" tile: personal steering (NNLC), curve guard and Pulse and Glide band.
+(Conditional Experimental and lane offset keep their own selectors; the curve guard reads the lane offset.)
 
 Each read falls back to the default when its source is missing or malformed; each write is atomic.
 Personal steering and the curve guard take effect at the start of the next drive; the rest apply live.
@@ -15,7 +15,6 @@ from pathlib import Path
 NNLC_MODES = ('auto', 'off', 'on')  # auto: the off-car trainer's trial decides; off/on: the driver's override
 PG_DELTAS_MPH = (3.0, 5.0, 7.0)
 PG_DELTAS_KPH = (5.0, 8.0, 11.0)
-LANE_OFFSETS_M = (-0.23, -0.12, 0.0)
 MAX_JSON_BYTES = 4096
 
 
@@ -104,20 +103,4 @@ def set_pg_delta(params, value: float) -> None:
   if not math.isfinite(value) or not 0.5 <= value <= 30.0:
     raise ValueError('band outside 0.5-30')
   params.put('PulseGlideSpeedDelta', float(value), block=True)
-
-
-# ---------- lane offset ----------
-def lane_offset(params) -> float:
-  return _float_param(params, 'LaneCenterOffset', 0.0)
-
-
-def lane_offset_options(params) -> tuple[float, ...]:
-  current = round(lane_offset(params), 2)
-  return tuple(sorted(set(LANE_OFFSETS_M) | ({current} if -0.3 <= current <= 0.3 else set())))
-
-
-def set_lane_offset(params, value: float) -> None:
-  if not math.isfinite(value) or not -0.3 <= value <= 0.3:
-    raise ValueError('offset outside -0.3..0.3 m')
-  params.put('LaneCenterOffset', float(value), block=True)
 
