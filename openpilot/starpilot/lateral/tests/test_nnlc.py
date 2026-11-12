@@ -156,6 +156,21 @@ class TestTrial:
     (tmp_path / 'config.json').write_text(json.dumps({'version': 1, 'mode': 'on', 'model': '../x.json', 'model_sha256': '0' * 64}))
     assert trial.choose_for_drive(tmp_path).reason == 'bad model reference'
 
+  def test_driver_override_wins_and_leaves_the_trial_alone(self, tmp_path):
+    self.write(tmp_path)
+    assert trial.choose_for_drive(tmp_path).mode == trial.NNLC                     # trial drive 1
+    (tmp_path / 'user.json').write_text(json.dumps({'version': 1, 'mode': 'off'}))
+    assert trial.choose_for_drive(tmp_path).reason == 'driver chose off'
+    (tmp_path / 'user.json').write_text(json.dumps({'version': 1, 'mode': 'on'}))
+    assert {trial.choose_for_drive(tmp_path).mode for _ in range(3)} == {trial.NNLC}
+    (tmp_path / 'user.json').write_text(json.dumps({'version': 1, 'mode': 'auto'}))
+    assert trial.choose_for_drive(tmp_path).mode == trial.STANDARD                 # the trial resumes at drive 2
+    self.write(tmp_path, mode='off')
+    (tmp_path / 'user.json').write_text(json.dumps({'version': 1, 'mode': 'on'}))
+    assert trial.choose_for_drive(tmp_path).mode == trial.NNLC                     # on overrides a trainer "off"
+    self.write(tmp_path, sha='0' * 64)
+    assert trial.choose_for_drive(tmp_path).mode == trial.STANDARD                 # but never a bad model
+
   @pytest.mark.skipif(os.geteuid() == 0, reason='root ignores directory permissions')
   def test_unwritable_state_is_standard(self, tmp_path):
     self.write(tmp_path)

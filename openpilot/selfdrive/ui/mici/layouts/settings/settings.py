@@ -6,6 +6,7 @@ from openpilot.selfdrive.ui.mici.layouts.settings.network.network_layout import 
 from openpilot.selfdrive.ui.mici.layouts.settings.device.device_layout import DeviceLayoutMici
 from openpilot.selfdrive.ui.mici.layouts.settings.developer import DeveloperLayoutMici
 from openpilot.selfdrive.ui.mici.layouts.settings.software import SoftwareLayoutMici
+from openpilot.selfdrive.ui.mici.layouts.settings.l4_custom import L4CustomLayoutMici
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 
 
@@ -39,7 +40,12 @@ class SettingsLayout(NavScroller):
     developer_btn = SettingsBigButton("developer", "", gui_app.texture("icons_mici/settings/developer_icon.png", 64, 60))
     developer_btn.set_click_callback(lambda: gui_app.push_widget(developer_panel))
 
+    l4_panel = L4CustomLayoutMici()
+    l4_btn = SettingsBigButton("L4 custom", "", gui_app.texture("icons_mici/settings/vehicle.png", 64, 64))
+    l4_btn.set_click_callback(lambda: gui_app.push_widget(l4_panel))
+
     self._scroller.add_widgets([
+      l4_btn,
       toggles_btn,
       network_btn,
       self._device_button,

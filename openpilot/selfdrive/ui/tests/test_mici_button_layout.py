@@ -47,6 +47,13 @@ def drawn(monkeypatch):
   lambda: button.GreyBigButton("saved settings", "unavailable while driving"),
   lambda: button.GreyBigButton("", "A full explanation that must retain enough room for several lines of readable text."),
   lambda: button.BigButton("driving\ncontrols"),
+  lambda: button.BigButton("L4 custom"),
+  lambda: button.BigMultiToggle("personal steering", ["auto", "off", "on"]),
+  lambda: button.BigToggle("curve guard"),
+  lambda: button.BigMultiToggle("pulse & glide band", ["3 mph", "5 mph", "7 mph"]),
+  lambda: button.BigMultiToggle("pulse & glide band", ["5 km/h", "8 km/h", "11 km/h"]),
+  lambda: button.BigToggle("conditional experimental"),
+  lambda: button.BigMultiToggle("lane offset", ["-0.23 m", "-0.12 m", "+0.00 m"]),
 ])
 def test_card_title_and_value_do_not_overlap(factory, drawn):
   card = factory()

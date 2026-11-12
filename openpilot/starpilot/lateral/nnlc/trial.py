@@ -65,15 +65,25 @@ def _write_json(path: Path, doc: dict) -> None:
       os.unlink(tmp)
 
 
+def user_override(root: Path) -> str | None:
+  """The driver's choice from the settings tile (user.json): 'off', 'on', or None to let the trial decide."""
+  doc = _read_json(root / 'user.json')
+  mode = doc.get('mode') if doc else None
+  return mode if mode in ('off', 'on') else None
+
+
 def choose_for_drive(root: Path | None = None) -> DriveChoice:
   root = default_root() if root is None else root
+  override = user_override(root)
+  if override == 'off':
+    return DriveChoice(STANDARD, 'driver chose off')
   config = _read_json(root / 'config.json')
   if config is None:
     return DriveChoice(STANDARD, 'not configured')
   mode = config.get('mode')
   if mode not in MODES:
     return DriveChoice(STANDARD, 'bad mode')
-  if mode == 'off':
+  if mode == 'off' and override != 'on':
     return DriveChoice(STANDARD, 'off')
   name, sha = config.get('model'), config.get('model_sha256')
   if not isinstance(name, str) or not _MODEL_NAME.fullmatch(name) or not isinstance(sha, str) or not _SHA.fullmatch(sha):
@@ -85,6 +95,9 @@ def choose_for_drive(root: Path | None = None) -> DriveChoice:
   if loaded_sha != sha:
     return DriveChoice(STANDARD, 'model checksum mismatch')
 
+  if override == 'on':
+    # The driver's choice: no trial bookkeeping, so the trial resumes where it was when set back to auto.
+    return DriveChoice(NNLC, 'driver chose on', model, sha)
   state = _read_json(root / 'state.json') or {'version': VERSION}
   drive = int(state.get('drives', 0)) + 1 if isinstance(state.get('drives', 0), int) else 1
   if mode == 'on':
