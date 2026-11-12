@@ -240,3 +240,42 @@ def test_eight_byte_meter_replacement_is_exact_and_blocks_only_its_original(stat
   assert safety.safety_fwd_packet_hook(incoming) == (-1 if advisory else 0)
   safety.set_timer(1_200_001)
   assert safety.safety_fwd_packet_hook(incoming) == 0
+
+
+@pytest.mark.parametrize('gap_us', [90_000, 100_500, 105_000, 112_000])
+def test_classic_take_a_break_is_blocked_when_the_next_frame_arrives_just_over_a_period(gap_us):
+  # On the car the forward decision for a new camera frame runs before its rx hook, so it sees the
+  # previous frame's age. Frames arrive every ~100 ms with jitter; a 100 ms window let the originals
+  # (including the take-a-break meter) through about half the time.
+  from opendbc.car.hyundai.tests.test_daw import meter
+  safety, _ = setup(False, 0)
+  owner = DawSource(params(False))
+  first = meter(1)
+  incoming = packet(0x53E, first, 2)
+  safety.safety_fwd_packet_hook(incoming)
+  safety.safety_rx_hook(incoming)
+  owner.update([(BASE, [(0x53E, first, 2)])])
+  addr, output, bus = owner.command(BASE)[0]
+  for now in range(1_002_000, 1_000_000 + gap_us - 1_000, 10_000):  # the host resends at 100 Hz
+    safety.set_timer(now)
+    assert safety.safety_tx_hook(packet(addr, output, bus))
+  safety.set_timer(1_000_000 + gap_us)
+  warning = packet(0x53E, meter(6, True), 2)  # take a break, forward decided before its rx hook
+  assert safety.safety_fwd_packet_hook(warning) == -1
+  safety.safety_rx_hook(warning)
+
+
+def test_classic_original_still_passes_once_the_replacement_stops():
+  from opendbc.car.hyundai.tests.test_daw import meter
+  safety, _ = setup(False, 0)
+  owner = DawSource(params(False))
+  first = meter(1)
+  incoming = packet(0x53E, first, 2)
+  safety.safety_fwd_packet_hook(incoming)
+  safety.safety_rx_hook(incoming)
+  owner.update([(BASE, [(0x53E, first, 2)])])
+  addr, output, bus = owner.command(BASE)[0]
+  safety.set_timer(1_002_000)
+  assert safety.safety_tx_hook(packet(addr, output, bus))
+  safety.set_timer(1_105_000)  # no replacement for 103 ms: the car must see the camera's own frame
+  assert safety.safety_fwd_packet_hook(packet(0x53E, meter(6, True), 2)) == 0

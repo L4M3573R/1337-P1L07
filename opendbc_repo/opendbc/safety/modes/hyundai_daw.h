@@ -21,6 +21,12 @@ static uint8_t hyundai_daw_last_classic_tx[8];
 // 6 plus flag 0x10 raises "take a break". Its replacement holds the meter full (5) without the flag.
 #define HYUNDAI_DAW_METER_MASK 0x17U
 #define HYUNDAI_DAW_METER_FULL 5U
+// Classic LKAS12 arrives every ~100 ms with jitter (90-112 ms seen on an Elantra Hybrid). The forward
+// decision for a new frame runs before its rx hook, so it sees the previous frame's age (~100 ms): a
+// 100 ms window let about half the originals through. The live-replacement window stays 100 ms.
+#define HYUNDAI_DAW_SOURCE_MAX_AGE_US 100000U
+#define HYUNDAI_DAW_CLASSIC_SOURCE_MAX_AGE_US 250000U
+#define HYUNDAI_DAW_REPLACEMENT_MAX_AGE_US 100000U
 
 static bool hyundai_daw_classic_advisory(unsigned int len, uint8_t byte5) {
   const uint8_t status = byte5 & 7U;
@@ -88,7 +94,8 @@ static bool hyundai_daw_tx(const CANPacket_t *msg) {
   const bool canfd = hyundai_daw_len == 16U;
   bool valid = hyundai_daw_seen && (hyundai_daw_addr != 0U) && (msg->addr == hyundai_daw_addr) &&
                (msg->bus == hyundai_daw_bus) && (GET_LEN(msg) == hyundai_daw_len) &&
-               (safety_get_ts_elapsed(now, hyundai_daw_rx_ts) <= 100000U) &&
+               (safety_get_ts_elapsed(now, hyundai_daw_rx_ts) <=
+                (canfd ? HYUNDAI_DAW_SOURCE_MAX_AGE_US : HYUNDAI_DAW_CLASSIC_SOURCE_MAX_AGE_US)) &&
                (!hyundai_daw_sent || (safety_get_ts_elapsed(now, hyundai_daw_tx_ts) >= 5000U));
   if (valid) {
     const uint8_t *source = hyundai_daw_data;
@@ -126,8 +133,8 @@ static bool hyundai_daw_fwd(const CANPacket_t *msg) {
                  ((hyundai_daw_len == 6U) || (hyundai_daw_len == 8U)) && (GET_LEN(msg) == hyundai_daw_len) &&
                  hyundai_daw_seen && hyundai_daw_sent &&
                  !relay_malfunction && !safety_rx_checks_invalid &&
-                 (safety_get_ts_elapsed(now, hyundai_daw_rx_ts) <= 100000U) &&
-                 (safety_get_ts_elapsed(now, hyundai_daw_tx_ts) <= 100000U);
+                 (safety_get_ts_elapsed(now, hyundai_daw_rx_ts) <= HYUNDAI_DAW_CLASSIC_SOURCE_MAX_AGE_US) &&
+                 (safety_get_ts_elapsed(now, hyundai_daw_tx_ts) <= HYUNDAI_DAW_REPLACEMENT_MAX_AGE_US);
   if (blocked) {
     blocked = hyundai_daw_classic_advisory(hyundai_daw_len, msg->data[5]);
     const uint8_t advisory_bits = (hyundai_daw_len == 8U) ? HYUNDAI_DAW_METER_MASK : 7U;
