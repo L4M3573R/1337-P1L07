@@ -11,6 +11,16 @@ G = 9.81
 GLIDE_C0 = 0.12
 GLIDE_C2 = 0.00018
 GLIDE_FLOOR_MARGIN = 0.05
+# EV feather glide. Elantra Hybrid logs (0x595 power flow vs the dash EV light): below ~63 mph a glide
+# that just cancels regen (~-0.05 m/s^2 on a flat road) stays electric with the battery about neutral
+# (EV 97% at 60-62 mph); above ~64 mph the same light request starts the engine (EV 12% at 64-66 mph),
+# so the regen glide above is kept there. The cut-off is a starting point for the efficiency learner.
+FEATHER_ACCEL = -0.05
+FEATHER_MAX_SPEED_MPS = 63.0 * 0.44704
+# Ease between pulse and glide instead of stepping: a hard step from +0.5 to -0.45 m/s^2 showed a
+# regen spike with the engine still on (mode 128, power meter pinned) at every glide start.
+TRANSITION_JERK = 0.6  # m/s^3
+DT = 0.05
 # A glide never carries the car past the set speed (downhill): hold it at the set speed instead.
 GLIDE_SET_SPEED_GAIN = 1.0
 # The pulse is a steady, moderate acceleration through the band (engine at an efficient load),
@@ -33,8 +43,16 @@ CLUSTER_RATIO_MIN_SPEED = 5.0
 
 
 def glide_accel(speed_mps, pitch):
+  """Glide target (actual acceleration): an EV feather below the cut-off, the regen glide above it."""
   grade = G * math.sin(pitch) if type(pitch) in (int, float) and math.isfinite(pitch) else 0.0
-  return -(GLIDE_C0 + GLIDE_C2 * speed_mps ** 2) - grade
+  if speed_mps < FEATHER_MAX_SPEED_MPS:
+    return FEATHER_ACCEL - grade
+  return regen_glide_accel(speed_mps) - grade
+
+
+def regen_glide_accel(speed_mps):
+  """Natural coasting on a flat road (rolling + driveline loss plus aero); light regen on the Elantra."""
+  return -(GLIDE_C0 + GLIDE_C2 * speed_mps ** 2)
 
 
 def cluster_ratio(car_state) -> float:
@@ -80,6 +98,7 @@ class CoastOwner:
     self.pulse_glide = False
     self.coasting = False
     self.hill_paused = False
+    self.last_target = None
 
   def reset(self):
     self.__init__()
@@ -103,6 +122,7 @@ class CoastOwner:
       return CoastPlan()
     self.force_coast &= not (gas or brake)
     if not active:
+      self.last_target = None
       return CoastPlan()
     accel_target = None
     pulsing = False
@@ -133,6 +153,10 @@ class CoastOwner:
       elif available and speed_mps >= lower - PULSE_ENTRY_MARGIN:
         pulsing = True
         accel_target = min(pulse_accel(speed_mps), PULSE_ARRIVAL_GAIN * max(0.0, target_mps - speed_mps))
+      if accel_target is not None and self.last_target is not None:
+        step = TRANSITION_JERK * DT
+        accel_target = min(max(accel_target, self.last_target - step), self.last_target + step)
+    self.last_target = accel_target
     if self.force_coast:
       return CoastPlan(True, -0.6, None, self.coasting, band_top_mps=band[0], band_bottom_mps=band[1],
                        hill_paused=self.hill_paused)

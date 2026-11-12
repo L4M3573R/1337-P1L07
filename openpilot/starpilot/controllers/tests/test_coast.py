@@ -8,7 +8,8 @@ from openpilot.common.params import Params
 from opendbc.car.honda.interface import CarInterface
 from opendbc.car.honda.values import CAR
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner
-from openpilot.starpilot.controllers.coast import CoastOwner, CoastRuntime, GLIDE_FLOOR_MARGIN, cluster_ratio, glide_accel, pulse_accel
+from openpilot.starpilot.controllers.coast import (CoastOwner, CoastRuntime, FEATHER_ACCEL, FEATHER_MAX_SPEED_MPS, GLIDE_FLOOR_MARGIN,
+                                                  TRANSITION_JERK, DT, cluster_ratio, glide_accel, pulse_accel, regen_glide_accel)
 from openpilot.starpilot.controllers.wheel_actions import WheelPublisher
 from openpilot.starpilot.controllers.tests.test_wheel_actions import Publisher, DRIVE, NOW
 from openpilot.starpilot.longitudinal.tests.test_cruise_ceiling import messages
@@ -37,18 +38,20 @@ def test_pulse_glide_hysteresis_grade_pause_and_band():
   assert sample(owner, target_mps=15.0, speed_mps=15.0).speed_ceiling_mps is None
 
 
-@pytest.mark.parametrize('speed', [12.0, 20.0, 29.0, 35.0])
-def test_glide_commands_natural_coast_not_a_powered_crawl(speed):
+@pytest.mark.parametrize('speed', [12.0, 20.0, 27.0, 29.0, 35.0])
+def test_glide_feathers_in_ev_below_the_cutoff_and_keeps_the_regen_glide_above(speed):
   owner = CoastOwner()
   owner.toggle(14, long_active=True)
   plan = sample(owner, speed_mps=speed, target_mps=speed, delta_mps=2.2)
   assert plan.pulse_coasting and not plan.pulsing
   assert plan.accel_target == pytest.approx(glide_accel(speed, 0.0))
-  # Natural coasting is far stronger than the old -0.03 crawl, and grows with speed.
-  assert plan.accel_target < -0.1
   assert plan.brake_floor == pytest.approx(plan.accel_target - GLIDE_FLOOR_MARGIN)
-  if speed >= 29.0:
-    assert plan.accel_target < -0.25
+  if speed < FEATHER_MAX_SPEED_MPS:
+    # Just enough request to cancel regen: the Elantra stays electric with the battery about neutral.
+    assert plan.accel_target == pytest.approx(FEATHER_ACCEL)
+  else:
+    # Above ~63 mph a lighter request starts the engine, so the natural-coast glide is kept.
+    assert plan.accel_target == pytest.approx(regen_glide_accel(speed)) and plan.accel_target < -0.25
 
 
 def test_glide_follows_grade_but_never_exceeds_the_set_speed():
@@ -154,14 +157,14 @@ def test_actual_wheel_receipt_changes_cruise_but_preserves_native_mpc_lead_braki
 
 
 def test_planner_glides_at_natural_coast_at_highway_speed(tmp_path):
-  # Above 40 mph the old -0.03 glide made the powertrain push; the cruise now targets natural coast.
+  # Above the EV cut-off a lighter request starts the engine, so the cruise targets natural coast.
   params = Params(str(tmp_path))
   params.put('PulseGlideSpeedDelta', 5.0, block=True)
+  params.put('IsMetric', False, block=True)
   cp = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
-  planner, runtime = run_planner(params, cp, action=14, v_ego=100 / 3.6)
+  planner, runtime = run_planner(params, cp, action=14, v_ego=100 / 3.6)  # 62 mph: EV feather
   assert runtime.owner.pulse_glide and runtime.owner.coasting
-  assert planner.a_cruise == pytest.approx(glide_accel(100 / 3.6, 0.0), abs=0.02)
-  assert planner.a_cruise < -0.2
+  assert planner.a_cruise == pytest.approx(FEATHER_ACCEL, abs=0.02)
 
 
 def test_band_follows_the_dash_speedometer(tmp_path):
@@ -192,7 +195,9 @@ def test_log_fields_report_phase_band_and_target():
   assert glide['pulseGlideEnabled'] and glide['pulseGlidePhase'] == 'glide'
   assert glide['pulseGlideBandTop'] == 20.0 and glide['pulseGlideBandBottom'] == 18.0
   assert glide['pulseGlideAccelTarget'] < 0 and glide['pulseGlideClusterRatio'] == pytest.approx(1.027)
-  pulse = plan_log_fields(sample(owner, speed_mps=17.95), runtime)
+  fresh = CoastOwner()
+  fresh.toggle(14, long_active=True)
+  pulse = plan_log_fields(sample(fresh, speed_mps=17.95), runtime)  # pulse targets are eased after a glide
   assert pulse['pulseGlidePhase'] == 'pulse' and pulse['pulseGlideAccelTarget'] > 0
   assert plan_log_fields(sample(owner, lead_relevant=True), runtime)['pulseGlidePhase'] == 'off'
   assert plan_log_fields(None, None) == {'pulseGlideEnabled': False, 'pulseGlidePhase': 'off'}
@@ -217,4 +222,36 @@ def test_the_published_plan_carries_the_pulse_glide_fields(tmp_path):
   assert plan.pulseGlideEnabled and str(plan.pulseGlidePhase) == 'glide'
   assert plan.pulseGlideBandTop == pytest.approx(100 / 3.6, abs=0.01)
   assert plan.pulseGlideBandBottom == pytest.approx(100 / 3.6 - 5 * 0.44704, abs=0.01)
-  assert plan.pulseGlideAccelTarget < -0.2
+  assert plan.pulseGlideAccelTarget == pytest.approx(FEATHER_ACCEL, abs=0.02)  # 62 mph: EV feather
+
+
+def test_glide_entry_and_pulse_entry_are_eased_not_stepped():
+  owner = CoastOwner()
+  owner.toggle(14, long_active=True)
+  pulse = sample(owner, speed_mps=17.9)            # below the band: pulsing hard
+  assert pulse.pulsing and pulse.accel_target > 0.5
+  first = sample(owner, speed_mps=19.95)           # reaches the set speed: glide starts
+  assert first.pulse_coasting
+  assert first.accel_target == pytest.approx(pulse.accel_target - TRANSITION_JERK * DT)  # one eased step, no jump
+  steps = [sample(owner, speed_mps=19.9).accel_target for _ in range(40)]
+  assert all(b <= a + 1e-9 and a - b <= TRANSITION_JERK * DT + 1e-9 for a, b in zip([first.accel_target] + steps[:-1], steps, strict=True))
+  assert steps[-1] == pytest.approx(glide_accel(19.9, 0.0))  # settles on the feather target
+
+
+def test_the_ease_restarts_fresh_after_a_pause():
+  owner = CoastOwner()
+  owner.toggle(14, long_active=True)
+  sample(owner, speed_mps=17.9)
+  sample(owner, active=False)
+  plan = sample(owner, speed_mps=20.0)             # resumes straight into a glide
+  assert plan.accel_target == pytest.approx(glide_accel(20.0, 0.0))
+
+
+def test_regen_glide_above_the_cutoff_blends_into_the_feather_below_it():
+  owner = CoastOwner()
+  owner.toggle(14, long_active=True)
+  top = FEATHER_MAX_SPEED_MPS + 1.0
+  above = sample(owner, speed_mps=top, target_mps=top, delta_mps=4.0)
+  assert above.accel_target == pytest.approx(regen_glide_accel(top))
+  below = sample(owner, speed_mps=FEATHER_MAX_SPEED_MPS - 0.1, target_mps=top, delta_mps=4.0)
+  assert below.accel_target == pytest.approx(above.accel_target + TRANSITION_JERK * DT)  # eased toward the feather
