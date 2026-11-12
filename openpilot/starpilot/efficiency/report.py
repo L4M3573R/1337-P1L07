@@ -110,6 +110,18 @@ def real_fuel_section(by_context: dict) -> list[str]:
       if key[4] == mode:
         t.add_totals(v)
     out.append(mpg_line(f"  {mode}", t))
+  measured = []
+  for mode in modes:
+    t = Totals()
+    for key, v in by_context.items():
+      if key[4] == mode:
+        t.add_totals(v)
+    if t.obd_mpg:
+      adjusted = t.obd_mpg_battery_adjusted
+      measured.append(f"  {mode:32s} {t.obd_distance / 1609.344:6.1f} mi  {t.obd_mpg:5.1f} mpg  battery {t.obd_soc_delta:+5.1f} pts"
+                      + (f"  -> {adjusted:5.1f} mpg battery-adjusted" if adjusted else ""))
+  if measured:
+    out += ["", "Measured fuel (BlueDriver fuel flow; battery-adjusted pays back the hybrid battery change):"] + measured
   for band in sorted({k[0] for k in by_context}):
     parts = []
     for mode in ("pulse-glide", "chill", "experimental", "driver"):

@@ -4,6 +4,8 @@
 Samples at the 20 Hz radarState cadence, checkpoints the drive file every minute and on shutdown.
 Real fuel comes from the dash average MPG since the last fill-up (tank.py); the hybrid power flow and
 the cluster readings come from the newest CAN batch only (conflated), which keeps this process light.
+When the BlueDriver logger runs, its measured fuel flow and hybrid battery charge are read once a second
+from its live file and kept alongside the dash figure.
 """
 from __future__ import annotations
 
@@ -16,9 +18,11 @@ from pathlib import Path
 from openpilot.starpilot.efficiency import store, tank as tank_store
 from openpilot.starpilot.efficiency.hybrid import Cluster, PowerFlow, scan
 from openpilot.starpilot.efficiency.ledger import Ledger, make_sample
+from openpilot.starpilot.obd.bluedriver import GRAMS_PER_GALLON
 
 SERVICES = ['radarState', 'carState', 'carControl', 'selfdriveState', 'deviceMotion', 'starpilotLongitudinalPlan']
 CHECKPOINT_S = 60.0
+OBD_READ_S = 1.0
 METERS_PER_MILE = 1609.344
 
 
@@ -34,6 +38,25 @@ class Recorder:
     self.fuel_gal: float | None = None
     self.last_checkpoint = None
     self.last_t = None
+    self.obd_fuel_gal: float | None = None
+    self.soc: float | None = None
+    self._obd_prev: tuple[str, float] | None = None
+    self._obd_total_g = 0.0
+
+  def observe_obd(self, doc: dict | None) -> None:
+    """The BlueDriver live document (or None): keeps a fuel counter that never jumps when the logger
+    restarts or reconnects, and is unknown (None) while the link is down."""
+    soc = doc.get('soc') if doc else None
+    self.soc = float(soc) if isinstance(soc, (int, float)) and 0.0 <= soc <= 100.0 else None
+    grams = doc.get('fuel_g') if doc else None
+    if not doc or not doc.get('connected') or not isinstance(grams, (int, float)) or grams < 0:
+      self.obd_fuel_gal, self._obd_prev = None, None
+      return
+    session = str(doc.get('drive'))
+    if self._obd_prev is not None and self._obd_prev[0] == session and grams >= self._obd_prev[1]:
+      self._obd_total_g += grams - self._obd_prev[1]
+    self._obd_prev = (session, float(grams))
+    self.obd_fuel_gal = self._obd_total_g / GRAMS_PER_GALLON
 
   def observe_can(self, flow: PowerFlow | None, cluster: Cluster | None) -> None:
     if flow is not None:
@@ -54,7 +77,8 @@ class Recorder:
       self.tank.drive(max(car_state.vEgo, 0.0) * (t - self.last_t) / METERS_PER_MILE)
     self.last_t = t
     self.ledger.add(make_sample(t, self.mass, car_state, car_control, radar_state, selfdrive_state, device_motion,
-                                fuel_gal=self.fuel_gal, power_flow=self.flow, pulse_glide=pulse_glide))
+                                fuel_gal=self.fuel_gal, power_flow=self.flow, pulse_glide=pulse_glide,
+                                obd_fuel_gal=self.obd_fuel_gal, soc=self.soc))
 
   def save(self) -> None:
     if self.ledger.stretches:
@@ -92,6 +116,7 @@ def main() -> None:
   import openpilot.cereal.messaging as messaging
   from opendbc.car.structs import car
   from openpilot.common.params import Params
+  from openpilot.starpilot.obd.bluedriverd import read_live
 
   os.nice(10)
   params = Params()
@@ -99,6 +124,7 @@ def main() -> None:
   sm = messaging.SubMaster(SERVICES, poll='radarState')
   can_sock = messaging.sub_sock('can', conflate=True)
   recorder = Recorder(float(cp.mass), drive_id())
+  last_obd_read = 0.0
 
   def stop(*_):
     raise SystemExit(0)
@@ -115,7 +141,11 @@ def main() -> None:
         optional = {name: (sm[name] if sm.seen[name] else None) for name in ('carControl', 'radarState', 'selfdriveState', 'deviceMotion')}
         recorder.observe(sm.logMonoTime['carState'] / 1e9, sm['carState'], optional['carControl'], optional['radarState'],
                          optional['selfdriveState'], optional['deviceMotion'], pulse_glide_phase(sm))
-      recorder.maybe_checkpoint(time.monotonic())
+      now = time.monotonic()
+      if now - last_obd_read >= OBD_READ_S:
+        last_obd_read = now
+        recorder.observe_obd(read_live(now=now))
+      recorder.maybe_checkpoint(now)
   finally:
     recorder.finish()
 

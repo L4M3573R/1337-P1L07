@@ -37,3 +37,12 @@ def test_pulse_glide_band_and_units(tmp_path):
   p.put_bool('IsMetric', True, block=True)
   assert s.pg_delta_options(p) == s.PG_DELTAS_KPH
 
+
+
+def test_bluedriver_tile_writes_what_the_logger_reads(tmp_path):
+  from openpilot.starpilot.obd import bluedriverd
+  assert not s.bluedriver_enabled(tmp_path) and not bluedriverd.enabled(tmp_path / 'bluedriver')
+  s.set_bluedriver(True, tmp_path)
+  assert s.bluedriver_enabled(tmp_path) and bluedriverd.enabled(tmp_path / 'bluedriver')
+  s.set_bluedriver(False, tmp_path)
+  assert not bluedriverd.enabled(tmp_path / 'bluedriver')

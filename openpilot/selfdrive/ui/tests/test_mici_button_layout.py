@@ -50,6 +50,7 @@ def drawn(monkeypatch):
   lambda: button.BigButton("L4 custom"),
   lambda: button.BigMultiToggle("personal steering", ["auto", "off", "on"]),
   lambda: button.BigToggle("curve guard"),
+  lambda: button.BigToggle("bluedriver fuel"),
   lambda: button.BigMultiToggle("pulse & glide band", ["3 mph", "5 mph", "7 mph"]),
   lambda: button.BigMultiToggle("pulse & glide band", ["5 km/h", "8 km/h", "11 km/h"]),
 ])

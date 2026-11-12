@@ -24,6 +24,11 @@ FLOW_ACCEL_BIN = 0.05  # m/s^2, acceleration with the road slope removed
 # The fuel counter dips slightly when the dash refreshes its average (a correction, kept so the sum
 # stays exact); a drop larger than this is a fill-up or a reseed, which is never bridged.
 FUEL_RESET_DROP_GAL = 0.05
+# Hybrid battery change is converted to fuel so a drive that drained (or charged) the battery is not
+# credited (or charged) for it: about 1.32 kWh pack, and roughly 0.09 gal of fuel to put 1 kWh back
+# through the engine and generator. Estimates; they only adjust the measured (BlueDriver) fuel.
+BATTERY_KWH = 1.32
+GAL_PER_BATTERY_KWH = 0.09
 
 
 @dataclass(frozen=True)
@@ -43,11 +48,13 @@ class Sample:
   flow: str | None = None  # hybrid power-flow class (hybrid.FLOW_CLASSES)
   power_meter: float | None = None  # 211 = no battery flow; lower = battery driving, higher = charging
   pulse_glide: str | None = None  # Pulse and Glide phase when the mode is enabled ('off', 'pulse', 'glide', ...)
+  obd_fuel_gal: float | None = None  # measured fuel burned so far (BlueDriver), None while the link is down
+  soc: float | None = None  # hybrid battery charge, % (BlueDriver)
 
 
 def make_sample(t: float, mass: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, device_motion=None,
                 battery_raw: float | None = None, fuel_gal: float | None = None, power_flow=None,
-                pulse_glide: str | None = None) -> Sample:
+                pulse_glide: str | None = None, obd_fuel_gal: float | None = None, soc: float | None = None) -> Sample:
   """Build one ledger sample from the latest messages (shared by the on-device daemon and the log report)."""
   cs, cc = car_state, car_control
   pitch = cc.orientationNED[1] if cc is not None and len(cc.orientationNED) == 3 else None
@@ -58,7 +65,8 @@ def make_sample(t: float, mass: float, car_state, car_control=None, radar_state=
                 long_active=bool(cc is not None and cc.longActive),
                 experimental=bool(selfdrive_state is not None and selfdrive_state.experimentalMode), battery_raw=battery_raw,
                 fuel_gal=fuel_gal, flow=power_flow.flow if power_flow is not None else None,
-                power_meter=float(power_flow.meter) if power_flow is not None else None, pulse_glide=pulse_glide)
+                power_meter=float(power_flow.meter) if power_flow is not None else None, pulse_glide=pulse_glide,
+                obd_fuel_gal=obd_fuel_gal, soc=soc)
 
 
 def mode_of(sample: Sample) -> str:
@@ -92,6 +100,22 @@ class Stretch:
   engine_s: float = 0.0
   meter_sum: float = 0.0
   meter_n: int = 0
+  obd_first: float | None = None  # measured fuel counter at the stretch start
+  obd_last: float | None = None
+  obd_ok: bool = True  # the link stayed up for the whole stretch
+  soc_first: float | None = None
+  soc_last: float | None = None
+
+  @property
+  def obd_fuel_gal(self) -> float | None:
+    """Measured fuel for the stretch, or None unless the BlueDriver covered all of it."""
+    if not self.obd_ok or self.obd_first is None or self.obd_last is None:
+      return None
+    return max(self.obd_last - self.obd_first, 0.0)
+
+  @property
+  def soc_delta(self) -> float | None:
+    return None if self.soc_first is None or self.soc_last is None else self.soc_last - self.soc_first
 
   @property
   def fuel_gal(self) -> float:
@@ -127,13 +151,42 @@ class Ledger:
   _open: Stretch | None = None
   _last: Sample | None = None
   _fuel_carry: float | None = None
+  _obd_carry: float | None = None
+  _soc_carry: float | None = None
 
   def _new(self, mode: str, t: float) -> Stretch:
-    return Stretch(mode, t, t, fuel_first=self._fuel_carry, fuel_last=self._fuel_carry)
+    return Stretch(mode, t, t, fuel_first=self._fuel_carry, fuel_last=self._fuel_carry,
+                   obd_first=self._obd_carry, obd_last=self._obd_carry, soc_first=self._soc_carry, soc_last=self._soc_carry)
+
+  def _track_obd(self, sample: Sample) -> None:
+    s = self._open
+    value = sample.obd_fuel_gal
+    if value is None or not math.isfinite(value) or (self._obd_carry is not None and value < self._obd_carry):
+      self._obd_carry = None  # link down, or the counter restarted: this stretch's measured fuel is incomplete
+      if s is not None:
+        s.obd_ok = False
+    else:
+      if s is not None and s.obd_first is None:
+        s.obd_first = value
+        s.obd_ok = s.obd_ok and s.distance == 0.0  # the link came up partway through the stretch
+      self._obd_carry = value
+      if s is not None:
+        s.obd_last = value
+    if sample.soc is not None and math.isfinite(sample.soc):
+      if s is not None and s.soc_first is None:
+        s.soc_first = sample.soc
+      self._soc_carry = sample.soc
+      if s is not None:
+        s.soc_last = sample.soc
 
   def add(self, sample: Sample) -> None:
     last, self._last = self._last, sample
     mode = mode_of(sample)
+    dt = sample.t - last.t if last is not None else 0.0
+    if self._open is not None and not 0.0 < dt <= 1.0:
+      self._obd_carry = self._soc_carry = None  # a gap: measured fuel is never carried across it
+    else:
+      self._track_obd(sample)
     if sample.fuel_gal is not None and math.isfinite(sample.fuel_gal):
       if self._fuel_carry is not None and sample.fuel_gal < self._fuel_carry - FUEL_RESET_DROP_GAL:
         self._fuel_carry = None  # the counter went backwards (fill-up or reseed): do not bridge it
@@ -147,11 +200,11 @@ class Ledger:
     if self._open is None:
       self._open = self._new(mode, sample.t)
       return
-    dt = sample.t - last.t if last is not None else 0.0
     if not 0.0 < dt <= 1.0:  # gap in the log: start a fresh stretch
       self._close(last.t if last is not None else sample.t)
-      self._fuel_carry = None
+      self._fuel_carry = self._obd_carry = self._soc_carry = None
       self._open = self._new(mode, sample.t)
+      self._track_obd(sample)
       return
     s = self._open
     speed = 0.5 * (sample.speed + last.speed)
@@ -220,6 +273,9 @@ class Totals:
   ev_s: float = 0.0
   regen_s: float = 0.0
   engine_s: float = 0.0
+  obd_fuel_gal: float = 0.0  # measured fuel (BlueDriver) over the stretches it fully covered
+  obd_distance: float = 0.0  # metres covered by those stretches
+  obd_soc_delta: float = 0.0  # hybrid battery change over those stretches, % points
 
   def add(self, s: Stretch) -> None:
     self.distance += s.distance
@@ -234,10 +290,14 @@ class Totals:
     self.ev_s += s.ev_s
     self.regen_s += s.regen_s
     self.engine_s += s.engine_s
+    if s.obd_fuel_gal is not None:
+      self.obd_fuel_gal += s.obd_fuel_gal
+      self.obd_distance += s.distance
+      self.obd_soc_delta += s.soc_delta or 0.0
 
   def add_totals(self, other: Totals) -> None:
     for name in ('distance', 'duration', 'propulsion', 'regen', 'friction', 'steady', 'fuel_gal', 'fuel_distance',
-                 'ev_s', 'regen_s', 'engine_s'):
+                 'ev_s', 'regen_s', 'engine_s', 'obd_fuel_gal', 'obd_distance', 'obd_soc_delta'):
       setattr(self, name, getattr(self, name) + getattr(other, name))
 
   @property
@@ -246,6 +306,21 @@ class Totals:
     if self.fuel_gal <= 0.0 or self.fuel_distance < 100.0:
       return None
     return self.fuel_distance / 1609.344 / self.fuel_gal
+
+  @property
+  def obd_mpg(self) -> float | None:
+    """Measured MPG (BlueDriver fuel flow), None until there is enough of it."""
+    if self.obd_fuel_gal <= 0.0 or self.obd_distance < 100.0:
+      return None
+    return self.obd_distance / 1609.344 / self.obd_fuel_gal
+
+  @property
+  def obd_mpg_battery_adjusted(self) -> float | None:
+    """Measured MPG with the hybrid battery change paid back (drained) or credited (charged) in fuel."""
+    fuel = self.obd_fuel_gal - self.obd_soc_delta / 100.0 * BATTERY_KWH * GAL_PER_BATTERY_KWH
+    if fuel <= 0.0 or self.obd_distance < 100.0:
+      return None
+    return self.obd_distance / 1609.344 / fuel
 
   def per_km(self, joules: float) -> float:
     return joules / 3600.0 / (self.distance / 1000.0) if self.distance > 0 else 0.0  # Wh/km

@@ -1,4 +1,4 @@
-"""Settings behind the "L4 custom" tile: personal steering (NNLC), curve guard and Pulse and Glide band.
+"""Settings behind the "L4 custom" tile: personal steering (NNLC), curve guard, BlueDriver logging and Pulse and Glide band.
 (Conditional Experimental and lane offset keep their own selectors; the curve guard reads the lane offset.)
 
 Each read falls back to the default when its source is missing or malformed; each write is atomic.
@@ -72,6 +72,16 @@ def curve_guard_enabled(root: Path | None = None) -> bool:
 
 def set_curve_guard(enabled: bool, root: Path | None = None) -> None:
   _write_json((storage_root() if root is None else root) / 'curve_guard.json', {'enabled': bool(enabled)})
+
+
+# ---------- BlueDriver logging ----------
+def bluedriver_enabled(root: Path | None = None) -> bool:
+  doc = _read_json((storage_root() if root is None else root) / 'bluedriver' / 'config.json')
+  return bool(doc and doc.get('enabled') is True)
+
+
+def set_bluedriver(enabled: bool, root: Path | None = None) -> None:
+  _write_json((storage_root() if root is None else root) / 'bluedriver' / 'config.json', {'enabled': bool(enabled)})
 
 
 # ---------- params helpers ----------

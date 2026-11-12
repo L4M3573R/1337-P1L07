@@ -124,6 +124,14 @@ def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
 
 
+def bluedriver_logging(started: bool, params: Params, CP: car.CarParams) -> bool:
+  if not started:
+    return False
+  from openpilot.starpilot.obd.bluedriverd import enabled
+
+  return enabled()
+
+
 def sentry_motion(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started and sentry_enabled(params)
 
@@ -231,6 +239,8 @@ procs = [
   PythonProcess("radard", "openpilot.selfdrive.controls.radard", only_onroad),
   # Observe-only energy ledger; ancillary, so it never blocks engagement.
   PythonProcess("efficiencyd", "openpilot.starpilot.efficiency.efficiencyd", only_onroad),
+  # Opt-in BlueDriver OBD logger (fuel flow, hybrid battery); observe only, ancillary like efficiencyd.
+  PythonProcess("bluedriverd", "openpilot.starpilot.obd.bluedriverd", bluedriver_logging, enabled=COMMA_HARDWARE),
   PythonProcess("edgemapd", "openpilot.starpilot.edgemap.edgemapd", only_onroad),
   PythonProcess("hardwared", "openpilot.system.hardware.hardwared", always_run),
   PythonProcess("modem", "openpilot.common.hardware.comma.modem", always_run, enabled=COMMA_HARDWARE),

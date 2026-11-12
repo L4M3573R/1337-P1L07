@@ -57,6 +57,17 @@ EOF
   fi
 }
 
+# Optional remote access: starts only when the owner installed Tailscale under /data/tailscale.
+# Its login lives in that folder's state file; nothing here can stop openpilot from starting.
+function tailscale_init {
+  local ts=/data/tailscale
+  [ -x "$ts/tailscaled" ] || return 0
+  pgrep -x tailscaled > /dev/null && return 0
+  if ! sudo timeout -k 1s 5s sh -c "mkdir -p /run/tailscale && (setsid $ts/tailscaled --state=$ts/tailscaled.state --statedir=$ts --socket=/run/tailscale/tailscaled.sock > /dev/null 2>&1 < /dev/null &)"; then
+    echo "Tailscale start failed; continuing startup."
+  fi
+}
+
 function update_is_ready {
   [ -f "$1" ] && [ ! -L "$1" ]
 }
@@ -149,6 +160,7 @@ function launch {
     if ! "$DIR/scripts/install_boot_logo.sh"; then
       echo "StarPilot boot image update failed; continuing startup."
     fi
+    tailscale_init
   fi
 
   # write tmux scrollback to a file
