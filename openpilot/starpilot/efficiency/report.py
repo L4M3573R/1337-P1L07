@@ -122,6 +122,7 @@ def real_fuel_section(by_context: dict) -> list[str]:
                       + (f"  -> {adjusted:5.1f} mpg battery-adjusted" if adjusted else ""))
   if measured:
     out += ["", "Measured fuel (BlueDriver fuel flow; battery-adjusted pays back the hybrid battery change):"] + measured
+  out += comparison_section(by_context)
   for band in sorted({k[0] for k in by_context}):
     parts = []
     for mode in ("pulse-glide", "chill", "experimental", "driver"):
@@ -134,6 +135,19 @@ def real_fuel_section(by_context: dict) -> list[str]:
     if parts:
       out.append(f"  {band:10s} " + "  |  ".join(parts))
   return out
+
+
+def comparison_section(by_context: dict) -> list[str]:
+  """The comma's driving against yours, in battery-adjusted measured fuel, on matching contexts only."""
+  from openpilot.starpilot.efficiency.compare import COMMA_MODES, compare
+  rows = []
+  for label, modes in (("all comma driving", COMMA_MODES), ("chill", ("chill",)), ("experimental", ("experimental",)),
+                       ("pulse-glide", ("pulse-glide",))):
+    c = compare(by_context, modes)
+    if c.matched_miles > 0:
+      verdict = f"comma {c.comma_saving:+.1%} fuel saved" if c.ready else "not enough matched miles yet"
+      rows.append(f"  {label:20s} {c.matched_miles:6.1f} matched mi in {c.contexts:2d} contexts  {verdict}")
+  return ["", "Comma vs you (measured fuel, same kinds of driving only):"] + rows if rows else []
 
 
 def ev_cutoff_section(flow: dict) -> list[str]:

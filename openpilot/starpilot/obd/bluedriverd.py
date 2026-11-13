@@ -10,6 +10,7 @@ the comma's own startup diagnostics are finished first. Opt-in: <starpilot stora
 Outputs, under <starpilot storage>/bluedriver/:
   live.json         latest readings and the fuel burned this drive, rewritten every second for efficiencyd
   drives/<id>.csv   one row a second for later analysis (the newest MAX_DRIVE_LOGS are kept)
+  health.json       once a drive: check-engine light, stored and pending trouble codes (read only, never cleared)
 """
 from __future__ import annotations
 
@@ -32,7 +33,8 @@ INIT_TIMEOUT_S = 3.0
 STARTUP_SETTLE_S = 5.0
 BACKOFF_S = (5.0, 10.0, 30.0, 60.0)
 CSV_FIELDS = ('t', 'rpm', 'maf', 'lambda', 'fuel_gps', 'fuel_g', 'torque_pct', 'soc', 'stft', 'ltft', 'load', 'coolant',
-              'ambient', 'volts', 'odometer_km', 'speed_kph')
+              'ambient', 'intake', 'volts', 'fuel_level', 'odometer_km', 'speed_kph')
+HEALTH_TIMEOUT_S = 3.0
 VENDOR = Path(__file__).resolve().parents[1] / 'galaxy_bluetooth' / 'vendor'
 MAX_CONFIG_BYTES = 4096
 
@@ -241,6 +243,18 @@ class Link:
       self.bus.disconnect()
 
 
+async def health_check(link, root: Path, drive_id: str) -> dict:
+  """Read-only trouble-code check, once per drive: monitor status, stored (03) and pending (07) codes."""
+  status = bd.monitor_status(await link.query('0101', HEALTH_TIMEOUT_S))
+  stored_raw = await link.query('03', HEALTH_TIMEOUT_S)
+  pending_raw = await link.query('07', HEALTH_TIMEOUT_S)
+  doc = {'version': 1, 'drive': drive_id, 'mil': None if status is None else status[0],
+         'dtc_count': None if status is None else status[1], 'stored': bd.trouble_codes(stored_raw),
+         'pending': bd.trouble_codes(pending_raw), 'stored_raw': stored_raw, 'pending_raw': pending_raw}
+  write_json_atomic(root / 'health.json', doc)
+  return doc
+
+
 async def poll(link, session: Session, clock=time.monotonic, should_run=lambda: True) -> None:
   """Query the plan in a loop until the link fails (raises) or should_run turns false."""
   cycle, misses = 0, 0
@@ -259,6 +273,7 @@ async def poll(link, session: Session, clock=time.monotonic, should_run=lambda: 
 async def run(root: Path, drive_id: str, log) -> None:
   session = Session(root, drive_id)
   attempt = 0
+  checked = False
   try:
     while True:
       if not enabled(root):
@@ -269,6 +284,10 @@ async def run(root: Path, drive_id: str, log) -> None:
       try:
         ident = await link.connect()
         log(f'connected: {ident}')
+        if not checked:
+          health = await health_check(link, root, drive_id)
+          checked = True
+          log(f"health: light {health['mil']}, codes {health['stored']} pending {health['pending']}")
         session.connected, attempt = True, 0
         await poll(link, session, should_run=lambda: enabled(root))
       except Exception as e:

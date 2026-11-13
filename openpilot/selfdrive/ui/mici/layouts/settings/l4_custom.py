@@ -1,5 +1,5 @@
 from openpilot.system.ui.widgets.scroller import NavScroller
-from openpilot.selfdrive.ui.mici.widgets.button import BigMultiToggle, BigToggle
+from openpilot.selfdrive.ui.mici.widgets.button import BigMultiToggle, BigToggle, GreyBigButton
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.starpilot.ui import l4_custom as settings
 
@@ -28,11 +28,12 @@ class L4CustomLayoutMici(NavScroller):
                                  toggle_callback=self._on_bluedriver,
                                  description="Reads real fuel flow and hybrid battery charge from your paired BlueDriver Pro " +
                                              "during drives, for the efficiency numbers. Needs comma Bluetooth on.")
+    self._fuel_compare = GreyBigButton("comma vs you", settings.fuel_comparison())
     self._metric = settings.is_metric(params)
     self._pg_options = settings.pg_delta_options(params)
     self._pg = BigMultiToggle("pulse & glide band", [_fmt_delta(v, self._metric) for v in self._pg_options], select_callback=self._on_pg,
                               description="How far below the set speed each glide coasts before the next pulse.")
-    self._scroller.add_widgets([self._nnlc, self._curve_guard, self._bluedriver, self._pg])
+    self._scroller.add_widgets([self._nnlc, self._curve_guard, self._bluedriver, self._fuel_compare, self._pg])
 
   def show_event(self):
     super().show_event()
@@ -43,6 +44,7 @@ class L4CustomLayoutMici(NavScroller):
     self._nnlc.set_value(settings.nnlc_override())
     self._curve_guard.set_checked(settings.curve_guard_enabled())
     self._bluedriver.set_checked(settings.bluedriver_enabled())
+    self._fuel_compare.set_value(settings.fuel_comparison())
     pg = settings.pg_delta(params)
     self._pg.set_value(_fmt_delta(min(self._pg_options, key=lambda v: abs(v - pg)), self._metric))
 

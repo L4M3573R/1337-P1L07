@@ -105,7 +105,9 @@ DECODERS = {
   '0107': lambda b: (b[0] - 128) * 100 / 128,  # long-term fuel trim, %
   '010C': lambda b: _u16(b) / 4,  # engine speed, rpm
   '010D': lambda b: float(b[0]),  # vehicle speed, km/h
+  '010F': lambda b: b[0] - 40.0,  # intake air, C
   '0110': lambda b: _u16(b) / 100,  # mass air flow, g/s
+  '012F': lambda b: b[0] * 100 / 255,  # fuel tank level, %
   '0142': lambda b: _u16(b) / 1000,  # control module voltage, V
   '0144': lambda b: _u16(b) * 2 / 65536,  # commanded lambda
   '0146': lambda b: b[0] - 40.0,  # ambient air, C
@@ -117,6 +119,7 @@ DECODERS = {
 PIDS = {p.code: p for p in (
   Pid('0104', 'load', 1), Pid('0105', 'coolant', 1), Pid('0106', 'stft', 1), Pid('0107', 'ltft', 1),
   Pid('010C', 'rpm', 2), Pid('010D', 'speed_kph', 1), Pid('0110', 'maf', 2), Pid('0142', 'volts', 2),
+  Pid('010F', 'intake', 1), Pid('012F', 'fuel_level', 1),
   Pid('0144', 'lambda', 2), Pid('0146', 'ambient', 1), Pid('015B', 'soc', 1), Pid('0162', 'torque_pct', 1),
   Pid('0163', 'torque_ref', 2), Pid('01A6', 'odometer_km', 4),
 )}
@@ -135,11 +138,45 @@ def decode(code: str, text: str | None) -> float | None:
 # Poll plan: the fuel PIDs every cycle, the rest round-robin every N cycles (about 40 ms a query).
 FAST = ('0110', '0144', '010C')
 SLOW = (('0162', 1), ('015B', 3), ('0106', 5), ('0107', 10), ('0104', 5), ('0105', 25), ('0146', 50),
-        ('0142', 25), ('01A6', 100), ('0163', 500))
+        ('0142', 25), ('012F', 50), ('01A6', 100), ('0163', 500))
 
 
 def plan(cycle: int) -> list[str]:
   return list(FAST) + [code for code, every in SLOW if cycle % every == 0]
+
+
+def monitor_status(text: str | None) -> tuple[bool, int] | None:
+  """PID 0101 from every answering ECU: (check-engine light on in any, stored trouble codes summed)."""
+  if text is None:
+    return None
+  mil, count, seen = False, 0, False
+  for line in text.splitlines():
+    b = reply_bytes(line)
+    if b is not None and len(b) == 4:
+      seen = True
+      mil |= bool(b[0] & 0x80)
+      count += b[0] & 0x7F
+  return (mil, count) if seen else None
+
+
+DTC_PREFIX = 'PCBU'
+
+
+def trouble_codes(text: str | None) -> list[str]:
+  """Mode 03 / 07 reply lines to codes like P0420. Tolerates an echoed 43/47 byte and a leading count byte."""
+  codes = []
+  for line in (text or '').splitlines():
+    b = reply_bytes(line)
+    if not b:
+      continue
+    if b[0] in (0x43, 0x47):
+      b = b[1:]
+    if len(b) % 2 == 1:
+      b = b[1:]  # CAN replies lead with the number of codes
+    for hi, lo in zip(b[::2], b[1::2], strict=True):
+      if hi or lo:
+        codes.append(f'{DTC_PREFIX[hi >> 6]}{(hi >> 4) & 3}{hi & 0xF:X}{lo:02X}')
+  return codes
 
 
 def fuel_rate_gps(maf: float | None, lam: float | None, rpm: float | None) -> float | None:

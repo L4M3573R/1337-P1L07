@@ -50,11 +50,22 @@ class Sample:
   pulse_glide: str | None = None  # Pulse and Glide phase when the mode is enabled ('off', 'pulse', 'glide', ...)
   obd_fuel_gal: float | None = None  # measured fuel burned so far (BlueDriver), None while the link is down
   soc: float | None = None  # hybrid battery charge, % (BlueDriver)
+  # Context tags (car_signals.py, BlueDriver, GPS); recorded per stretch for the PC trip reports.
+  drive_mode: str | None = None  # 'eco' / 'smart' / 'sport'
+  tire_avg: float | None = None  # psi, the four tires
+  tire_min: float | None = None
+  ambient_c: float | None = None
+  map_limit: int | None = None  # the car's map speed limit
+  road_code: int | None = None  # the car's map road-type code (unverified meaning)
+  fuel_level: float | None = None  # tank, %
+  lat: float | None = None
+  lon: float | None = None
+  bearing: float | None = None  # degrees from north
 
 
 def make_sample(t: float, mass: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, device_motion=None,
                 battery_raw: float | None = None, fuel_gal: float | None = None, power_flow=None,
-                pulse_glide: str | None = None, obd_fuel_gal: float | None = None, soc: float | None = None) -> Sample:
+                pulse_glide: str | None = None, obd_fuel_gal: float | None = None, soc: float | None = None, **tags) -> Sample:
   """Build one ledger sample from the latest messages (shared by the on-device daemon and the log report)."""
   cs, cc = car_state, car_control
   pitch = cc.orientationNED[1] if cc is not None and len(cc.orientationNED) == 3 else None
@@ -66,7 +77,7 @@ def make_sample(t: float, mass: float, car_state, car_control=None, radar_state=
                 experimental=bool(selfdrive_state is not None and selfdrive_state.experimentalMode), battery_raw=battery_raw,
                 fuel_gal=fuel_gal, flow=power_flow.flow if power_flow is not None else None,
                 power_meter=float(power_flow.meter) if power_flow is not None else None, pulse_glide=pulse_glide,
-                obd_fuel_gal=obd_fuel_gal, soc=soc)
+                obd_fuel_gal=obd_fuel_gal, soc=soc, **tags)
 
 
 def mode_of(sample: Sample) -> str:
@@ -105,6 +116,59 @@ class Stretch:
   obd_ok: bool = True  # the link stayed up for the whole stretch
   soc_first: float | None = None
   soc_last: float | None = None
+  mode_s: dict = field(default_factory=dict)  # drive mode -> seconds
+  limit_s: dict = field(default_factory=dict)  # map speed limit -> seconds
+  road_s: dict = field(default_factory=dict)  # map road code -> seconds
+  tire_sum: float = 0.0
+  tire_n: int = 0
+  tire_low: float | None = None
+  ambient_sum: float = 0.0
+  ambient_n: int = 0
+  level_first: float | None = None
+  level_last: float | None = None
+  lat: float | None = None
+  lon: float | None = None
+  bearing: float | None = None
+
+  def tag(self, sample: Sample, dt: float) -> None:
+    """Accumulate the context tags of one sample interval."""
+    for bucket, key in ((self.mode_s, sample.drive_mode), (self.limit_s, sample.map_limit), (self.road_s, sample.road_code)):
+      if key is not None:
+        bucket[key] = bucket.get(key, 0.0) + dt
+    if sample.tire_avg is not None and math.isfinite(sample.tire_avg):
+      self.tire_sum += sample.tire_avg
+      self.tire_n += 1
+      low = sample.tire_min if sample.tire_min is not None else sample.tire_avg
+      self.tire_low = low if self.tire_low is None else min(self.tire_low, low)
+    if sample.ambient_c is not None and math.isfinite(sample.ambient_c):
+      self.ambient_sum += sample.ambient_c
+      self.ambient_n += 1
+    if sample.fuel_level is not None and math.isfinite(sample.fuel_level):
+      if self.level_first is None:
+        self.level_first = sample.fuel_level
+      self.level_last = sample.fuel_level
+    if self.lat is None and sample.lat is not None and sample.lon is not None:
+      self.lat, self.lon, self.bearing = sample.lat, sample.lon, sample.bearing
+
+  def record(self) -> dict:
+    """Compact per-stretch record for the drive file (trip reports, commute memory)."""
+    def top(bucket):
+      return max(bucket, key=bucket.get) if bucket else None
+    def r(x, n=2):
+      return None if x is None else round(x, n)
+    flow = self.ev_s + self.regen_s + self.engine_s
+    return {
+      't': r(self.start, 1), 'dur': r(self.duration, 1), 'm': r(self.distance, 1), 'mode': self.mode,
+      'ctx': list(self.context()[:4]), 'pitch': r(self.pitch_m / self.distance if self.distance > 0 else None, 4),
+      'obd_gal': r(self.obd_fuel_gal, 5), 'soc_d': r(self.soc_delta, 2), 'dash_gal': r(self.fuel_gal, 5),
+      'prop_j': round(self.propulsion), 'regen_j': round(self.regen), 'fric_j': round(self.friction),
+      'ev': r(self.ev_s / flow if flow > 0 else None, 3), 'engine': r(self.engine_s / flow if flow > 0 else None, 3),
+      'drive_mode': top(self.mode_s), 'limit': top(self.limit_s), 'road': top(self.road_s),
+      'tire': r(self.tire_sum / self.tire_n if self.tire_n else None, 1), 'tire_low': self.tire_low,
+      'ambient_c': r(self.ambient_sum / self.ambient_n if self.ambient_n else None, 1),
+      'level0': r(self.level_first, 1), 'level1': r(self.level_last, 1),
+      'lat': r(self.lat, 5), 'lon': r(self.lon, 5), 'bearing': r(self.bearing, 0),
+    }
 
   @property
   def obd_fuel_gal(self) -> float | None:
@@ -219,6 +283,7 @@ class Ledger:
     s.pitch_m += (sample.pitch or 0.0) * d
     s.curve_m += abs(sample.curvature) * d
     s.lead_s += dt if sample.lead else 0.0
+    s.tag(sample, dt)
     s.stopped |= sample.standstill
     if sample.battery_raw is not None and math.isfinite(sample.battery_raw):
       s.battery_sum += sample.battery_raw
@@ -315,9 +380,14 @@ class Totals:
     return self.obd_distance / 1609.344 / self.obd_fuel_gal
 
   @property
+  def obd_fuel_adjusted_gal(self) -> float:
+    """Measured fuel with the hybrid battery change paid back (drained) or credited (charged) in fuel."""
+    return self.obd_fuel_gal - self.obd_soc_delta / 100.0 * BATTERY_KWH * GAL_PER_BATTERY_KWH
+
+  @property
   def obd_mpg_battery_adjusted(self) -> float | None:
     """Measured MPG with the hybrid battery change paid back (drained) or credited (charged) in fuel."""
-    fuel = self.obd_fuel_gal - self.obd_soc_delta / 100.0 * BATTERY_KWH * GAL_PER_BATTERY_KWH
+    fuel = self.obd_fuel_adjusted_gal
     if fuel <= 0.0 or self.obd_distance < 100.0:
       return None
     return self.obd_distance / 1609.344 / fuel

@@ -15,6 +15,7 @@ from openpilot.starpilot.efficiency.ledger import Stretch, Totals, summarize
 
 VERSION = 1
 MAX_DRIVES = 500
+MAX_STRETCH_RECORDS = 3000  # about 10 hours of driving in one file
 KEY_SEPARATOR = "|"
 
 
@@ -33,6 +34,7 @@ def drive_document(drive_id: str, stretches: list[Stretch], flow: dict | None = 
          "contexts": {KEY_SEPARATOR.join(key): _totals_dict(t) for key, t in sorted(by_context.items())}}
   if flow:
     doc["flow"] = {k: [round(x, 1) for x in v] for k, v in sorted(flow.items())}
+  doc["stretches"] = [s.record() for s in stretches[-MAX_STRETCH_RECORDS:]]
   return doc
 
 

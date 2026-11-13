@@ -78,7 +78,8 @@ def test_poll_plan_reads_fuel_every_cycle():
 class FakeLink:
   """Answers like the scanner did with the engine idling."""
   REPLIES = {'010C': '15 C4', '0110': '02 AA', '0144': '7E E0', '015B': '80', '0162': '8F', '0106': '7A', '0107': '7C',
-             '0104': '4B', '0105': '4C', '0146': '2F', '0142': '35 C4', '01A6': '00 02 39 9E', '0163': '01 2C'}
+             '0104': '4B', '0105': '4C', '0146': '2F', '0142': '35 C4', '01A6': '00 02 39 9E', '0163': '01 2C', '012F': '7A',
+             '010F': '40'}
 
   def __init__(self, clock, fail_after=None):
     self.clock, self.count, self.fail_after = clock, 0, fail_after
@@ -144,3 +145,39 @@ def test_bonded_scanner_detection():
   assert not bluedriverd.is_bonded_scanner({'Paired': V(False), 'Name': V('BlueDriv')})
   assert not bluedriverd.is_bonded_scanner({'Paired': V(True), 'Name': V('Galaxy S26')})
   assert not bluedriverd.is_bonded_scanner(None)
+
+
+def test_monitor_status_sums_every_ecu():
+  assert bd.monitor_status('00 07 E5 00') == (False, 0)
+  assert bd.monitor_status('82 07 E5 00\n01 00 00 00') == (True, 3)
+  assert bd.monitor_status('NO DATA') is None
+
+
+@pytest.mark.parametrize('reply, codes', [
+  ('00', []),
+  ('01 04 20', ['P0420']),
+  ('43 01 04 20', ['P0420']),
+  ('02 04 20 C1 23', ['P0420', 'U0123']),
+  ('NO DATA', []),
+])
+def test_trouble_codes(reply, codes):
+  assert bd.trouble_codes(reply) == codes
+
+
+def test_fuel_level_and_intake_decode():
+  assert bd.decode('012F', '7A') == pytest.approx(47.84, abs=0.01)
+  assert bd.decode('010F', '40') == 24.0
+
+
+def test_health_check_writes_codes_without_clearing(tmp_path):
+  class Link:
+    sent = []
+
+    async def query(self, code, wait_s=1.0):
+      self.sent.append(code)
+      return {'0101': '81 07 E5 00', '03': '01 04 20', '07': '00'}[code]
+  link = Link()
+  doc = asyncio.run(bluedriverd.health_check(link, tmp_path, 'd1'))
+  assert doc['mil'] is True and doc['dtc_count'] == 1 and doc['stored'] == ['P0420'] and doc['pending'] == []
+  assert json.loads((tmp_path / 'health.json').read_text())['stored'] == ['P0420']
+  assert '04' not in link.sent  # mode 04 would clear codes; never sent

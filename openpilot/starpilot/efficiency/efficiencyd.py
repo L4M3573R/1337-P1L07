@@ -16,11 +16,13 @@ import time
 from pathlib import Path
 
 from openpilot.starpilot.efficiency import store, tank as tank_store
+from openpilot.starpilot.efficiency.car_signals import CarSignals
 from openpilot.starpilot.efficiency.hybrid import Cluster, PowerFlow, scan
 from openpilot.starpilot.efficiency.ledger import Ledger, make_sample
 from openpilot.starpilot.obd.bluedriver import GRAMS_PER_GALLON
 
-SERVICES = ['radarState', 'carState', 'carControl', 'selfdriveState', 'deviceMotion', 'starpilotLongitudinalPlan']
+SERVICES = ['radarState', 'carState', 'carControl', 'selfdriveState', 'deviceMotion', 'starpilotLongitudinalPlan', 'gpsLocationExternal']
+GPS_MAX_ACCURACY_M = 25.0
 CHECKPOINT_S = 60.0
 OBD_READ_S = 1.0
 METERS_PER_MILE = 1609.344
@@ -40,14 +42,22 @@ class Recorder:
     self.last_t = None
     self.obd_fuel_gal: float | None = None
     self.soc: float | None = None
+    self.signals = CarSignals()
+    self.ambient_c: float | None = None
+    self.fuel_level: float | None = None
+    self.position: tuple[float, float, float] | None = None  # lat, lon, bearing
     self._obd_prev: tuple[str, float] | None = None
     self._obd_total_g = 0.0
 
   def observe_obd(self, doc: dict | None) -> None:
     """The BlueDriver live document (or None): keeps a fuel counter that never jumps when the logger
     restarts or reconnects, and is unknown (None) while the link is down."""
-    soc = doc.get('soc') if doc else None
-    self.soc = float(soc) if isinstance(soc, (int, float)) and 0.0 <= soc <= 100.0 else None
+    def number(name, lo, hi):
+      value = doc.get(name) if doc else None
+      return float(value) if isinstance(value, (int, float)) and lo <= value <= hi else None
+    self.soc = number('soc', 0.0, 100.0)
+    self.ambient_c = number('ambient', -40.0, 60.0)
+    self.fuel_level = number('fuel_level', 0.0, 100.0)
     grams = doc.get('fuel_g') if doc else None
     if not doc or not doc.get('connected') or not isinstance(grams, (int, float)) or grams < 0:
       self.obd_fuel_gal, self._obd_prev = None, None
@@ -69,6 +79,17 @@ class Recorder:
       self.last_avg_mpg = cluster.avg_mpg
       self.fuel_gal = self.tank.gallons_used(cluster.avg_mpg)
 
+  def observe_gps(self, gps) -> None:
+    ok = (gps is not None and gps.hasFix and 0.0 < gps.horizontalAccuracy <= GPS_MAX_ACCURACY_M and
+          math.isfinite(gps.latitude) and math.isfinite(gps.longitude))
+    self.position = (gps.latitude, gps.longitude, gps.bearingDeg) if ok else None
+
+  def tags(self) -> dict:
+    lat, lon, bearing = self.position if self.position is not None else (None, None, None)
+    return {'drive_mode': self.signals.drive_mode, 'tire_avg': self.signals.tire_avg, 'tire_min': self.signals.tire_min,
+            'map_limit': self.signals.map_limit, 'road_code': self.signals.road_code, 'ambient_c': self.ambient_c,
+            'fuel_level': self.fuel_level, 'lat': lat, 'lon': lon, 'bearing': bearing}
+
   def observe(self, t: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, device_motion=None,
               pulse_glide: str | None = None) -> None:
     if self.last_t is not None and t <= self.last_t:
@@ -78,7 +99,7 @@ class Recorder:
     self.last_t = t
     self.ledger.add(make_sample(t, self.mass, car_state, car_control, radar_state, selfdrive_state, device_motion,
                                 fuel_gal=self.fuel_gal, power_flow=self.flow, pulse_glide=pulse_glide,
-                                obd_fuel_gal=self.obd_fuel_gal, soc=self.soc))
+                                obd_fuel_gal=self.obd_fuel_gal, soc=self.soc, **self.tags()))
 
   def save(self) -> None:
     if self.ledger.stretches:
@@ -136,7 +157,11 @@ def main() -> None:
       raw = can_sock.receive(non_blocking=True)
       if raw is not None:
         event = messaging.log_from_bytes(raw)
-        recorder.observe_can(*scan((c.address, bytes(c.dat), c.src) for c in event.can))
+        frames = [(c.address, bytes(c.dat), c.src) for c in event.can]
+        recorder.observe_can(*scan(frames))
+        recorder.signals.update(frames)
+      if sm.updated['gpsLocationExternal']:
+        recorder.observe_gps(sm['gpsLocationExternal'])
       if sm.seen['carState']:
         optional = {name: (sm[name] if sm.seen[name] else None) for name in ('carControl', 'radarState', 'selfdriveState', 'deviceMotion')}
         recorder.observe(sm.logMonoTime['carState'] / 1e9, sm['carState'], optional['carControl'], optional['radarState'],

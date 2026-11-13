@@ -84,6 +84,15 @@ def set_bluedriver(enabled: bool, root: Path | None = None) -> None:
   _write_json((storage_root() if root is None else root) / 'bluedriver' / 'config.json', {'enabled': bool(enabled)})
 
 
+def fuel_comparison(root: Path | None = None) -> str:
+  """The comma's fuel against the driver's on matching driving, from the stored ledger (BlueDriver fuel)."""
+  from openpilot.starpilot.efficiency.compare import headline, stored_comparison
+  try:
+    return headline(stored_comparison(None if root is None else root / 'efficiency'))
+  except Exception:  # a settings page must never fail on a damaged ledger
+    return "unavailable"
+
+
 # ---------- params helpers ----------
 def _float_param(params, key: str, default: float) -> float:
   try:

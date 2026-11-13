@@ -51,6 +51,8 @@ def drawn(monkeypatch):
   lambda: button.BigMultiToggle("personal steering", ["auto", "off", "on"]),
   lambda: button.BigToggle("curve guard"),
   lambda: button.BigToggle("bluedriver fuel"),
+  lambda: button.GreyBigButton("comma vs you", "collecting: 0.0 of 5 matched mi"),
+  lambda: button.GreyBigButton("comma vs you", "comma saves 12% fuel · 48 mi"),
   lambda: button.BigMultiToggle("pulse & glide band", ["3 mph", "5 mph", "7 mph"]),
   lambda: button.BigMultiToggle("pulse & glide band", ["5 km/h", "8 km/h", "11 km/h"]),
 ])
@@ -81,3 +83,4 @@ def test_label_fits_the_last_glyph_as_well_as_line_spacing(drawn):
   assert len(drawn[text]) == 1
   assert drawn[text][0][0].endswith("...")
   assert drawn[text][0][2] <= height
+
