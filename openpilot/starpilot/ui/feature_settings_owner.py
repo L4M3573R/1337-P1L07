@@ -84,7 +84,7 @@ from openpilot.starpilot.controllers.toyota_cruise import capability as toyota_c
 GLOBAL_BOOL_PREFERENCES = frozenset((LEAD_APPROACH_KEY, LEAD_TAKEOFF_KEY, NUDGE_KEY, "DisengageOnAccelerator"))
 
 BOOL_DEFAULTS = {
-  "GMPedalLongitudinal": False, "ForceStops": False, "AlwaysAllowUploads": False, "TurnAssist": True,
+  "GMPedalLongitudinal": False, "ForceStops": True, "AlwaysAllowUploads": False, "TurnAssist": True,
   "SubaruAvhStartup": False,
   "SubaruStopStartOff": False,
   "SubaruSNG": False,
@@ -235,8 +235,8 @@ class FeatureSettingsOwner:
       ('On' if raw == b'1' else 'Off') if valid else 'Invalid saved choice', raw,
       ('Off', 'On') if valid else (), default_value='Off', capability=capability, vehicle_fingerprint=self.vehicle_fingerprint(),
       available=valid and parked and self.authority('parked_preferences') and self.authority('preferences'),
-      reason='Request StarPilot speed control instead of factory ACC. May disable Automatic Emergency Braking. ' +
-             'Applies after the next startup; exact vehicle takeover checks remain required.'),)
+      reason='Let StarPilot control acceleration and braking instead of factory ACC. ' +
+             'Takes effect next drive. May disable factory Automatic Emergency Braking.'),)
 
   def _apply_alpha_long(self, request):
     from openpilot.starpilot.saved_document import commit_exact
@@ -1056,11 +1056,10 @@ class FeatureSettingsOwner:
       master, _, master_valid = self._value("AlwaysOnLateral")
       allowed = configurable and self.authority("aol") and capability is not None
       rows.append(replace(self._bool_row("AlwaysOnLateral", "Enable Always On Lateral",
-                                         (allowed and threshold_valid) or
+                                         (configurable and self.authority("preferences") and threshold_valid) or
                                          (master_valid and master == "1" and self.authority("preferences"))), capability=capability,
                           dependencies=self._dependents(AOL_THRESHOLD, AOL_LEGACY_THRESHOLD),
                           reason="Invalid saved master preference" if not master_valid or master not in ("0", "1") else
-                                 "Connect a supported vehicle to configure Always On Lateral" if capability is None else
                                  "Invalid saved brake threshold" if not threshold_valid else
                                  "Applies after the next startup" if pending else
                                  "Keep steering assistance available independently of cruise control"))
@@ -1163,9 +1162,9 @@ class FeatureSettingsOwner:
                                  reason="Off uses the upstream planner. Supported longitudinal control stays active. Changes apply on the next drive."))
       allowed = configurable and system_long
       force_enabled, _, _ = self._value("ForceStops")
-      rows.append(self._bool_row("ForceStops", "Force Stop", allowed or
-                                 (force_enabled == "1" and self.authority("preferences")),
-                                 reason="Commit to detected model stops; press the accelerator to continue"))
+      rows.append(self._bool_row(
+        "ForceStops", "Enhanced Stops", allowed or (force_enabled == "1" and self.authority("preferences")),
+        reason="Improves stopping behavior at traffic lights and enables automatic stopping at detected stop signs. Press the accelerator to continue."))
       offset_row = self._number_row("ForceStopDistanceOffset", "Stop Distance Adjustment", allowed and force_enabled == "1")
       rows.append(replace(offset_row, default_reset_available=allowed and parked and offset_row.step > 0,
                           reason="Positive values stop farther forward; negative values stop earlier"))
@@ -1339,6 +1338,18 @@ class FeatureSettingsOwner:
 
   def _apply(self, request: FeatureSettingsRequest, *, reset_default: bool = False) -> bool:
     key = request.key
+    if key == "AlwaysOnLateral" and request.value == "On":
+      def authorized_on():
+        return (self.authority("preferences") and self._readable(key) and
+                self._raw(key) == request.expected and request.expected in (None, b"0", b"1") and
+                self.vehicle_fingerprint() == request.vehicle_fingerprint and
+                request.capability == self._capability("aol") and self._aol_threshold()[1] and
+                request.dependencies == self._dependents(AOL_THRESHOLD, AOL_LEGACY_THRESHOLD) and
+                all(self._readable(name) and self._raw(name) == raw for name, raw in request.dependencies) and
+                request.related_source is None and not request.display_unit and not request.direction)
+      result = commit_exact(self.params, key=key, max_bytes=8, raw=b"1", expected=request.expected,
+                            authorized=authorized_on, temp_prefix=".aol-on-")
+      return result.committed and result.verified
     if key == "AlwaysOnLateral" and request.value == "Off":
       def authorized_off():
         return (self.authority("preferences") and self._readable(key) and
@@ -1714,14 +1725,6 @@ class FeatureSettingsOwner:
                   (request.value == "Off" or self.long_profiles._fresh(request, dependencies)))
         result = commit_exact(self.params, key=key, max_bytes=128, raw=encoded.encode(), expected=request.expected,
                               authorized=authorized, temp_prefix=".long-profile-switch-")
-        return result.committed and result.verified
-      if source_key == "AlwaysOnLateral":
-        def authorized_aol() -> bool:
-          return (self.authority("aol") and self.vehicle_fingerprint() == request.vehicle_fingerprint and
-                  request.capability == self._capability("aol") and
-                  all(self._readable(name) and self._raw(name) == raw for name, raw in request.dependencies))
-        result = commit_exact(self.params, key=source_key, max_bytes=8, raw=encoded.encode(),
-                              expected=request.expected, authorized=authorized_aol, temp_prefix=".aol-on-")
         return result.committed and result.verified
       if source_key in BOOL_DEFAULTS:
         self.params.put_bool(source_key, encoded == "1", block=True)

@@ -46,6 +46,37 @@ def independent_profile_support(training, heldout, previous):
   return changed
 
 
+def profile_sections(windows, rows, contexts):
+  """Join adjacent observations within ONE role; never fill a source gap."""
+  if any(not rows.get(key) for key in windows):
+    raise ValueError('Original profile samples required')
+  ordered = sorted(windows, key=lambda key: (rows[key][0].route, rows[key][0].segment, rows[key][0].t))
+  sections, owners = [], {}
+  previous_context = None
+  for key in ordered:
+    values = rows[key]
+    if not values:
+      raise ValueError('Original profile samples required')
+    first = values[0]
+    previous = sections[-1][-1] if sections else None
+    if previous is not None and (first.route, first.segment) == (previous.route, previous.segment) and first.t <= previous.t:
+      raise ValueError('Profile roles cannot repeat or overlap original samples')
+    if (
+      previous is None or contexts[key] != previous_context
+      or (first.route, first.segment) != (previous.route, previous.segment)
+      or first.t - previous.t > MAX_GAP_NS / 1e9 + 1e-9
+    ):
+      sections.append([])
+    for sample in values:
+      stamp = (sample.route, sample.segment, sample.t)
+      if stamp in owners:
+        raise ValueError('Profile samples cannot be counted twice')
+      owners[stamp] = key
+    sections[-1].extend(values)
+    previous_context = contexts[key]
+  return sections, owners
+
+
 class StableRouteSelector:
   def __init__(self, assessment, root, previous, scope, *, permitted):
     from openpilot.starpilot.flm.offroad_prior_inputs import PriorOriginals
@@ -57,6 +88,7 @@ class StableRouteSelector:
         ids = {
           wid for c in group['cohorts'] if all(role in c for role in ('training', 'heldout')) for role in ('training', 'heldout') for wid in c[role]['windows']
         }
+        ids.update(w['identity'] for w in group.get('observed_original_windows', ()))
         groups.append((group, ids))
     elif type(assessment) is PriorOriginals and type(assessment.receipt) is SelectedSourceReceipt and assessment.profile_metadata is not None:
       groups = [
@@ -92,12 +124,14 @@ class StableRouteSelector:
     for group, ids in groups:
       if group['original_metadata']['domain'] != 'lateral_acceleration':
         continue
-      for window in group['selected_original_windows']:
+      for window in (*group['selected_original_windows'], *group.get('observed_original_windows', ())):
         if window['identity'] in ids:
           if window['identity'] in self.spans and self.spans[window['identity']] != window:
             raise ValueError('Conflicting original window identity')
           self.spans[window['identity']] = window
-          comparison = dict(group['original_metadata'])
+          context = group.get('original_window_contexts', {}).get(window['identity'])
+          original = group['original_metadata'] if context is None else group['original_contexts'][context]
+          comparison = dict(original)
           comparison.pop('route_values')
           comparison.pop('route_revision')
           context_key = hashlib.sha256(repr(comparison).encode()).hexdigest()
@@ -108,6 +142,21 @@ class StableRouteSelector:
       raise ValueError('Original whole-window bound')
 
   def _load(self):
+    if getattr(self.assessment, 'evidence_sources', None):
+      from copy import copy
+
+      self.rows = {}
+      for route, source in self.assessment.evidence_sources.items():
+        reader = copy(self)
+        reader.assessment = source
+        reader.spans = {key: span for key, span in self.spans.items() if span['route'] == route}
+        try:
+          reader._load()
+        except FileNotFoundError:
+          reader.rows = dict.fromkeys(reader.spans)
+        assert reader.rows is not None
+        self.rows.update(reader.rows)
+      return
     rows = {key: [] for key in self.spans}
     original_points = {key: [] for key in self.spans}
     invalid = set()
@@ -221,17 +270,24 @@ class StableRouteSelector:
     observations = []
     from openpilot.starpilot.flm.offroad_coordinate_policy import coordinate_candidates, recorded_observation
 
-    for key in windows:
-      values = rows[key]
-      assert values is not None
+    sections, owners = profile_sections(windows, rows, self.contexts)
+    for values in sections:
       for run in cadenced_runs(values):
         summaries, _ = classify_current_stable(list(run))
         for summary in summaries:
+          if not summary['events']:
+            continue
           for event in summary['events']:
             event_samples = run[event['startIdx']:event['endIdx'] + 1]
+            sample = event_samples[0]
+            key = owners[(sample.route, sample.segment, sample.t)]
             observations.append((key, recorded_observation(
               summary['bucket'], event['direction'], event['peakScore'], fmean(sample.v_ego for sample in event_samples),
             )))
+          # This is a finding's source, not a second count for an event that
+          # crosses two adjacent original windows in the same role.
+          sample = run[summary['events'][0]['startIdx']]
+          key = owners[(sample.route, sample.segment, sample.t)]
           # Capability-based exclusions affect proposals only. No scored
           # window is discarded; ALL original spans go to the native checker.
           if summary['bucket'] == 'saturation_limited':
@@ -314,6 +370,7 @@ class StableRouteSelector:
       'reason': 'independent_support_for_frozen_training_profile' if agrees else 'heldout_profile_does_not_support_training_step',
       'selection': selection,
       'frozen_training_profile': training,
+      'observed_candidate': heldout if training is None else None,
       'roles': {'training': training_report, 'heldout': heldout_report},
       'all_original_windows_still_required': True,
       'physical_improvement_proven': False,

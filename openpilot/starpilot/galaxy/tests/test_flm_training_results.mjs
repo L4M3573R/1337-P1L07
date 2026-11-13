@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { validTrainingResults, trainingSummary, detailText, offroadView, tunerStatus, SURFACE_NAMES, FRICTION_NAMES, surfaceRows, offroadCoordinateEvidence } from "../web/js/flm-training-results.js"
+import { validTrainingResults, trainingSummary, detailText, learningReason, offroadView, tunerStatus, SURFACE_NAMES, FRICTION_NAMES, surfaceRows, offroadCoordinateEvidence } from "../web/js/flm-training-results.js"
 
 const report = () => ({ version: 1, current: { fresh: true, ageSeconds: .1, enabled: true,
   status: "collecting", reason: "independent_evidence", progress: { samples: 140, blocks: 3, requiredBlocks: 16 },
@@ -63,9 +63,39 @@ completed.current.details = {
 assert(validTrainingResults(completed))
 assert.equal(offroadView(completed).suggestions.length, 5)
 assert.equal(offroadView(completed).samples, 241573)
+assert.match(learningReason("observed_unwind_too_slow_right"), /right curves.*stronger than requested/)
+const history = structuredClone(completed)
+history.current.details['Drives in steering evidence history'] = 4
+assert.equal(offroadView(history).evidenceDrives, 4)
+history.current.details['Drives in steering evidence history'] = 9
+assert.equal(offroadView(history).evidenceDrives, null)
+assert.equal(offroadView(completed).evidenceDrives, null, 'Older reports must not imply cross-drive evidence')
 assert.equal(tunerStatus(completed, true, true).title, 'Completed drive analyzed', 'Parked status must not mask completed analysis')
-assert.match(tunerStatus(completed, true, true).description, /none has passed/)
+assert.match(tunerStatus(completed, true, true).description, /left your tune unchanged/)
 assert.equal(completed.current.application.applied, false)
+const earlierDrive = structuredClone(completed)
+Object.assign(earlierDrive.current.details, {
+  'Latest completed recording reviewed': 'declared-newer-manual-drive',
+  'Latest recording analysis decision': 'more_independent_eligible_tracking_required',
+  'Findings retained from earlier drive': 'declared-drive',
+  'Drives in steering evidence history': 2,
+})
+assert(validTrainingResults(earlierDrive))
+const priorFindings = offroadView(earlierDrive)
+assert.equal(priorFindings.suggestions.length, 5, 'A newer recording without active steering must not erase earlier ideas')
+assert.equal(priorFindings.earlierDrive, true)
+assert.equal(priorFindings.latestRecording, 'declared-newer-manual-drive')
+assert.equal(priorFindings.retained, false, 'Fresh historical findings must not claim analysis is still running')
+assert.equal(priorFindings.saved, false)
+assert.equal(priorFindings.savedValues, null)
+assert.equal(priorFindings.evidenceDrives, 2)
+assert.match(offroadCoordinateEvidence(earlierDrive, 'highway_center_taper_max'), /Earlier analyzed drive.*not saved/)
+assert.equal(offroadView(completed).earlierDrive, false, 'Old reports remain readable without inventing history')
+for (const mutate of [d => d['Latest completed recording reviewed'] = 7,
+  d => d['Latest completed recording reviewed'] = 'declared-drive',
+  d => d['Findings retained from earlier drive'] = 'different-source']) {
+  const bad = structuredClone(earlierDrive); mutate(bad.current.details); assert.equal(offroadView(bad), null)
+}
 const configured = structuredClone(completed)
 configured.current.details['Saved route configuration state'] = 'ready_for_next_drive'
 assert.equal(tunerStatus(configured, true, true).title, 'Tune saved for the next drive')

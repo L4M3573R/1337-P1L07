@@ -41,6 +41,8 @@ FORD_BLUEPILOT_NATIVE_TARGETS = tuple(str(path.relative_to(ROOT)) for path in so
 # Representative production callers plus their source/native refusal cases.
 # The emitted selected_test_ids record exact parametrized configurations.
 AOL_LIFECYCLE_TARGETS = (
+  "openpilot/starpilot/car/subaru/tests/test_high_angle_guard.py",
+  "openpilot/starpilot/aol/tests/test_ford_long_only_withdrawal.py",
   'opendbc_repo/opendbc/car/tests/test_isotp_query_interference.py',
   'openpilot/starpilot/aol/tests/test_mazda_source_deadline.py',
   "openpilot/starpilot/aol/tests/test_gv60_hda1_alpha_aol.py",
@@ -169,6 +171,7 @@ AOL_LIFECYCLE_TARGETS = (
   "openpilot/starpilot/car/toyota/tests/test_sng_resume.py",
   "openpilot/starpilot/car/toyota/tests/test_auto_sdsu_resume.py",
   "openpilot/starpilot/car/toyota/tests/test_gas_steering_withdrawal.py",
+  "openpilot/starpilot/car/toyota/tests/test_radar_filter_buttons.py",
   "openpilot/starpilot/car/toyota/tests/test_resume_alert.py",
   "openpilot/starpilot/car/toyota/tests/test_sng.py",
   "openpilot/starpilot/car/toyota/tests/test_sng_callers.py",
@@ -268,6 +271,14 @@ DEBUG_SAFETY_CLASS_TARGETS = {
 
 
 RELEASE_TARGETS = (
+  "opendbc_repo/opendbc/car/rivian/tests/test_radar_reachability.py",
+  "opendbc_repo/opendbc/car/tesla/tests/test_radar_pairs.py",
+  "openpilot/starpilot/car/subaru/tests/test_stock_aol_callers.py::test_actual_impreza_main_while_braking_waits_for_native_grant",
+  "openpilot/starpilot/car/subaru/tests/test_stock_aol_callers.py::test_actual_impreza_guard_brake_release_keeps_intent",
+  "openpilot/starpilot/car/subaru/tests/test_high_angle_guard.py",
+  "openpilot/starpilot/car/subaru/tests/test_stock_aol_callers.py::test_actual_impreza_high_angle_refusal_guard",
+  "openpilot/starpilot/car/toyota/tests/test_radar_filter_buttons.py",
+  "openpilot/starpilot/aol/tests/test_ford_long_only_withdrawal.py",
   "opendbc_repo/opendbc/safety/tests/test_hyundai_gv60_hda1_long_aol.py",
   'openpilot/starpilot/car/toyota/tests/test_prius_retrofit_stock.py',
   'openpilot/starpilot/car/toyota/tests/test_prius_retrofit_stock_callers.py',
@@ -430,6 +441,9 @@ RELEASE_TARGETS = (
   "opendbc_repo/opendbc/car/hyundai/tests/test_dom_radar_vehicle_bindings.py",
   "opendbc_repo/opendbc/car/hyundai/tests/test_dom_radar_complete_paths.py",
   "opendbc_repo/opendbc/car/hyundai/tests/test_dom_firmware_catalog.py",
+  "opendbc_repo/opendbc/car/hyundai/tests/test_canfd_lfa_status.py",
+  "opendbc_repo/opendbc/car/hyundai/tests/test_ioniq6_dash_icons.py",
+  "opendbc_repo/opendbc/car/hyundai/tests/test_torque_ev_scc.py",
   "opendbc_repo/opendbc/safety/tests/test_hyundai_classic_long_aol.py",
   "openpilot/starpilot/aol/tests/test_classic_long_profiles.py",
   "opendbc_repo/opendbc/safety/tests/test_hyundai_shared_canfd_stock_aol.py",

@@ -55,7 +55,7 @@ class TestOnroadAxes(unittest.TestCase):
     intent = IntentState('card-ui', 1, NOW, NOW, NOW + 200_000_000, False, True, False, True, armed)
     self.ui.sm.put('aolIntentWire', encode_intent(replace(intent, **changes)))
 
-  def test_latch_keeps_border_blue_through_standstill_min_speed_and_reverse(self):
+  def test_armed_latch_keeps_intent_but_not_active_color_when_steering_pauses(self):
     self.ui.aol_runtime = True
     self.publish_latch()
     for brand in ('hyundai', 'gm', 'toyota', 'ford', 'honda'):
@@ -67,10 +67,43 @@ class TestOnroadAxes(unittest.TestCase):
           paused = self.state(False, False)
           self.assertTrue(getattr(paused, "aol_latched", False))
           self.assertFalse(paused.lateral_active or paused.longitudinal_active or paused.engaged)
-          self.assertEqual(rgba(axis_status_color(paused)), (10, 186, 181, 255))
+          self.assertEqual(rgba(axis_status_color(paused)), (18, 40, 57, 255))
     self.publish_latch(False)
     self.assertFalse(self.state(False, False).aol_latched)
     self.assertEqual(rgba(axis_status_color(self.state(False, False))), (18, 40, 57, 255))
+
+  def test_subaru_armed_stop_has_distinct_standby_border_without_active_axes(self):
+    self.ui.aol_runtime = True
+    self.ui.CP.brand = 'subaru'
+    car = self.ui.sm['carState']
+    car.vEgo, car.standstill, car.gearShifter = 0, True, 'drive'
+    car.steerFaultTemporary = car.steerFaultPermanent = car.accFaulted = False
+    self.publish_latch()
+    stopped = self.state(False, False)
+    self.assertTrue(stopped.aol_armed_at_stop)
+    self.assertFalse(stopped.engaged or stopped.lateral_active or stopped.longitudinal_active)
+    self.assertEqual(rgba(axis_status_color(stopped)), (10, 100, 98, 255))
+    self.assertEqual(driving_mode_description(stopped), 'AOL Armed')
+    self.assertNotEqual(rgba(axis_status_color(stopped)), rgba(axis_status_color(self.state(True, False))))
+    for field, value in (('standstill', False), ('gearShifter', 'reverse'), ('canValid', False), ('steerFaultTemporary', True)):
+      old = getattr(car, field)
+      setattr(car, field, value)
+      with self.subTest(field=field):
+        self.assertFalse(self.state(False, False).aol_armed_at_stop)
+        self.assertEqual(rgba(axis_status_color(self.state(False, False))), (18, 40, 57, 255))
+      setattr(car, field, old)
+    self.publish_latch(False)
+    self.assertFalse(self.state(False, False).aol_armed_at_stop)
+
+  def test_missing_model_cannot_show_armed_aol_as_active_steering(self):
+    self.ui.aol_runtime = True
+    self.publish_latch()
+    self.ui.sm.valid["modelV2"] = False
+    current = self.state(False, False)
+    self.assertTrue(current.aol_latched)
+    self.assertFalse(current.lateral_active)
+    self.assertEqual(rgba(axis_status_color(current)), (18, 40, 57, 255))
+    self.assertEqual(rgba(axis_status_color(self.state(True, False))), (10, 186, 181, 255))
 
   def test_cleared_latch_does_not_borrow_previous_active_steering_color(self):
     self.ui.aol_runtime = True
@@ -280,9 +313,9 @@ class TestOnroadAxes(unittest.TestCase):
       (OnroadAlert(size=AlertSize.FULL), blue), (OnroadAlert(size=AlertSize.SMALL, critical=True), blue))]
     cases = [(*case, None) for case in cases]
     cases += [(False, False, False, alert, color, True) for alert, color in (
-      (OnroadAlert(), (10, 186, 181, 255)),
-      (OnroadAlert(size=AlertSize.SMALL, text1='Steering Paused'), (10, 186, 181, 255)),
-      (OnroadAlert(size=AlertSize.MID), (10, 186, 181, 255)),
+      (OnroadAlert(), (18, 40, 57, 255)),
+      (OnroadAlert(size=AlertSize.SMALL, text1='Steering Paused'), (18, 40, 57, 255)),
+      (OnroadAlert(size=AlertSize.MID), (18, 40, 57, 255)),
       (OnroadAlert(size=AlertSize.FULL), blue), (OnroadAlert(size=AlertSize.SMALL, critical=True), blue))]
     cases = [(*case, False) for case in cases]
     cases += [(True, True, override, alert, color, None, True) for override, alert, color in (
@@ -313,6 +346,7 @@ class TestOnroadAxes(unittest.TestCase):
           view.background_layer = None
           view.projection_viewport = None
           view._corner_cache = Mock()
+          view._fade = Mock()
           view.current_speed = Mock()
           view.steering_wheel = Mock()
           view.compact_hud = Mock()

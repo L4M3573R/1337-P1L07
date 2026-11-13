@@ -23,6 +23,7 @@ from openpilot.starpilot.ui.traffic_status import TrafficDisplay
 from openpilot.starpilot.ui.developer_preview import OnroadVisualPreview
 from openpilot.starpilot.ui.navigation_state import NavigationDisplay
 from openpilot.starpilot.ui.live_developer_sidebar import DeveloperMetric
+from openpilot.starpilot.speed_limits.speed_domain import OffsetSchedule
 
 
 
@@ -197,6 +198,7 @@ class OnroadState:
   traffic_selected: bool = False
   traffic_display: TrafficDisplay | None = None
   aol_latched: bool | None = None
+  aol_armed_at_stop: bool = False
   lateral_active: bool = False
   longitudinal_active: bool = False
   longitudinal_overridden: bool = False
@@ -244,6 +246,7 @@ class OnroadState:
   weather: WeatherReading | None = None
   ford_rear_fog_on: bool = False
   ford_rear_fog_source_ns: int = 0
+  slc_offset_schedule: OffsetSchedule | None = None
 
   def __post_init__(self) -> None:
     if self.speed_mps is not None and (not math.isfinite(self.speed_mps) or self.speed_mps < 0):
@@ -340,10 +343,15 @@ def speed_limit_bounds(profile: Profile, state: OnroadState) -> tuple[float, flo
   if not saved['enabled']:
     return None
   if manual_slc_confirmation(profile, state):
-    return confirmation_bounds(profile, saved['x'], saved['y'], opened=state.slc_prompt_open)
-  x, y, width, height = LIMIT_RECTS[profile]
-  dx, dy = offset(state.customization, profile, widget)
-  return x + dx - 12, y + dy - 12, x + dx + width + 12, y + dy + height + 8
+    bounds = confirmation_bounds(profile, saved['x'], saved['y'], opened=state.slc_prompt_open)
+  else:
+    x, y, width, height = LIMIT_RECTS[profile]
+    dx, dy = offset(state.customization, profile, widget)
+    bounds = x + dx - 12, y + dy - 12, x + dx + width + 12, y + dy + height + 8
+    if profile == Profile.COMPACT and bounds[1] < 12:
+      shift = 12 - bounds[1]
+      bounds = bounds[0], bounds[1] + shift, bounds[2], bounds[3] + shift
+  return bounds
 
 
 def personality_bounds(profile: Profile, state: OnroadState) -> tuple[float, float, float, float] | None:

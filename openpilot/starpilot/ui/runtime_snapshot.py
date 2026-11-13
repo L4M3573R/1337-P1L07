@@ -55,6 +55,8 @@ from openpilot.starpilot.ui.settings_state import Destination, DestinationAvaila
 from openpilot.starpilot.ui.shell import ShellMode, ShellSnapshot
 from openpilot.starpilot.ui.software_state import DownloadLabel, SoftwareRequest, SoftwareState
 from openpilot.starpilot.ui.toggles_state import Personality, ToggleKey, TogglesState
+from openpilot.starpilot.saved_source import read_saved
+from openpilot.starpilot.speed_limits import offset_document
 
 
 SLC_SIGN_HOLD_NS = 150_000_000
@@ -314,6 +316,7 @@ class RuntimeSnapshotAdapter:
     self._customization_value = default_document()
     self._appearance_value = OnroadAppearance()
     self._appearance_read_ns: int | None = None
+    self._slc_offset_schedule = None
     # A second screen (Android Auto) swaps in its own display choices before anything uses them.
     self.appearance_override: Callable[[OnroadAppearance], OnroadAppearance] | None = None
     self._last_mode: ShellMode | None = None
@@ -337,7 +340,7 @@ class RuntimeSnapshotAdapter:
     self._replay_stopped_history = False
     self._developer_metrics = DeveloperMetrics()
     self._reverse_driver_camera = ReverseDriverCamera()
-    self._vision_stop = StopConfirmation()
+    self._vision_stop = StopConfirmation(display_only=True)
     self._slc_sign_cache: tuple[int, tuple[int, int], str, SpeedLimitObservation] | None = None
     self._slc_last_sign: tuple[tuple[int, int], str, str, float] | None = None
     self._slc_sign_recovery_ns: int | None = None
@@ -442,6 +445,12 @@ class RuntimeSnapshotAdapter:
       self._appearance_value = onroad_appearance(self.ui_state.params)
       self._navigation_enabled = _flag(self.ui_state.params, "NavigationEnabled")
       self._show_curve_status = _flag(self.ui_state.params, "ShowCSCStatus")
+      try:
+        raw, readable = read_saved(self.ui_state.params, "SLCOffsetSchedule", offset_document.MAX_DOCUMENT_BYTES)
+        offsets = offset_document.decode(raw) if readable and raw is not None else None
+        self._slc_offset_schedule = offsets.schedule() if isinstance(offsets, offset_document.OffsetDocument) else None
+      except (AttributeError, OSError, TypeError, ValueError, OverflowError):
+        self._slc_offset_schedule = None
       if self.appearance_override is not None:
         self._appearance_value = self.appearance_override(self._appearance_value)
       self._appearance_read_ns = now_ns
@@ -668,12 +677,10 @@ class RuntimeSnapshotAdapter:
                                       car=display_car if display_car_valid else None, read_message=display_message)
     experimental = bool(display_selfdrive.experimentalMode) if display_selfdrive is not None else _flag(params, "ExperimentalMode")
     observed_experimental = bool(display_selfdrive.experimentalMode) if display_selfdrive is not None else False
-    persona = _personality(_text(params, "LongitudinalPersonality", "1"))
-    if display_selfdrive is not None:
-      try:
-        persona = _personality(log.LongitudinalPersonality.schema.enumerants[str(display_selfdrive.personality)])
-      except (AttributeError, KeyError, TypeError, ValueError):
-        pass
+    try:
+      persona = _personality(log.LongitudinalPersonality.schema.enumerants[str(display_selfdrive.personality)])
+    except (AttributeError, KeyError, TypeError, ValueError):
+      persona = _personality(_text(params, "LongitudinalPersonality", "1"))
     torque = observe_torque_feedback(
       display_car, display_control, display_controls,
       display_message(sm, "carOutput", now_ns, after_frame=after) if started else None,
@@ -697,12 +704,14 @@ class RuntimeSnapshotAdapter:
       cruise_state is not None and getattr(cruise_state, 'available', False) and
       not (cp is not None and getattr(cp, 'brand', '') == 'toyota' and
            (car.standstill or cruise_state.standstill or not cruise_state.enabled)))
-    developer_metrics = self._developer_metrics.observe(
-      drive=after if started else None, car=display_car if display_car_valid else None,
-      delay=current_message(sm, 'lateralDelay', now_ns, after_frame=after) if started else None,
-      torque=current_message(sm, 'lateralTorqueParameters', now_ns, after_frame=after) if started else None,
-      parameters=display_message(sm, 'vehicleParameters', now_ns, after_frame=after) if started else None,
-      metric=bool(ui.is_metric), cp=cp)
+    developer_metrics = ()
+    if not (onroad_view_only and stopped_timer_profile == "compact"):
+      developer_metrics = self._developer_metrics.observe(
+        drive=after if started else None, car=display_car if display_car_valid else None,
+        delay=current_message(sm, 'lateralDelay', now_ns, after_frame=after) if started else None,
+        torque=current_message(sm, 'lateralTorqueParameters', now_ns, after_frame=after) if started else None,
+        parameters=display_message(sm, 'vehicleParameters', now_ns, after_frame=after) if started else None,
+        metric=bool(ui.is_metric), cp=cp)
     stop_observed_ns = (self._vision_stop.observe_message(
       sm, now_ns=now_ns, now_boot_ns=now_ns + pair[2], drive_id=drive_id, after_frame=after)
       if started and pair is not None else self._vision_stop.observe(None, now_ns=now_ns))
@@ -715,11 +724,16 @@ class RuntimeSnapshotAdapter:
         if gps is not None and gps.hasFix and valid_location((gps.latitude, gps.longitude)):
           weather_location = (gps.latitude, gps.longitude)
           break
+    aol_latched = (display_aol_latch(sm, now_ns, after_frame=after)
+                   if started and getattr(ui, "aol_runtime", False) else None)
+    armed_at_stop = bool(aol_latched and cp is not None and getattr(cp, 'brand', '') == 'subaru' and display_car_valid and
+                         display_car.standstill and str(display_car.gearShifter) == 'drive' and
+                         not display_car.steerFaultTemporary and not display_car.steerFaultPermanent and not display_car.accFaulted)
     onroad = OnroadState(weather_location=weather_location, developer_metrics=developer_metrics, stop_sign_observed_ns=stop_observed_ns,
                          engaged=display_lat_active or display_long_active or longitudinal_overridden, camera_available=started,
                          speed_mps=raw_speed, cruise_kph=cruise, speed_limit=observation,
                          appearance=self._appearance_value, customization=self._customization_value,
-                         alert=alert, metric=bool(ui.is_metric),
+                         alert=alert, metric=bool(ui.is_metric), slc_offset_schedule=self._slc_offset_schedule,
                          experimental_available=bool(ui.has_longitudinal_control),
                          experimental_enabled=observed_experimental,
                          personality=list(Personality).index(persona),
@@ -738,8 +752,7 @@ class RuntimeSnapshotAdapter:
                          torque_is_demand=torque.source == "lateral_acceleration_demand",
                          torque_drive_frame=after if started else None, drive_frame=after if started else None, observed_ns=now_ns,
                          wheel_acceleration=observe_wheel_acceleration(display_car),
-                         aol_latched=(display_aol_latch(sm, now_ns, after_frame=after)
-                                      if started and getattr(ui, "aol_runtime", False) else None),
+                         aol_latched=aol_latched, aol_armed_at_stop=armed_at_stop,
                          lateral_active=display_lat_active, longitudinal_active=display_long_active,
                          longitudinal_overridden=longitudinal_overridden,
                          driver_override_active=bool(display_car_valid and (

@@ -2,6 +2,7 @@ import numpy as np
 import math
 from opendbc.car.structs import car
 from openpilot.common.realtime import DT_CTRL
+from openpilot.starpilot.longitudinal.lead_takeoff_preferences import MAX_ACCEL as TAKEOFF_ACCEL_MAX
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N
 from openpilot.common.pid import PIDController
 from openpilot.selfdrive.modeld.constants import ModelConstants
@@ -60,6 +61,12 @@ class LongControl:
   def update(self, active, CS, a_target, should_stop, accel_limits, *, context=None):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     context = context if context is not None else LongitudinalContext()
+    if context.faster_takeoffs and takeoff_eligible(self.CP):
+      upper = min(accel_limits[1], TAKEOFF_ACCEL_MAX)
+      cap = context.profile_max_accel
+      if cap is not None and type(cap) in (int, float) and math.isfinite(cap) and 0 <= cap <= TAKEOFF_ACCEL_MAX:
+        upper = min(upper, cap)
+      accel_limits = (accel_limits[0], upper)
     self.pid.neg_limit = accel_limits[0]
     self.pid.pos_limit = accel_limits[1]
 
@@ -97,7 +104,7 @@ class LongControl:
         output_accel -= self.stopping_decel_rate * DT_CTRL  # m/s^2/s while trying to stop
       if self.extension is not None:
         output_accel = self.extension.stopping_output(output_accel, a_target, should_stop, CS)
-      if (context.force_stop_braking and self.extension is not None and self.extension.ioniq6_start is not None and
+      if (context.force_stop_braking and self.extension is not None and self.extension.force_stop_distance_braking and
           should_stop and not CS.standstill and CS.vEgo > .3 and math.isfinite(a_target)):
         output_accel = min(a_target, 0.0)
       self.reset(reset_start=False)

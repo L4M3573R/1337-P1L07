@@ -57,7 +57,7 @@ from openpilot.starpilot.ui.feature_settings_state import (
 from openpilot.starpilot.ui.lane_change_feature import KEYS as LANE_CHANGE_KEYS, RESET as LANE_CHANGE_RESET
 from openpilot.starpilot.models.runtime import ModelStatusSource
 from openpilot.starpilot.models.status import project_status
-from openpilot.starpilot.ui.models_state import model_page, model_profile_choices, model_profile_request, home_model_label
+from openpilot.starpilot.ui.models_state import model_page, model_profile_choices, model_profile_request
 from openpilot.starpilot.ui.maps_state import MapStatusSource
 from openpilot.starpilot.galaxy.access import GalaxyAccessOwner, default_owner
 from openpilot.starpilot.ui.galaxy_access import GalaxyAccessFlow
@@ -361,7 +361,7 @@ class StarShellSession:
                              lambda: self.appearance_owner.snapshot(self.profile), self.appearance_owner.apply, requested_keys=keys)
     actions.update(layout_actions(ui_state.params, str(self.profile),
                                   lambda: self._settings_preference_authority() or self._favorite_authority(),
-                                  lambda: self.adapter.invalidate_appearance()))
+                                  lambda: self.adapter.invalidate_appearance(), requested_keys=keys))
     actions.update(self._native_favorite_actions())
     return actions if keys is None else {key: action for key, action in actions.items() if key in keys}
 
@@ -753,7 +753,7 @@ class StarShellSession:
     self._poll_aol_save()
     if getattr(self, "_aol_save_closed", False) or getattr(self, "_aol_save", None) is not None:
       return False
-    group = "preferences" if request.value == "Off" else "aol"
+    group = "preferences"
     if not self._feature_authority(group):
       self._unavailable("AOL preference is unavailable in this context")
       return False
@@ -1324,7 +1324,7 @@ class StarShellSession:
         try:
           if self.model_source is None:
             self.model_source = ModelStatusSource(self.adapter.ui_state.params)
-          label = home_model_label(self.model_source.snapshot(), snapshot.home.commit if self.profile == Profile.COMPACT else "")
+          label = self.model_source.home_label(snapshot.home.commit if self.profile == Profile.COMPACT else "")
         except (OSError, RuntimeError, ValueError):
           label = "Driving model unavailable"
         self._home_model = (now, label)

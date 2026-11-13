@@ -9,6 +9,8 @@ LICENSE, while the application owns all state and action transport.
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+import hashlib
+import json
 from typing import Protocol
 
 from openpilot.starpilot.ui.raylib import rl
@@ -46,6 +48,19 @@ OverlayLayer = Callable[[rl.Rectangle, OnroadState], None]
 PipLayer = Callable[[rl.Rectangle, OnroadState], None]
 ProjectionControlLayer = Callable[[OnroadState], None]
 
+def _load_fade(path: Path) -> rl.Texture:
+  entry = next(item for item in json.loads(Path(__file__).with_name('onroad-assets.json').read_text())['files']
+               if Path(item['file']).name == path.name)
+  with path.open('rb') as stream:
+    data = stream.read(entry['bytes'] + 1)
+  if len(data) != entry['bytes'] or hashlib.sha256(data).hexdigest() != entry['sha256']:
+    raise ValueError(f'Unreviewed onroad fade art: {path.name}')
+  texture = rl.load_texture(str(path))
+  if not texture.id:
+    raise RuntimeError(f'Unable to load onroad fade art: {path.name}')
+  return texture
+
+
 def driving_mode_description(state: OnroadState) -> str:
   if state.longitudinal_overridden:
     return "ACC - Override"
@@ -60,6 +75,8 @@ def driving_mode_description(state: OnroadState) -> str:
     return "ACC - Experimental" if experimental else "ACC - Chill"
   if state.lateral_active:
     return "Always On Lateral"
+  if state.aol_latched and state.aol_armed_at_stop:
+    return "AOL Armed"
   return "Stock ACC" if state.stock_cruise_active else "Disengaged"
 
 
@@ -70,7 +87,7 @@ def clock_text(now: datetime | None = None, use_24_hour: bool = False) -> str:
 
 def axis_status_color(state: OnroadState) -> rl.Color:
   """Retain StarPilot's existing off, AOL, long-only, and combined edge colors."""
-  lateral = state.lateral_active if state.aol_latched is None else state.aol_latched
+  lateral = state.lateral_active and state.aol_latched is not False
   if state.driver_override_active or state.longitudinal_overridden:
     return rl.Color(145, 155, 149, 255)
   if lateral and state.switchback_mode:
@@ -92,10 +109,14 @@ def axis_status_color(state: OnroadState) -> rl.Color:
     return rl.Color(22, 127, 64, 255) if state.stock_cruise_active else rl.Color(10, 186, 181, 255)
   if state.longitudinal_active:
     return rl.Color(255, 105, 180, 255)
+  if state.aol_latched and state.aol_armed_at_stop:
+    return rl.Color(10, 100, 98, 255)
   return rl.Color(18, 40, 57, 255)
 
 
 class JetlinkRenderLayer(Protocol):
+
+
   def render(self, state: OnroadState) -> None: ...
 
 
@@ -145,6 +166,13 @@ class OnroadView:
       self.compact_hud = CompactHudRenderer(fonts, asset_directory)
       self.compact_sidebar = MiciSidebarWidgets(fonts)
       self.personality = self.compact_sidebar.personality
+      self._fade_path = asset_directory / "icons_mici/onroad/onroad_fade.png"
+      self._fade: rl.Texture | None = None
+
+  def _prepare_compact_fade(self) -> None:
+    if self._fade is None:
+      self._fade = _load_fade(self._fade_path)
+
 
   def render(self, state: OnroadState) -> None:
     if state.camera_available and self.camera_layer is None:
@@ -480,6 +508,8 @@ class OnroadView:
         self.background_layer(frame, state)
       ordered = bool(state.customization.get("widgetOrder", {}).get("compact"))
       if ordered:
+        self._prepare_compact_fade()
+        rl.draw_texture_ex(self._fade, rl.Vector2(0, 0), 0, 1, rl.WHITE)
         clip.end_scissor_mode()
         clip.begin_scissor_mode(0, 0, 536, 240)
         self._ordered_widgets(frame, state, driver_camera=driver_camera, stock_layer=stock_layer if use_stock else None)
@@ -492,6 +522,8 @@ class OnroadView:
         if pip_layer is not None and state.camera_available and not driver_camera and \
            state.appearance.camera_view != CameraViewChoice.NONE:
           pip_layer(frame, state)
+        self._prepare_compact_fade()
+        rl.draw_texture_ex(self._fade, rl.Vector2(0, 0), 0, 1, rl.WHITE)
         if state.alert.size == AlertSize.NONE and not driver_camera:
           self.compact_hud.render(state)
           if placement(state.customization, "compact", "torque_bar")["enabled"]:
@@ -570,3 +602,6 @@ class OnroadView:
       self.steering_wheel.close()
     else:
       self.compact_hud.close()
+      if self._fade is not None and rl.is_window_ready():
+        rl.unload_texture(self._fade)
+      self._fade = None

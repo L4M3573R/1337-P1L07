@@ -337,6 +337,26 @@ def early_native_long_withdrawal_supported(CP) -> bool:
                CP.carFingerprint == HyundaiCAR.HYUNDAI_PALISADE_2023 and qualified_blended_alpha(CP, marked_only=True)))
 
 
+
+def raw_longitudinal_withdrawal(CP, CS, sm, native, *, session, now_ns) -> bool:
+  from openpilot.starpilot.aol.transport_pause import independent_lateral_health
+
+  try:
+    if (CP.brand != 'hyundai' or not CP.openpilotLongitudinalControl or native is None or
+        not native.requestedLateral or not native.lateralAllowed or not native.requestedLongitudinal or
+        not native.longitudinalAllowed or not native.pandaInventory or
+        not 0 < native.sourcePandaStatesMonoTime < int(sm.logMonoTime['pandaStates'])):
+      return False
+    index = 0 if len(CP.safetyConfigs) == 1 else config_index(CP)
+    pandas = sm['pandaStates']
+    if (index is None or len(pandas) != len(CP.safetyConfigs) or len(native.pandaInventory) != len(CP.safetyConfigs) or
+        pandas[index].controlsAllowed or not native.pandaInventory[index].controlsAllowed or
+        not (early_native_long_withdrawal_supported(CP) or qualified_ccnc_long_aol(CP, marked_only=True))):
+      return False
+    return independent_lateral_health(sm, CP, CS, session, now_ns) == native
+  except (AttributeError, KeyError, IndexError, TypeError, ValueError, OverflowError):
+    return False
+
 def classic_brake_withdrawal(CP, CS) -> bool:
   return bool(CP.brand == 'hyundai' and CS.brakePressed and not CS.gasPressed and not CS.regenBraking and
               CS.cruiseState.available and not CS.doorOpen and not CS.seatbeltUnlatched and not CS.vehicleSensorsInvalid and
@@ -380,7 +400,8 @@ def source_deadline_supported(CP) -> bool:
 
 def independent_cruise_buttons_supported(CP, *, marked_only=False) -> bool:
   # Dedicated EV6 LONG raw-button/optional-release behavior stays unchanged.
-  if CP.carFingerprint == HyundaiCAR.KIA_EV6 and CP.openpilotLongitudinalControl:
+  if (CP.carFingerprint == HyundaiCAR.KIA_EV6 and CP.openpilotLongitudinalControl and
+      CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG):
     return False
   return bool(qualified_ccnc_long_aol(CP, marked_only=marked_only) or qualified_sonata_independent(CP) or
               qualified_angle_aol(CP, marked_only=marked_only) or

@@ -619,9 +619,9 @@ def test_compact_us_sign_keeps_camera_visible_at_saved_position(speed):
     hud._speed_limit_sign(state)
   fill.assert_not_called()
   outline.assert_called_once()
-  assert outline.call_args.args[:2] == (264, 95)
+  assert outline.call_args.args[:2] == (264, 96)
   assert [call.args[0] for call in foreground_calls(fonts.draw)] == ['SPEED', str(speed)]
-  assert foreground_calls(fonts.draw)[0].args[3:5] == (259, 38)
+  assert foreground_calls(fonts.draw)[0].args[3:5] == (259, 47)
 
 
 def test_compact_drag_keeps_animation_state_and_separate_origins():
@@ -637,7 +637,7 @@ def test_compact_drag_keeps_animation_state_and_separate_origins():
   with patch.object(hud, "_speed_limit_sign"), patch.object(rl, "draw_circle_gradient"), patch.object(rl, "draw_texture_pro") as wheel:
     hud.render(state)
     hud.render(state)
-    assert foreground_calls(fonts.draw)[-1].args[3:5] == (138, 62.5)
+    assert foreground_calls(fonts.draw)[-1].args[3:5] == (125, 119)
     rect = wheel.call_args.args[2]
     assert (rect.x, rect.y) == (115, 175)
     alpha = hud._set_speed_alpha.x

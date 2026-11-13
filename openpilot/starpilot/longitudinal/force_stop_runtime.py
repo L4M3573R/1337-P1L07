@@ -14,7 +14,7 @@ from openpilot.starpilot.longitudinal.force_stop import ForceStop, StopFrame, St
 from openpilot.starpilot.model_geometry import road_curvature, standstill_clear_horizon, standstill_release_speed
 from openpilot.starpilot.saved_source import read_saved
 from openpilot.starpilot.longitudinal.stop_resume import StopResume
-from openpilot.starpilot.longitudinal.ioniq6_start import eligible as ioniq6_long_eligible
+from openpilot.starpilot.longitudinal.force_stop_braking import eligible as distance_braking_eligible
 from openpilot.starpilot.speed_limits.vision.stop_observation import CONTROL_STOP_MAX_AGE_NS, StopConfirmation
 
 
@@ -194,6 +194,7 @@ class ForceStopRuntime:
         self.vision_ranged_ns = vision_sign
         vision_distance = self.vision_stop.distance_m - float(car.vEgo) * (stamp - vision_sign) / 1e9
       dashboard_sign = dashboard_stop_sign(sm, now_ns=now_ns, drive_id=drive_id)
+      # A stationary forecast tail alone does not identify a fixed stop line.
       frame = StopFrame(stamp, float(car.vEgo), horizon, light_context, horizon is not None and horizon < 50,
                         bool(model.action.shouldStop), bool(car.standstill), True, bool(car.gasPressed),
                         tracked is not None and tracked.tracked is True, bool(lead.present), float(lead.dRel), float(lead.vLead),
@@ -203,8 +204,8 @@ class ForceStopRuntime:
                         dashboard_sign=dashboard_sign, vision_distance_m=vision_distance,
                         moving_preview=bool(perception_available and not model.action.shouldStop and
                                             len(model.velocity.x) == len(model.position.x) and
-                                            math.isfinite(model.velocity.x[-1]) and model.velocity.x[-1] > .3))
-      tune = replace(vehicle_tune(str(cp.carFingerprint)), distance_control=ioniq6_long_eligible(cp))
+                                            math.isfinite(model.velocity.x[-1])))
+      tune = replace(vehicle_tune(str(cp.carFingerprint)), distance_control=distance_braking_eligible(cp))
       self.plan = self.policy.step(frame, tune, self.offset)
       if takeoff_enabled:
         self.plan = replace(self.plan, takeoff_light_observed=takeoff_observed, takeoff_light=takeoff_light)

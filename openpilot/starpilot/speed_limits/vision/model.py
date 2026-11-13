@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter, deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
@@ -291,7 +292,7 @@ class VisionModelCore:
 
   ASSET_DIR = Path(__file__).resolve().parent / "assets"
   DETECTOR_SHA256 = "82408b68c79c269296f0af942130c5383cace4ee06c78e2a4690e8488720116a"
-  CLASSIFIER_SHA256 = "5d861067ab8f50986488f983cbc24f78527775d37af0b9740c5545d5f3173902"
+  CLASSIFIER_SHA256 = "f70477aa34a5557b69103ed65066b5a7a678f5bc35dfb4ee19914aec3c108918"
   DETECTOR_SIZE = 256
   CLASSIFIER_SIZE = 128
 
@@ -458,6 +459,21 @@ class VisionModelCore:
     return detection
 
 
+  @staticmethod
+  def _is_yellow_advisory(sign_crop):
+    if sign_crop.size == 0:
+      return False
+    sign_crop = _primary_regulatory_panel(sign_crop)
+    hsv = cv2.cvtColor(sign_crop, cv2.COLOR_BGR2HSV)
+    hue, saturation, value = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    white_mask = ((value >= REGULATORY_WHITE_VALUE_MIN) & (saturation <= REGULATORY_WHITE_SAT_MAX))
+    yellow_mask = ((hue >= REGULATORY_YELLOW_HUE_MIN) &
+                   (hue <= REGULATORY_YELLOW_HUE_MAX) &
+                   (saturation >= REGULATORY_YELLOW_SAT_MIN) &
+                   (value >= REGULATORY_YELLOW_VALUE_MIN))
+    return float((yellow_mask & ~white_mask).astype(np.uint8).mean()) > .5
+
+
   def _is_regulatory_speed_sign(self, sign_crop):
     if sign_crop.size == 0:
       return False
@@ -474,45 +490,53 @@ class VisionModelCore:
 
     white_mask = ((value >= REGULATORY_WHITE_VALUE_MIN) & (saturation <= REGULATORY_WHITE_SAT_MAX)).astype(np.uint8)
     dark_mask = ((value <= REGULATORY_DARK_VALUE_MAX) & (saturation <= REGULATORY_DARK_SAT_MAX)).astype(np.uint8)
+
+    white_ratio = float(white_mask.mean())
+    dark_ratio = float(dark_mask.mean())
+
+    if white_ratio < REGULATORY_MIN_WHITE_RATIO or dark_ratio < REGULATORY_MIN_DARK_RATIO:
+      return False
+
     yellow_mask = (
       (hue >= REGULATORY_YELLOW_HUE_MIN) &
       (hue <= REGULATORY_YELLOW_HUE_MAX) &
       (saturation >= REGULATORY_YELLOW_SAT_MIN) &
       (value >= REGULATORY_YELLOW_VALUE_MIN)
     ).astype(np.uint8)
+    yellow_ratio = float(yellow_mask.mean())
+
+    if yellow_ratio > REGULATORY_MAX_YELLOW_RATIO and yellow_ratio > white_ratio * 0.45:
+      return False
+
     red_mask = (
       (((hue <= REGULATORY_RED_LOW_HUE_MAX) | (hue >= REGULATORY_RED_HIGH_HUE_MIN))) &
       (saturation >= REGULATORY_RED_SAT_MIN) &
       (value >= REGULATORY_RED_VALUE_MIN)
     ).astype(np.uint8)
+    red_ratio = float(red_mask.mean())
+
+    if red_ratio > REGULATORY_MAX_RED_RATIO and red_ratio > white_ratio * 0.35:
+      return False
+
     green_mask = (
       (hue >= REGULATORY_GREEN_HUE_MIN) &
       (hue <= REGULATORY_GREEN_HUE_MAX) &
       (saturation >= REGULATORY_COLORED_SAT_MIN) &
       (value >= REGULATORY_COLORED_VALUE_MIN)
     ).astype(np.uint8)
+    green_ratio = float(green_mask.mean())
+
+    if green_ratio > REGULATORY_MAX_GREEN_RATIO and green_ratio > white_ratio * 0.60:
+      return False
+
     blue_mask = (
       (hue >= REGULATORY_BLUE_HUE_MIN) &
       (hue <= REGULATORY_BLUE_HUE_MAX) &
       (saturation >= REGULATORY_COLORED_SAT_MIN) &
       (value >= REGULATORY_COLORED_VALUE_MIN)
     ).astype(np.uint8)
-
-    white_ratio = float(white_mask.mean())
-    dark_ratio = float(dark_mask.mean())
-    yellow_ratio = float(yellow_mask.mean())
-    red_ratio = float(red_mask.mean())
-    green_ratio = float(green_mask.mean())
     blue_ratio = float(blue_mask.mean())
 
-    if white_ratio < REGULATORY_MIN_WHITE_RATIO or dark_ratio < REGULATORY_MIN_DARK_RATIO:
-      return False
-    if yellow_ratio > REGULATORY_MAX_YELLOW_RATIO and yellow_ratio > white_ratio * 0.45:
-      return False
-    if red_ratio > REGULATORY_MAX_RED_RATIO and red_ratio > white_ratio * 0.35:
-      return False
-    if green_ratio > REGULATORY_MAX_GREEN_RATIO and green_ratio > white_ratio * 0.60:
-      return False
     if blue_ratio > REGULATORY_MAX_BLUE_RATIO and blue_ratio > white_ratio * 0.60:
       return False
 
@@ -778,7 +802,8 @@ class VisionModelCore:
     return speed_limit, confidence
 
 
-  def _detect_sign_from_detector_classifier(self, frame_bgr):
+  def _detect_sign_from_detector_classifier(
+      self, frame_bgr, *, proposals: Iterable[tuple[float, int, tuple[int, int, int, int]]] | None = None):
     frame_height, frame_width = frame_bgr.shape[:2]
     best_detection = None
     best_score = 0.0
@@ -805,7 +830,22 @@ class VisionModelCore:
         cached_bytes += crop.nbytes
       return result
 
-    for proposal_confidence, class_id, (x1, y1, x2, y2) in self._collect_detector_classifier_proposals(frame_bgr):
+    if proposals is None:
+      proposals = self._collect_detector_classifier_proposals(frame_bgr)
+    if type(proposals) is list and len(proposals) > 1 and proposals[0][1] == 0:
+      confidence, _, (left, top, right, bottom) = proposals[0]
+      width, height = right - left, bottom - top
+      if height >= 1.8 * width:
+        for index, candidate in enumerate(proposals[1:], 1):
+          score, kind, (x1, y1, x2, y2) = candidate
+          w, h = x2 - x1, y2 - y1
+          if (kind == 0 and 0 <= confidence - score <= .005 and
+              left <= x1 < x2 <= right and top <= y1 <= top + .15 * width and
+              w >= .8 * width and .9 * w <= h <= 1.6 * w and h <= .75 * height):
+            # Prefer a near-tied upper plate over its combined MINIMUM-board proposal.
+            proposals = [candidate, *proposals[:index], *proposals[index + 1:]]
+            break
+    for proposal_index, (proposal_confidence, class_id, (x1, y1, x2, y2)) in enumerate(proposals):
       if class_id == 1:
         continue
       if class_id == 0:
@@ -819,11 +859,22 @@ class VisionModelCore:
         if duplicate_advisory:
           continue
 
+      score_confidence = proposal_confidence
+      score_margin = getattr(self, 'PUBLISHED_SCORE_MARGIN', 0.0)
+      calibration = getattr(self, 'PROPOSAL_LOGIT_CALIBRATION', 0.0)
+      if calibration:
+        # Admission calibration must not inflate the published numeric evidence.
+        score_confidence /= proposal_confidence + math.exp(calibration) * (1 - proposal_confidence)
+
       box_width = x2 - x1
       box_height = y2 - y1
       if box_width <= 0 or box_height <= 0:
         continue
-      is_small_box = box_width < DETECTOR_CLASSIFIER_MIN_ACCEPT_WIDTH or box_height < DETECTOR_CLASSIFIER_MIN_ACCEPT_HEIGHT
+      is_small_box = (
+        box_width < DETECTOR_CLASSIFIER_MIN_ACCEPT_WIDTH - 1 or
+        box_height < DETECTOR_CLASSIFIER_MIN_ACCEPT_HEIGHT or
+        box_width * box_height < DETECTOR_CLASSIFIER_MIN_ACCEPT_WIDTH * DETECTOR_CLASSIFIER_MIN_ACCEPT_HEIGHT
+      )
       # Tiny far-away proposals are the main nighttime false-positive source.
       # Keep a narrow rescue path for right-side high-confidence reads,
       # then let temporal confirmation decide whether they are real.
@@ -840,6 +891,10 @@ class VisionModelCore:
         proposal_area_ratio < DETECTOR_CLASSIFIER_TINY_LOW_CONF_AREA_RATIO and
         proposal_confidence < DETECTOR_CLASSIFIER_TINY_LOW_CONF_MIN_CONFIDENCE
       )
+      if class_id == 0 and self._is_yellow_advisory(
+          frame_bgr[max(int(y1), 0):min(int(y2), frame_height), max(int(x1), 0):min(int(x2), frame_width)]):
+        rejected_advisory_boxes.append((x1, y1, x2, y2))
+        continue
       self._remember_detector_proposal(proposal_confidence, class_id, (x1, y1, x2, y2))
 
       if class_id == 2:
@@ -887,9 +942,9 @@ class VisionModelCore:
             ):
               score = min(
                 read_confidence * 0.72 +
-                proposal_confidence * 0.22 +
+                score_confidence * 0.22 +
                 max(support_count - 1, 0) * SCHOOL_ZONE_SUPPORT_BONUS +
-                0.04,
+                0.04 - score_margin,
                 0.95,
               )
               if score >= SCHOOL_ZONE_SHORT_CIRCUIT_CONFIDENCE:
@@ -900,6 +955,8 @@ class VisionModelCore:
 
       speed_scores: dict[int, float] = {}
       speed_best_confidences: dict[int, float] = {}
+      speed_worst_confidences: dict[int, float] = {}
+      speed_read_boxes: dict[int, set[tuple[int, int, int, int]]] = {}
       speed_support_counts: dict[int, int] = {}
       speed_regulatory_support: dict[int, int] = {}
       speed_trusted_model_support: dict[int, int] = {}
@@ -937,14 +994,89 @@ class VisionModelCore:
               speed_regulatory_support.get(agreed_speed, 0) >= 1 and
               speed_scores[agreed_speed] + DETECTOR_CLASSIFIER_SUPPORT_BONUS >
               expansion_weight + DETECTOR_CLASSIFIER_REGULATORY_BONUS and
-              speed_best_confidences[agreed_speed] * .72 + proposal_confidence * .24 +
-              DETECTOR_CLASSIFIER_SUPPORT_BONUS >= .95):
+              speed_best_confidences[agreed_speed] * .72 + score_confidence * .24 +
+              DETECTOR_CLASSIFIER_SUPPORT_BONUS - score_margin >= .95):
             break
 
         face_filter = getattr(self, '_speed_face_filter', None)
         if face_filter is not None and face_filter.reject_once((proposal_confidence, class_id, (x1, y1, x2, y2))):
           self.latest_detector_proposal = None
           return None
+        if (frame_bgr.dtype == np.uint8 and type(proposals) is list and
+            expansions is DETECTOR_CLASSIFIER_EXPANSIONS and
+            (expand_left, expand_top, expand_right, expand_bottom, expansion_weight) == expansions[0] and
+            class_id == 0 and not speed_scores and not raw_is_regulatory and
+            getattr(self, 'classifier_net', None) is not None and
+            proposal_confidence < DETECTOR_CLASSIFIER_STRONG_MODEL_MIN_PROPOSAL_CONFIDENCE and
+            not (x1 >= frame_width * DETECTOR_CLASSIFIER_TRUSTED_MODEL_MIN_X_RATIO and
+                 box_height <= DETECTOR_CLASSIFIER_TRUSTED_MODEL_MAX_HEIGHT and
+                 proposal_area_ratio <= DETECTOR_CLASSIFIER_TRUSTED_MODEL_MAX_AREA_RATIO and
+                 proposal_confidence >= DETECTOR_CLASSIFIER_TRUSTED_MODEL_MIN_PROPOSAL_CONFIDENCE)):
+          from openpilot.starpilot.speed_limits.vision.speed_face import SpeedFaceVerifier, SharedSpeedFaceVerifier
+          if (type(face_filter) in (SpeedFaceVerifier, SharedSpeedFaceVerifier) and
+              getattr(face_filter.reject_once, '__func__', None) is SpeedFaceVerifier.reject_once and
+              face_filter._checked is True and
+              getattr(self._is_regulatory_speed_sign, '__func__', None) is
+              VisionModelCore._is_regulatory_speed_sign and
+              getattr(self._classify_speed_limit_from_model, '__func__', None) is
+              VisionModelCore._classify_speed_limit_from_model):
+            for left, top, right, bottom, _ in expansions[1:]:
+              remaining_crop = frame_bgr[
+                max(int(y1 - box_height * top), 0):min(int(y2 + box_height * bottom), frame_height),
+                max(int(x1 - box_width * left), 0):min(int(x2 + box_width * right), frame_width),
+              ]
+              if remaining_crop.size and self._is_regulatory_speed_sign(remaining_crop):
+                break
+            else:
+              if proposal_index == len(proposals) - 1:
+                break
+              if (getattr(self._remember_detector_proposal, '__func__', None) is
+                  VisionModelCore._remember_detector_proposal):
+                for future in proposals[proposal_index + 1:]:
+                  if (type(future) is not tuple or len(future) != 3 or
+                      type(future[0]) not in (int, float) or not math.isfinite(future[0]) or
+                      not future[0] <= proposal_confidence or type(future[1]) is not int or future[1] != 0 or
+                      type(future[2]) is not tuple or len(future[2]) != 4 or
+                      any(type(value) not in (int, float) or not math.isfinite(value) for value in future[2])):
+                    break
+                  confidence, _, (fx1, fy1, fx2, fy2) = future
+                  width, height = fx2 - fx1, fy2 - fy1
+                  area = width * height / max(frame_width * frame_height, 1)
+                  if (width <= 0 or height <= 0 or
+                      confidence >= DETECTOR_CLASSIFIER_STRONG_MODEL_MIN_PROPOSAL_CONFIDENCE or
+                      (fx1 >= frame_width * DETECTOR_CLASSIFIER_TRUSTED_MODEL_MIN_X_RATIO and
+                       height <= DETECTOR_CLASSIFIER_TRUSTED_MODEL_MAX_HEIGHT and
+                       area <= DETECTOR_CLASSIFIER_TRUSTED_MODEL_MAX_AREA_RATIO and
+                       confidence >= DETECTOR_CLASSIFIER_TRUSTED_MODEL_MIN_PROPOSAL_CONFIDENCE)):
+                    break
+                  for left, top, right, bottom, _ in expansions:
+                    future_crop = frame_bgr[
+                      max(int(fy1 - height * top), 0):min(int(fy2 + height * bottom), frame_height),
+                      max(int(fx1 - width * left), 0):min(int(fx2 + width * right), frame_width),
+                    ]
+                    if future_crop.size and self._is_regulatory_speed_sign(future_crop):
+                      break
+                  else:
+                    continue
+                  break
+                else:
+                  return None if best_retry_conflict else best_detection
+        if (type(proposals) is list and proposal_index == len(proposals) - 1 and
+            expansions is DETECTOR_CLASSIFIER_EXPANSIONS and
+            (expand_left, expand_top, expand_right, expand_bottom, expansion_weight) == expansions[-1] and
+            class_id == 0 and best_score == .95 and
+            getattr(self, 'classifier_net', None) is not None):
+          continue
+        if (type(proposals) is list and proposal_index == len(proposals) - 1 and
+            expansions is DETECTOR_CLASSIFIER_EXPANSIONS and
+            (expand_left, expand_top, expand_right, expand_bottom, expansion_weight) == expansions[-1] and
+            getattr(self, 'classifier_net', None) is not None and class_id == 0 and not speed_scores and not raw_is_regulatory and
+            proposal_confidence < DETECTOR_CLASSIFIER_STRONG_MODEL_MIN_PROPOSAL_CONFIDENCE and
+            not (x1 >= frame_width * DETECTOR_CLASSIFIER_TRUSTED_MODEL_MIN_X_RATIO and
+                 box_height <= DETECTOR_CLASSIFIER_TRUSTED_MODEL_MAX_HEIGHT and
+                 proposal_area_ratio <= DETECTOR_CLASSIFIER_TRUSTED_MODEL_MAX_AREA_RATIO and
+                 proposal_confidence >= DETECTOR_CLASSIFIER_TRUSTED_MODEL_MIN_PROPOSAL_CONFIDENCE)):
+          break
         model_read = classify_crop(sign_crop)
         if not any((expand_left, expand_top, expand_right, expand_bottom)):
           primary_reject_dominant = bool(
@@ -1018,6 +1150,8 @@ class VisionModelCore:
 
         speed_scores[speed_limit_mph] = speed_scores.get(speed_limit_mph, 0.0) + score
         speed_best_confidences[speed_limit_mph] = max(speed_best_confidences.get(speed_limit_mph, 0.0), read_confidence)
+        speed_worst_confidences[speed_limit_mph] = min(speed_worst_confidences.get(speed_limit_mph, 1.), read_confidence)
+        speed_read_boxes.setdefault(speed_limit_mph, set()).add((expanded_x1, expanded_y1, expanded_x2, expanded_y2))
         speed_support_counts[speed_limit_mph] = speed_support_counts.get(speed_limit_mph, 0) + 1
         if raw_is_regulatory and any((expand_left, expand_top, expand_right, expand_bottom)):
           expanded_regulatory_speeds.add(speed_limit_mph)
@@ -1077,8 +1211,8 @@ class VisionModelCore:
       )
       score = min(
         read_confidence * 0.72 +
-        proposal_confidence * 0.24 +
-        max(support_count - 1, 0) * DETECTOR_CLASSIFIER_SUPPORT_BONUS,
+        score_confidence * 0.24 +
+        max(support_count - 1, 0) * DETECTOR_CLASSIFIER_SUPPORT_BONUS - score_margin,
         0.95,
       )
       selection_score = score
@@ -1108,6 +1242,21 @@ class VisionModelCore:
         rescue_max_score = (
           DETECTOR_CLASSIFIER_STRONG_RESCUE_MAX_SCORE if strong_rescue else DETECTOR_CLASSIFIER_RESCUE_MAX_SCORE
         )
+        identity_logit = getattr(face_filter, 'last_identity_logit', None)
+        verified_small = (
+          getattr(self, '_tiny_recovery', False) is True and
+          class_id == 0 and expansions is DETECTOR_CLASSIFIER_EXPANSIONS and
+          proposal_confidence >= .8 and len(speed_scores) == 1 and
+          support_count == len(speed_read_boxes[speed_limit_mph]) == 3 and
+          speed_worst_confidences[speed_limit_mph] >= .96 and read_confidence >= .995 and
+          getattr(face_filter, 'last_verified_candidate', None) == (proposal_confidence, class_id, (x1, y1, x2, y2)) and
+          getattr(face_filter, 'last_isolated_face', False) is True and
+          type(identity_logit) is float and math.isfinite(identity_logit) and identity_logit >= 2.75
+        )
+        if verified_small:
+          # Three consistent crops and the bound isolated identity can overcome the size cap.
+          rescue_max_score = .95
+          strong_rescue = True
         published_score = min(score, rescue_max_score)
         if speed_trusted_model_support.get(speed_limit_mph, 0) < DETECTOR_CLASSIFIER_TRUSTED_MODEL_MIN_SUPPORT:
           selection_score = published_score
