@@ -1340,7 +1340,8 @@ class StarShellSession:
       availability = tuple(replace(item, available=item.destination in
                                    (Destination.TOGGLES, Destination.DEVICE, Destination.SOFTWARE,
                                     Destination.DRIVING_MODEL, Destination.DRIVING_CONTROLS, Destination.APPEARANCE, Destination.GALAXY,
-                                    Destination.NETWORK, Destination.BLUETOOTH, Destination.VEHICLE, Destination.DEVELOPER) or
+                                    Destination.NETWORK, Destination.BLUETOOTH, Destination.VEHICLE, Destination.DEVELOPER,
+                                    Destination.L4_CUSTOM) or
                                    (item.destination == Destination.FORCE_DRIVE and drive["available"]) or
                                    snapshot.device.offroad and item.destination == Destination.PAIR)
                            for item in snapshot.settings.availability)
@@ -2132,6 +2133,14 @@ class StarMiciMainLayout(MiciMainLayout):
     self._scroller.scroll_to(self._onroad_layout.rect.x if ui_state.started else self._home_layout.rect.x, smooth=False)
 
   def _open_compact_destination(self, destination: Destination) -> None:
+    if destination == Destination.L4_CUSTOM:
+      from openpilot.selfdrive.ui.mici.layouts.settings.l4_custom import L4CustomLayoutMici
+      panel = self._compact_panels.get(destination)
+      if panel is None:
+        panel = L4CustomLayoutMici()
+        self._compact_panels[destination] = panel
+      gui_app.push_widget(panel)
+      return
     if destination == Destination.BLUETOOTH:
       from openpilot.starpilot.ui.bluetooth_compact import BluetoothCompact
       panel = self._compact_panels.get(destination)

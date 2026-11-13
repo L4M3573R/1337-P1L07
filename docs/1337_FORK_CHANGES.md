@@ -83,7 +83,9 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
 
 ### Settings and UI
 - **L4 custom tile** (`c5e36c122d`, `e825ae80af`, `b91e0d2fa9`, `eb47adb2ca`, `575dc06820`):
-  `selfdrive/ui/mici/layouts/settings/settings.py`, `.../l4_custom.py`, `starpilot/ui/l4_custom.py`.
+  `selfdrive/ui/mici/layouts/settings/settings.py`, `.../l4_custom.py`, `starpilot/ui/l4_custom.py`. The comma shows
+  StarPilot's compact menu, so the card must also be in `starpilot/ui/settings_state.py` (`Destination.L4_CUSTOM`,
+  first in `COMPACT_MENU`) and opened in `starpilot/ui/runtime_app.py` (`_open_compact_destination`).
 - **Compact driving controls redraw after AOL saves** (`92fdf51393`).
 
 ### Other

@@ -55,8 +55,20 @@ class TestCompactSettingsNavigation(unittest.TestCase):
 
   def test_compact_main_menu_includes_shared_driving_controls(self):
     self.assertEqual([label.lower() for _, label, _, _, _ in COMPACT_MENU],
-                     ["toggles", "network", "bluetooth", "force drive state", "vehicle", "device", "software",
+                     ["l4 custom", "toggles", "network", "bluetooth", "force drive state", "vehicle", "device", "software",
                       "driving model", "driving controls", "visuals", "galaxy", "pair to connect", "developer"])
+
+  def test_compact_l4_custom_opens_the_l4_settings_panel(self):
+    from openpilot.starpilot.ui.runtime_app import StarMiciMainLayout
+    layout = StarMiciMainLayout.__new__(StarMiciMainLayout)
+    layout.star, layout._compact_panels = Mock(), {}
+    with patch('openpilot.selfdrive.ui.mici.layouts.settings.l4_custom.L4CustomLayoutMici') as panel, \
+         patch('openpilot.starpilot.ui.runtime_app.gui_app') as app:
+      layout._open_compact_destination(Destination.L4_CUSTOM)
+      layout._open_compact_destination(Destination.L4_CUSTOM)
+    panel.assert_called_once_with()  # built once, reused
+    assert app.push_widget.call_count == 2
+    layout.star._unavailable.assert_not_called()
 
   def test_compact_driving_controls_opens_the_shared_feature_editor(self):
     from openpilot.starpilot.ui.runtime_app import StarMiciMainLayout

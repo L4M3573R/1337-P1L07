@@ -30,6 +30,7 @@ class Destination(StrEnum):
   FORCE_DRIVE = "force_drive"
   GALAXY = "galaxy"
   PAIR = "pair"
+  L4_CUSTOM = "l4_custom"  # 1337: personal steering, curve guard, BlueDriver fuel, comma vs you, P&G band
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ TILES = ((Destination.SOUNDS, "Sounds & Alerts", "sound"), (Destination.DRIVING_
          (Destination.APPEARANCE, "Appearance", "display"), (Destination.VEHICLE, "Vehicle Settings", "vehicle"))
 
 COMPACT_MENU = (
+  (Destination.L4_CUSTOM, "L4 Custom", "icons_mici/settings/vehicle.png", 64, 57),
   (Destination.TOGGLES, "Toggles", "icons_mici/settings.png", 64, 64),
   (Destination.NETWORK, "Network", "icons_mici/settings/network/wifi_strength_full.png", 76, 56),
   (Destination.BLUETOOTH, "Bluetooth", "icons_mici/settings/bluetooth.png", 64, 64),
