@@ -484,3 +484,48 @@ def test_branches_and_camera_check_at_an_exit():
   plain = {'straight': branches['straight']}
   assert check.check(3.0, 34.0, -117.0, 28.0, None, plain, camera.camera_curvature(_Model(curvature=0.0)),
                      camera.lane_position(_Model())) is None  # nothing to check on a plain straight road
+
+
+class _RealSubMaster:
+  """Real cereal messages behind the SubMaster interface curvemapd uses, so every field it reads exists in this schema."""
+
+  def __init__(self, lead=True):
+    import openpilot.cereal.messaging as messaging
+    self.msgs = {}
+    for name in ('carState', 'carControl', 'controlsState', 'gpsLocationExternal', 'selfdriveState', 'radarState', 'modelV2'):
+      self.msgs[name] = messaging.new_message(name)
+    cs = self.msgs['carState'].carState
+    cs.vEgo, cs.steeringTorque, cs.rightBlinker = 20.0, -120.0, True
+    self.msgs['carControl'].carControl.actuators.torque = 0.4
+    self.msgs['controlsState'].controlsState.curvature = 0.004
+    g = self.msgs['gpsLocationExternal'].gpsLocationExternal
+    g.latitude, g.longitude, g.bearingDeg, g.hasFix, g.horizontalAccuracy = 34.0, -117.0, 90.0, True, 2.0
+    lead_msg = self.msgs['radarState'].radarState.leadOne
+    lead_msg.present, lead_msg.dRel, lead_msg.vLead = lead, 30.0, 18.0
+    m = self.msgs['modelV2'].modelV2
+    m.position.x = [float(x) for x in np.linspace(0, 190, 33)]
+    m.velocity.x = [20.0] * 33
+    m.orientationRate.z = [0.08] * 33
+    m.laneLineProbs = [0.9, 0.95, 0.95, 0.1]
+    m.init('roadEdges', 2)
+    m.roadEdges[0].y = [-5.0] * 33
+    m.roadEdges[1].y = [1.8] * 33
+    self.seen = dict.fromkeys(self.msgs, True)
+    self.logMonoTime = dict.fromkeys(self.msgs, 10 ** 9)
+
+  def __getitem__(self, name):
+    return getattr(self.msgs[name], name)
+
+
+def test_daemon_reads_only_fields_that_exist_in_the_real_messages():
+  from openpilot.starpilot.curve_speed import camera
+  from openpilot.starpilot.curve_speed.curvemapd import lead_of, sample_from
+  sm = _RealSubMaster()
+  s = sample_from(sm)
+  assert s.v == 20.0 and s.torque == pytest.approx(0.4) and s.curvature == pytest.approx(0.004)
+  assert s.lead_gap_s == pytest.approx(1.5) and s.lead_speed == pytest.approx(18.0)
+  assert lead_of(_RealSubMaster(lead=False), 20.0) == (math.inf, math.inf) or math.isnan(lead_of(_RealSubMaster(lead=False), 20.0)[1])
+  d, k = camera.camera_curvature(sm['modelV2'])
+  assert camera.near_curvature(d, k) == pytest.approx(0.004)
+  lane = camera.lane_position(sm['modelV2'])
+  assert lane.rightmost and lane.right_edge_m == pytest.approx(1.8)

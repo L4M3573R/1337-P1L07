@@ -105,6 +105,12 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   `NNLC_RELOG_S` (55 s) so each rlog segment carries its steering label. Test: `selfdrive/controls/tests/test_nnlc_relog.py`.
 - **Battery reading glitch filter**: `starpilot/efficiency/ledger.py` `_smoothed_soc` holds back a jump of
   `SOC_JUMP` (4) points until `SOC_CONFIRM` (3) readings agree. Tests in `efficiency/tests/test_measured_fuel.py`.
+- **Road search off the model process + vectorized** (2026-11-13, after model-lag alerts on the first drive with road
+  tiles): `starpilot/navigation/side_road.py` searches are NumPy (`_segments`, `_project_many`, `_endpoints`; identical
+  results to the old loops on 300 random positions, ~60x faster). Blinker-turn lookups no longer run inside modeld:
+  `MapTurnFinder(remote=True)` (intent.py) writes `/dev/shm/starpilot_side_road_request.json` and the new ancillary
+  `sideroadd` answers into `..._result.json`. curvemapd polls modelV2 (20 Hz), looks up every 2 s and only after 20 m.
+  Tests: `navigation/tests/test_sideroadd.py`.
 - **Map curve speed (shadow mode)**: `starpilot/curve_speed/map_curves.py` (curves up to 1 km ahead from the stored
   road tiles, highways included, as 10 m chunks via `profile_ahead`), `map_target.py` (chunk-by-chunk plan: each chunk's
   limit is the lowest of learned comfort, 80% of the measured steering torque capability, and a lateral-jerk limit for

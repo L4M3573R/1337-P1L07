@@ -25,7 +25,8 @@ from openpilot.starpilot.navigation.road_tiles import LINK
 from openpilot.starpilot.curve_speed.curve_memory import CURVE_K, MIN_SPEED as CURVE_MIN_SPEED, CurveMemory, CurvePass, PassTracker, Sample
 
 SERVICES = ['carState', 'carControl', 'controlsState', 'gpsLocationExternal', 'selfdriveState', 'radarState', 'modelV2']
-LOOKUP_PERIOD_S = 1.0
+LOOKUP_PERIOD_S = 2.0
+LOOKUP_MOVE_M = 20.0      # no new map lookup until the car has moved this far (parked, crawling)
 GPS_MAX_AGE_S = 1.5
 GPS_MAX_ACCURACY_M = 15.0
 TILE_RADIUS_M = 1100.0
@@ -267,7 +268,7 @@ def lead_of(sm, v: float) -> tuple[float, float]:
   if not sm.seen['radarState']:
     return math.inf, math.nan
   lead = sm['radarState'].leadOne
-  if not lead.status or lead.dRel <= 0:
+  if not lead.present or lead.dRel <= 0:  # this cereal's LeadData has `present` (older ones had `status`)
     return math.inf, math.nan
   return float(lead.dRel) / max(v, 1.0), float(lead.vLead)
 
@@ -286,8 +287,8 @@ def main() -> None:
   shadow = Shadow(memory)
   lookup = MapLookup()
   cameras = CameraCheck()
-  sm = messaging.SubMaster(SERVICES, poll='carState')
-  frame, last_lookup, last_save = 0, 0.0, time.monotonic()
+  sm = messaging.SubMaster(SERVICES, poll='modelV2')  # 20 Hz: plenty for curves, and no 100 Hz decoding
+  last_lookup, last_save, moved = 0.0, time.monotonic(), LOOKUP_MOVE_M
 
   def stop(*_):
     raise SystemExit(0)
@@ -296,9 +297,8 @@ def main() -> None:
   try:
     while True:
       sm.update()
-      frame += 1
-      if frame % 5 or not all(sm.seen[s] for s in ('carControl', 'controlsState', 'gpsLocationExternal')):
-        continue  # 20 Hz is plenty for curves
+      if not all(sm.seen[s] for s in ('carState', 'carControl', 'controlsState', 'gpsLocationExternal')):
+        continue
       gps = sm['gpsLocationExternal']
       t = sm.logMonoTime['carState'] / 1e9
       gps_ok = (gps.hasFix and gps.horizontalAccuracy <= GPS_MAX_ACCURACY_M and
@@ -306,8 +306,9 @@ def main() -> None:
       if not gps_ok:
         continue
       v = float(sm['carState'].vEgo)
-      if v > 7.0 and t - last_lookup >= LOOKUP_PERIOD_S:
-        last_lookup = t
+      moved += v * 0.05
+      if v > 7.0 and t - last_lookup >= LOOKUP_PERIOD_S and moved >= LOOKUP_MOVE_M:
+        last_lookup, moved = t, 0.0
         cs = sm['carState']
         prefer = 'right' if cs.rightBlinker and not cs.leftBlinker else 'left' if cs.leftBlinker and not cs.rightBlinker else None
         lookup.request(t, float(gps.latitude), float(gps.longitude), float(gps.bearingDeg), v, prefer)

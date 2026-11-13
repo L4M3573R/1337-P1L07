@@ -5,7 +5,8 @@
   turn:   once turning, the turn is held until the car has turned (heading) or the blinker goes off; it never gives up
           halfway. Above the cutoff (plus a margin) or with the blinker off it ends.
 
-The map lookup runs on a worker thread (tile reads and decoding never delay the model loop); decisions here are pure
+The map lookup never runs inside modeld: modeld writes a small request to shared memory and the sideroadd process does
+the tile reads, decoding and road search, writing the result back (MapTurnFinder(remote=True)). Decisions here are pure
 and use only the latest finished lookup, moved forward by the distance driven since. Settings live in
 <starpilot storage>/blinker_turns.json {"mode": "shadow" | "map" | "speed"}:
   shadow  (default) the map/nudge logic decides and logs "would turn here", but the car keeps the old behavior
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -34,6 +36,9 @@ TILE_CACHE = 24
 NUDGE_NM = 0.0  # any driver torque toward the blinker while steeringPressed counts as the nudge
 MODES = ('shadow', 'map', 'speed')
 MAX_CONFIG_BYTES = 4096
+REQUEST_PATH = Path('/dev/shm/starpilot_side_road_request.json')
+RESULT_PATH = Path('/dev/shm/starpilot_side_road_result.json')
+RESULT_READ_S = 0.2
 
 
 def config_path() -> Path:
@@ -64,10 +69,36 @@ class Lookup:
   map_known: bool  # tiles existed and the car's road was matched
 
 
-class MapTurnFinder:
-  """Background side-road lookups from the stored road tiles."""
+def _write_json(path: Path, doc: dict) -> None:
+  tmp = path.with_name(f'.{path.name}.{os.getpid()}')
+  tmp.write_text(json.dumps(doc, separators=(',', ':')))
+  os.replace(tmp, path)
 
-  def __init__(self, store=None, clock=time.monotonic):
+
+def lookup_to_doc(lookup: Lookup) -> dict:
+  road = lookup.road
+  return {'t': lookup.t, 'side': lookup.side, 'map_known': lookup.map_known,
+          'road': None if road is None else {'distance_m': road.distance_m, 'angle_deg': road.angle_deg,
+                                             'road_class': road.road_class}}
+
+
+def lookup_from_doc(doc) -> Lookup | None:
+  from openpilot.starpilot.navigation.side_road import SideRoad
+  try:
+    road = doc['road']
+    return Lookup(float(doc['t']), str(doc['side']),
+                  None if road is None else SideRoad(float(road['distance_m']), float(road['angle_deg']), str(road['road_class'])),
+                  bool(doc['map_known']))
+  except (KeyError, TypeError, ValueError):
+    return None
+
+
+class MapTurnFinder:
+  """Side-road lookups from the stored road tiles: on a worker thread, or (remote=True, as modeld uses it) in the
+  sideroadd process through two small shared-memory files, so the search never competes with the driving model."""
+
+  def __init__(self, store=None, clock=time.monotonic, remote: bool = False,
+               request_path: Path = REQUEST_PATH, result_path: Path = RESULT_PATH):
     self.clock = clock
     self._store = store
     self._cache: OrderedDict = OrderedDict()
@@ -77,12 +108,22 @@ class MapTurnFinder:
     self._event = threading.Event()
     self._last_request = -math.inf
     self._thread = None
+    self.remote = remote
+    self.request_path, self.result_path = request_path, result_path
+    self._last_read = -math.inf
 
   def request(self, latitude: float, longitude: float, bearing: float, side: str) -> None:
     now = self.clock()
     if now - self._last_request < LOOKUP_PERIOD_S:
       return
     self._last_request = now
+    if self.remote:
+      try:
+        _write_json(self.request_path, {'t': now, 'latitude': latitude, 'longitude': longitude, 'bearing': bearing,
+                                        'side': side})
+      except OSError:
+        pass
+      return
     with self._lock:
       self._pending = (now, latitude, longitude, bearing, side)
     if self._thread is None:
@@ -91,6 +132,14 @@ class MapTurnFinder:
     self._event.set()
 
   def latest(self, side: str) -> Lookup | None:
+    if self.remote and self.clock() - self._last_read >= RESULT_READ_S:
+      self._last_read = self.clock()
+      try:
+        found = lookup_from_doc(json.loads(self.result_path.read_text()))
+      except (OSError, ValueError):
+        found = None
+      with self._lock:
+        self._latest = found
     with self._lock:
       found = self._latest
     if found is None or found.side != side or self.clock() - found.t > LOOKUP_MAX_AGE_S:

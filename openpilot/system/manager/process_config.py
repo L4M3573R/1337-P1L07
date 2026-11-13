@@ -243,6 +243,7 @@ procs = [
   PythonProcess("bluedriverd", "openpilot.starpilot.obd.bluedriverd", bluedriver_logging, enabled=COMMA_HARDWARE),
   PythonProcess("edgemapd", "openpilot.starpilot.edgemap.edgemapd", only_onroad),
   PythonProcess("curvemapd", "openpilot.starpilot.curve_speed.curvemapd", only_onroad),
+  PythonProcess("sideroadd", "openpilot.starpilot.navigation.sideroadd", only_onroad),
   PythonProcess("hardwared", "openpilot.system.hardware.hardwared", always_run),
   PythonProcess("modem", "openpilot.common.hardware.comma.modem", always_run, enabled=COMMA_HARDWARE),
   PythonProcess("usage_stats", "openpilot.starpilot.analytics.runtime", always_run, enabled=COMMA_HARDWARE),

@@ -114,7 +114,7 @@ class TurnIntent:
     # Blinker turns timed to the road (map or nudge) instead of turning the moment the blinker goes on.
     from openpilot.starpilot.navigation.blinker_turns import BlinkerTurn, MapTurnFinder
     self.blinker_turn = BlinkerTurn()
-    self.map_finder = MapTurnFinder()
+    self.map_finder = MapTurnFinder(remote=True)  # the road search runs in sideroadd, never in modeld
     self._mode, self._mode_read_ns = 'shadow', 0
     self.turn_distance = None
     # Shadow mode: what the map/nudge timing would do, logged while the old behavior steers.

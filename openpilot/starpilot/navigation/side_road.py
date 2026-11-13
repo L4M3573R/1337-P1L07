@@ -71,26 +71,46 @@ def _project(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> tuple[float, np.nda
   return float(np.hypot(*(p - q))), q, t
 
 
+def _segments(lines):
+  """All line segments as arrays: start points, end points, line index, segment index (vectorized searches)."""
+  starts, ends, li, si = [], [], [], []
+  for i, (_, line) in enumerate(lines):
+    n = len(line) - 1
+    if n >= 1:
+      starts.append(line[:-1])
+      ends.append(line[1:])
+      li.append(np.full(n, i))
+      si.append(np.arange(n))
+  if not starts:
+    return np.zeros((0, 2)), np.zeros((0, 2)), np.zeros(0, int), np.zeros(0, int)
+  return np.concatenate(starts), np.concatenate(ends), np.concatenate(li), np.concatenate(si)
+
+
+def _project_many(points: np.ndarray, a: np.ndarray, b: np.ndarray):
+  """Project every point onto every segment ab: (distance, t along the segment, projected point), shaped (P, S)."""
+  ab = b - a
+  len2 = np.maximum((ab * ab).sum(axis=1), 1e-12)
+  w = points[:, None, :] - a[None, :, :]
+  t = np.clip((w * ab[None, :, :]).sum(axis=2) / len2[None, :], 0.0, 1.0)
+  q = a[None, :, :] + ab[None, :, :] * t[:, :, None]
+  return np.hypot(*(points[:, None, :] - q).transpose(2, 0, 1)), t, q
+
+
 def _match(lines, heading: np.ndarray):
   """(line index, segment index, projection point, direction +1/-1) of the car's road, or None."""
-  best = None
-  origin = np.zeros(2)
-  for li, (_, line) in enumerate(lines):
-    for si in range(len(line) - 1):
-      a, b = line[si], line[si + 1]
-      seg = b - a
-      length = float(np.hypot(*seg))
-      if length < 0.5:
-        continue
-      dist, q, _ = _project(origin, a, b)
-      if dist > MATCH_M:
-        continue
-      cos = float(seg @ heading) / length
-      if abs(cos) < MATCH_COS:
-        continue
-      if best is None or dist < best[0]:
-        best = (dist, li, si, q, 1 if cos > 0 else -1)
-  return None if best is None else best[1:]
+  a, b, li, si = _segments(lines)
+  if not len(a):
+    return None
+  ab = b - a
+  length = np.hypot(ab[:, 0], ab[:, 1])
+  dist, _, q = _project_many(np.zeros((1, 2)), a, b)
+  dist, q = dist[0], q[0]
+  cos = (ab @ heading) / np.maximum(length, 1e-12)
+  ok = (length >= 0.5) & (dist <= MATCH_M) & (np.abs(cos) >= MATCH_COS)
+  if not ok.any():
+    return None
+  i = int(np.flatnonzero(ok)[np.argmin(dist[ok])])
+  return int(li[i]), int(si[i]), q[i], 1 if cos[i] > 0 else -1
 
 
 PREFER_WITHIN_M = 600.0  # a blinker picks the branch to its side at splits this close ahead (an exit or a fork)
@@ -105,35 +125,46 @@ def _branch_direction(ordered: np.ndarray, probe_m: float = BRANCH_PROBE_M) -> n
   return v / max(float(np.hypot(*v)), 1e-6)
 
 
+def _endpoints(lines, used: set):
+  """Both ends of every line not yet on the path: points (M, 2) and (line index, which end, points ordered away)."""
+  pts, meta = [], []
+  for lj, (_, other) in enumerate(lines):
+    if lj in used or len(other) < 2:
+      continue
+    pts += [other[0], other[-1]]
+    meta += [(lj, other), (lj, other[::-1])]
+  return (np.array(pts) if pts else np.zeros((0, 2))), meta
+
+
 def _take_branch(lines, pts: list, used: set, prefer: str) -> list:
   """A ramp often leaves from the middle of the road's line, not its end: with a blinker, cut the path at the nearest
   junction within PREFER_WITHIN_M where a line peels off to that side, and follow that line instead."""
+  ends, meta = _endpoints(lines, used)
+  if not len(ends) or len(pts) < 2:
+    return pts
+  path = np.array(pts)
+  a, b = path[:-1], path[1:]
+  seg = np.hypot(*(b - a).T)
+  dist, t, q = _project_many(ends, a, b)
   along = 0.0
-  for s in range(len(pts) - 1):
-    a, b = pts[s], pts[s + 1]
-    seg = float(np.hypot(*(b - a)))
-    if seg < 0.5:
+  for s in range(len(seg)):
+    if seg[s] < 0.5:
       continue
     if along > PREFER_WITHIN_M:
       break
-    d = (b - a) / seg
+    d = (b[s] - a[s]) / seg[s]
     best = None
-    for lj, (_, other) in enumerate(lines):
-      if lj in used:
-        continue
-      for k, ordered in ((0, other), (len(other) - 1, other[::-1])):
-        dist, q, t = _project(other[k], a, b)
-        if dist > JOIN_M or len(ordered) < 2:
-          continue
-        bdir = _branch_direction(ordered)
-        turn = float(d[0] * bdir[1] - d[1] * bdir[0])
-        if float(bdir @ d) >= CONTINUE_COS and (turn > 0.02 if prefer == 'left' else turn < -0.02):
-          if best is None or t < best[0]:
-            best = (t, q, lj, ordered)
+    for m in np.flatnonzero(dist[:, s] <= JOIN_M):
+      lj, ordered = meta[m]
+      bdir = _branch_direction(ordered)
+      turn = float(d[0] * bdir[1] - d[1] * bdir[0])
+      if float(bdir @ d) >= CONTINUE_COS and (turn > 0.02 if prefer == 'left' else turn < -0.02):
+        if best is None or t[m, s] < best[0]:
+          best = (float(t[m, s]), q[m, s], lj, ordered)
     if best is not None:
       used.add(best[2])
       return pts[:s + 1] + [best[1]] + list(best[3][1:])
-    along += seg
+    along += float(seg[s])
   return pts
 
 
@@ -156,16 +187,15 @@ def _path(lines, start, heading: np.ndarray, max_m: float, prefer: str | None = 
     d = end - prev
     d = d / max(float(np.hypot(*d)), 1e-6)
     candidates = []  # (cos to the current direction, signed turn left-positive, line index, points in travel order)
-    for lj, (_, other) in enumerate(lines):
-      if lj in used:
-        continue
-      for k, ordered in ((0, other), (len(other) - 1, other[::-1])):
-        if float(np.hypot(*(other[k] - end))) <= JOIN_M:
-          step = ordered[1] - ordered[0]
-          cos = float(step @ d) / max(float(np.hypot(*step)), 1e-6)
-          if cos >= CONTINUE_COS:
-            b = _branch_direction(ordered)
-            candidates.append((cos, float(d[0] * b[1] - d[1] * b[0]), lj, ordered))
+    ends, meta = _endpoints(lines, used)
+    near = np.flatnonzero(np.hypot(*(ends - end).T) <= JOIN_M) if len(ends) else []
+    for m in near:
+      lj, ordered = meta[m]
+      step = ordered[1] - ordered[0]
+      cos = float(step @ d) / max(float(np.hypot(*step)), 1e-6)
+      if cos >= CONTINUE_COS:
+        b = _branch_direction(ordered)
+        candidates.append((cos, float(d[0] * b[1] - d[1] * b[0]), lj, ordered))
     if not candidates:
       break
     toward = [c for c in candidates if prefer == 'left' and c[1] > 0.02 or prefer == 'right' and c[1] < -0.02]
@@ -216,29 +246,43 @@ def _cross(a, b, c, d):
 def _junctions(path, seg_len, along, lines, used):
   """(distance along the road, point, path segment, [branch polylines leaving the point], class) for every place
   another line meets the car's road: a vertex within JOIN_M of it, or a segment crossing it."""
+  a, b = path[:-1], path[1:]
+  usable = seg_len >= 0.5
+  if not usable.any():
+    return
+  # vertices of other lines (not the road's own joints) close to the road: the first road segment they touch
+  verts, vmeta = [], []
   for lj, (road_class, other) in enumerate(lines):
     for k in range(len(other)):
       if lj in used and k in (0, len(other) - 1):
-        continue  # the road's own joints are not junctions
-      for s in range(len(path) - 1):
-        if seg_len[s] < 0.5:
-          continue
-        dist, q, t = _project(other[k], path[s], path[s + 1])
-        if dist <= JOIN_M:
-          yield along[s] + t * seg_len[s], q, s, (other[k:], other[k::-1]), road_class
-          break
-    if lj in used:
-      continue
-    for k in range(len(other) - 1):
-      for s in range(len(path) - 1):
-        if seg_len[s] < 0.5:
-          continue
-        hit = _cross(path[s], path[s + 1], other[k], other[k + 1])
-        if hit is None:
-          continue
-        t, u = hit
-        q = path[s] + (path[s + 1] - path[s]) * t
-        yield along[s] + t * seg_len[s], q, s, (other[k + 1:], other[k::-1]), road_class
+        continue
+      verts.append(other[k])
+      vmeta.append((lj, k, road_class))
+  if verts:
+    dist, t, q = _project_many(np.array(verts), a, b)
+    close = (dist <= JOIN_M) & usable[None, :]
+    for v in np.flatnonzero(close.any(axis=1)):
+      s = int(np.argmax(close[v]))
+      lj, k, road_class = vmeta[v]
+      other = lines[lj][1]
+      yield along[s] + t[v, s] * seg_len[s], q[v, s], s, (other[k:], other[k::-1]), road_class
+  # segments of other lines crossing the road
+  c0, c1, cli, csi = _segments([(cls, ln) if i not in used else (cls, ln[:1]) for i, (cls, ln) in enumerate(lines)])
+  if not len(c0):
+    return
+  r = b - a                       # (S, 2)
+  qd = c1 - c0                    # (K, 2)
+  den = r[None, :, 0] * qd[:, None, 1] - r[None, :, 1] * qd[:, None, 0]
+  w = c0[:, None, :] - a[None, :, :]
+  with np.errstate(divide='ignore', invalid='ignore'):
+    tt = (w[..., 0] * qd[:, None, 1] - w[..., 1] * qd[:, None, 0]) / den
+    uu = (w[..., 0] * r[None, :, 1] - w[..., 1] * r[None, :, 0]) / den
+  hit = (np.abs(den) >= 1e-9) & (tt >= 0) & (tt <= 1) & (uu >= 0) & (uu <= 1) & usable[None, :]
+  for kk, s in zip(*np.nonzero(hit), strict=True):
+    lj, k = int(cli[kk]), int(csi[kk])
+    road_class, other = lines[lj]
+    qp = path[s] + (path[s + 1] - path[s]) * tt[kk, s]
+    yield along[s] + tt[kk, s] * seg_len[s], qp, int(s), (other[k + 1:], other[k::-1]), road_class
 
 
 def find(tiles: list[RoadTile], latitude: float, longitude: float, bearing_deg: float, side: str,
