@@ -34,6 +34,7 @@ APPROACH_DECEL = 0.8         # m/s^2, about what lifting off the pedal does
 MIN_SPEED = 15 * MPH
 UNKNOWN_MAP_MARGIN = 1.1     # a stretch known only from the map is assumed 10% tighter until driven
 JERK_MAX = 1.5               # m/s^3 lateral jerk through changes in tightness (tuned later from the shadow logs)
+JERK_SMOOTH_M = 50.0         # tightness changes are measured on a 50 m average: map polyline corners are not real
 STRAIGHT_K = 1 / 3000        # gentler than this needs no comfort or steering limit
 SCALE_RANGE = (0.5, 2.0)     # how far a remembered curve may correct the map's tightness
 
@@ -131,7 +132,13 @@ def plan(distances: np.ndarray, curvature: np.ndarray, comfort_of: Callable[[flo
   adjust = adjust or [(UNKNOWN_MAP_MARGIN, None, TORQUE_MARGIN)] * n
   signed = np.array([k * a[0] for k, a in zip(curvature, adjust, strict=True)], dtype=float)
   k = np.abs(signed)
-  dkds = np.abs(np.gradient(signed, distances)) if n > 1 else np.zeros(1)
+  if n > 1:
+    step = max(float(np.median(np.diff(distances))), 1e-3)
+    width = max(1, int(round(JERK_SMOOTH_M / step)))
+    smooth = np.convolve(np.pad(signed, (width // 2, width - 1 - width // 2), mode='edge'), np.ones(width) / width, mode='valid')
+    dkds = np.abs(np.gradient(smooth, distances))
+  else:
+    dkds = np.zeros(1)
   limit, reason = np.full(n, math.inf), [''] * n
   for i in range(n):
     if k[i] >= STRAIGHT_K:

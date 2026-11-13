@@ -105,15 +105,25 @@ def test_opening_curve_lets_the_car_speed_back_up():
 
 
 def test_s_bend_transition_is_limited_by_jerk():
-  # left 150 m radius, then straight into right 150 m radius: the switch is a quick change in tightness
-  s_bend = lambda x: (1 / 150 if 300 <= x < 400 else -1 / 150 if 400 <= x <= 500 else 0.0)  # noqa: E731
+  # a wide left 400 m into a wide right 400 m: gentle enough that comfort alone would allow ~60 mph, but the quick
+  # swing from one to the other is limited by lateral jerk
+  s_bend = lambda x: (1 / 400 if 300 <= x < 400 else -1 / 400 if 400 <= x <= 500 else 0.0)  # noqa: E731
   d, k = profile(s_bend)
   p = map_target.plan(d, k, COMFORT)
-  switch = (d >= 390) & (d <= 410)
+  switch = (d >= 380) & (d <= 420)
   assert 'jerk' in {p.reason[i] for i in np.flatnonzero(switch)}
-  i = int(np.flatnonzero(switch)[0])
-  dkds = abs(np.gradient(k * map_target.UNKNOWN_MAP_MARGIN, d))[i]
-  assert p.limit[i] == pytest.approx(max((map_target.JERK_MAX / dkds) ** (1 / 3), map_target.MIN_SPEED), rel=1e-6)
+  comfort_only = map_target.apex_speed(map_target.UNKNOWN_MAP_MARGIN / 400, 2.0).apex_speed
+  assert float(p.limit[switch].min()) < comfort_only - 1.0
+
+
+def test_map_jitter_does_not_trip_the_jerk_limit():
+  # a steady 250 m curve whose map curvature wobbles chunk to chunk (polyline corners): the jerk limit must not bind
+  rng = np.random.default_rng(3)
+  wobble = lambda x: (1 / 250) * (1 + 0.4 * rng.standard_normal()) if 200 <= x <= 600 else 0.0  # noqa: E731
+  d, k = profile(wobble)
+  p = map_target.plan(d, k, COMFORT)
+  inside = (d >= 260) & (d <= 540)
+  assert sum(p.reason[i] == 'jerk' for i in np.flatnonzero(inside)) <= 2
 
 
 def test_remembered_curves_use_their_own_tightness_and_comfort():
@@ -529,3 +539,4 @@ def test_daemon_reads_only_fields_that_exist_in_the_real_messages():
   assert camera.near_curvature(d, k) == pytest.approx(0.004)
   lane = camera.lane_position(sm['modelV2'])
   assert lane.rightmost and lane.right_edge_m == pytest.approx(1.8)
+

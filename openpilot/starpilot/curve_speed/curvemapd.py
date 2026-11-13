@@ -36,6 +36,7 @@ PREDICTION_KEEP_S = 120.0
 PREDICTION_MATCH_M = 60.0
 LIVE_TIGHTER = 1.15        # the curve measuring this much tighter than predicted would lower the rest of the plan now
 LIVE_TORQUE = 0.9          # ...and so would needing this share of the comma's full steering torque
+LIVE_WINDOW = 20           # samples (1 s at 20 Hz) in the rolling median of measured/predicted tightness
 
 
 def storage() -> Path:
@@ -65,6 +66,7 @@ class Shadow:
     self.live_plan: map_target.Plan | None = None  # the newest plan, measured from where it was made
     self.live_t = self.traveled = 0.0
     self.live: dict = {}                          # this curve's live prediction check so far
+    self.ratios: deque[float] = deque(maxlen=LIVE_WINDOW)
 
   def plan(self, t: float, latitude: float, longitude: float, profile: map_curves.RoadProfile, speed: float,
            path: str = 'straight') -> dict | None:
@@ -111,7 +113,11 @@ class Shadow:
     if abs(s.curvature) < CURVE_K or s.v < CURVE_MIN_SPEED or self.live_plan is None or not len(self.live_plan.distances):
       return
     predicted = float(np.interp(self.traveled, self.live_plan.distances, self.live_plan.curvature))
-    tighter = abs(s.curvature) / predicted if predicted >= CURVE_K / 2 else None
+    # only where the plan predicts a real curve, and as a 1 s rolling median: at a curve's edges a few metres of
+    # position offset would otherwise read as many times tighter than predicted
+    if predicted >= CURVE_K:
+      self.ratios.append(abs(s.curvature) / predicted)
+    tighter = float(np.median(self.ratios)) if len(self.ratios) >= LIVE_WINDOW else None
     need = lateral / max(self.memory.capability.cap(s.v), 1e-3)
     live = self.live
     live['max_tighter'] = max(live.get('max_tighter', 0.0), tighter or 0.0)
@@ -132,6 +138,7 @@ class Shadow:
                           (x['apex_lon'] - p.longitude) * 111_320.0 * math.cos(math.radians(p.latitude))) <= PREDICTION_MATCH_M]
     record = self.memory.learn(p)
     live, self.live = self.live, {}
+    self.ratios.clear()
     line = {'curve': asdict(p), 'experimental': experimental, 'learned_comfort': round(record.comfort, 2),
             'curve_passes': record.passes, 'map_seen': bool(planned),
             'live': {k: round(v, 3) if isinstance(v, float) else v for k, v in live.items()},
@@ -289,6 +296,7 @@ def main() -> None:
   cameras = CameraCheck()
   sm = messaging.SubMaster(SERVICES, poll='modelV2')  # 20 Hz: plenty for curves, and no 100 Hz decoding
   last_lookup, last_save, moved = 0.0, time.monotonic(), LOOKUP_MOVE_M
+  map_straight, map_traveled = None, 0.0
 
   def stop(*_):
     raise SystemExit(0)
@@ -316,14 +324,16 @@ def main() -> None:
       model = sm['modelV2'] if sm.seen['modelV2'] else None
       cam = camera.camera_curvature(model) if model is not None else None
       measured_k = float(sm['controlsState'].curvature)
-      if cam is not None:
-        cameras.observe(camera.near_curvature(*cam, window=(0.0, 20.0)), measured_k, None)
+      # every frame: the camera against the measured curvature, and the measured curvature against the map at the
+      # car's position on the newest map profile (so the sign conventions are learned in seconds, not minutes)
+      map_traveled += float(sm['carState'].vEgo) * 0.05
+      map_now = (float(np.interp(map_traveled, map_straight.distances, map_straight.curvature))
+                 if map_straight is not None and map_traveled <= float(map_straight.distances[-1]) else None)
+      cameras.observe(camera.near_curvature(*cam, window=(0.0, 20.0)) if cam is not None else None, measured_k, map_now)
       if found is not None:
         if found[4] is not None:
           shadow.plan(found[0], found[1], found[2], found[4], found[3], found[5])
-          straight = found[6].get('straight')
-          map_now = float(np.interp(15.0, straight.distances, straight.curvature)) if straight is not None else None
-          cameras.observe(None, measured_k, map_now)
+          map_straight, map_traveled = found[6].get('straight'), 0.0
         cs = sm['carState']
         blinker = 'right' if cs.rightBlinker and not cs.leftBlinker else 'left' if cs.leftBlinker and not cs.rightBlinker else None
         check = cameras.check(found[0], found[1], found[2], found[3], blinker, found[6], cam,

@@ -17,6 +17,7 @@ OUTER_LINE_PROB = 0.3            # the next lane line out is barely seen
 MISMATCH_K = 0.002               # map and camera curvature differ by more than this (500 m radius)...
 MISMATCH_SHARE = 0.4             # ...and by more than this share of the map's
 MIN_SPEED = 5.0                  # m/s; the camera's path is unreliable when crawling
+SIGN_SAMPLES = 20                # curve samples (20 a second) before a sign convention counts as learned
 
 
 def camera_curvature(model) -> tuple[np.ndarray, np.ndarray] | None:
@@ -80,7 +81,7 @@ class SignLearner:
 
   @property
   def factor(self) -> float | None:
-    if self.agree + self.disagree < 50:
+    if self.agree + self.disagree < SIGN_SAMPLES:
       return None  # not enough curves yet to say
     return 1.0 if self.agree >= self.disagree else -1.0
 

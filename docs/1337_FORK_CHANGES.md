@@ -111,6 +111,10 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   `MapTurnFinder(remote=True)` (intent.py) writes `/dev/shm/starpilot_side_road_request.json` and the new ancillary
   `sideroadd` answers into `..._result.json`. curvemapd polls modelV2 (20 Hz), looks up every 2 s and only after 20 m.
   Tests: `navigation/tests/test_sideroadd.py`.
+- **DR4L upload progress on the home screen**: `starpilot/ui/dr4l_upload.py` reads `<storage>/dr4l_pull.json` (written
+  by the DR4L trainer while it pulls) and the compact home screen's third line shows "Uploading to DR4L 42% · 31/74"
+  (`home.py` `_compact`, `HomeState.upload`, `runtime_snapshot.py`). Age is measured from the file's last change on the
+  comma's monotonic clock; a file present at startup is a baseline, not a live pull. Test: `ui/tests/test_dr4l_upload.py`.
 - **Map curve speed (shadow mode)**: `starpilot/curve_speed/map_curves.py` (curves up to 1 km ahead from the stored
   road tiles, highways included, as 10 m chunks via `profile_ahead`), `map_target.py` (chunk-by-chunk plan: each chunk's
   limit is the lowest of learned comfort, 80% of the measured steering torque capability, and a lateral-jerk limit for
@@ -144,6 +148,8 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   Extract v4 (2026-11-13): drive mode from the 0x2FC announcement, carried across each drive's segments by
   `extract.resolve_route` (rows store this segment's view, npz `mode_end` the mode at its end); training and scoring
   load rows through `service.route_rows`. Previous code kept in `build/app.v3.bak`.
+  Pull progress (2026-11-13): `service.pull` runs rsync in the background and writes `/data/starpilot/dr4l_pull.json`
+  on the comma every 5 s (`report_progress`, bytes-weighted percent); v4 code kept in `build/app.v4.bak`.
   It reads rlogs with its own copy of the cereal schema: re-copy `openpilot/cereal/*.capnp` into its
   `build/app/schema` after a merge that changes the schema.
 - **Comma files**: `/data/tailscale` (binaries + state), `/data/starpilot/nnlc/` (model, config, user override),

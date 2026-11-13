@@ -228,11 +228,12 @@ class HomeView:
     version_branch = f"{state.version}  {state.branch}".strip()
     date_width = self._measure(state.commit_date, FontRole.ROMAN, 30).width if state.commit_date else 0
     version_width = 520 - date_width - 16 if state.commit_date else 520
-    for text, y, color, width in ((version_branch, 98, rl.GRAY, version_width), (state.model_label, 140, white, 520)):
+    third_line, third_color = (state.upload, rl.Color(82, 199, 112, 255)) if state.upload else (state.model_label, white)
+    for text, y, color, width in ((version_branch, 98, rl.GRAY, version_width), (third_line, 140, third_color, 520)):
       size = 30
       while size > 22 and self._measure(text, FontRole.ROMAN, size).width > width:
         size -= 1
-      if y == 140 and "/" in text:
+      if y == 140 and "/" in text and not state.upload:
         parts = text.split("/", 1)
         budget = (width - self._measure("/", FontRole.ROMAN, size).width) / 2
         for i, part in enumerate(parts):

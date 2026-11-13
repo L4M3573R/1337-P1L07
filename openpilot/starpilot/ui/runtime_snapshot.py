@@ -321,6 +321,8 @@ class RuntimeSnapshotAdapter:
     self.appearance_override: Callable[[OnroadAppearance], OnroadAppearance] | None = None
     self._last_mode: ShellMode | None = None
     self._jetlink = JetlinkStatusFeed()
+    from openpilot.starpilot.ui.dr4l_upload import UploadStatus
+    self._upload_status = UploadStatus()
     self._onroad_ancillary: tuple[int, tuple[bool, int, bool], ShellSnapshot] | None = None
     self._onroad_view_ancillary: tuple[int, tuple[bool, int, bool], ShellSnapshot] | None = None
     self._conditional = ConditionalDisplayProjector()
@@ -822,7 +824,7 @@ class RuntimeSnapshotAdapter:
                      recording_audio=bool(ui.recording_audio), bluetooth=bluetooth,
                      gpu_present=gpu_present, gpu_active=gpu_active, branch=_text(params, "GitBranch"),
                      gpu_state=getattr(getattr(ui, "chestnut_state", None), "value", "disconnected"),
-                     jetlink=jetlink)
+                     jetlink=jetlink, upload=self._upload_status.text() if mode == ShellMode.HOME else "")
 
     settings_pages = (Destination.STAR, Destination.DEVICE, Destination.NETWORK, Destination.SOFTWARE, Destination.TOGGLES,
                       Destination.DRIVING_CONTROLS, Destination.SOUNDS, Destination.APPEARANCE,

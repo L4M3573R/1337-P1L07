@@ -79,6 +79,7 @@ class HomeState:
   metric: bool = False
   temperature_high: bool = False
   jetlink: str = "off"
+  upload: str = ""  # DR4L upload progress line (dr4l_upload.py), empty when none
 
 
 @dataclass(frozen=True)
