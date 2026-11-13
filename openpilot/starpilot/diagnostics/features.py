@@ -54,7 +54,11 @@ def turn_decision(turn_intent, desire) -> dict:
   return {'desire': desire_value, 'source': str(getattr(turn_intent, 'source', '')),
           'blocked_by': str(getattr(turn_intent, 'blocked_by', '')),
           'signal_stop_hold': bool(getattr(turn_intent, 'signal_stop_hold', False)),
-          'nav_stop_hold': bool(getattr(turn_intent, 'stop_hold', False))}
+          'nav_stop_hold': bool(getattr(turn_intent, 'stop_hold', False)),
+          # blinker turns timed to the road: what that logic decided (in shadow mode it only logs)
+          'timed': str(getattr(turn_intent, 'shadow_reason', '')),
+          'timed_turning': bool(getattr(turn_intent, 'shadow_turning', False)),
+          'timed_start_m': getattr(turn_intent, 'shadow_start_m', None)}
 
 
 def radar_decision(tandem) -> dict:

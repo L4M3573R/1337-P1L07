@@ -4,7 +4,8 @@ The only process that requests map tiles. The renderer reads tiles from disk
 and never touches the network, so a slow or metered connection can never stall
 a frame. Priorities, highest first:
 
-  1. Tiles around the car and ahead of it, while the map overlay is on a layout.
+  1. Tiles around the car and ahead of it, while the map overlay is on a layout (or a smaller patch for blinker
+     turns timed to the road, when those are on).
   2. The active route's corridor.
   3. Offline areas, only on Wi-Fi or Ethernet.
 
@@ -35,6 +36,8 @@ from openpilot.starpilot.navigation.road_tiles import (
 
 NEAR_RADIUS_M = 2500.0
 AHEAD_M = 6000.0
+TURN_NEAR_RADIUS_M = 600.0  # blinker turns only need the roads close by
+TURN_AHEAD_M = 1500.0
 REQUEST_TIMEOUT = (4.0, 10.0)
 NETWORK_BACKOFF_S, SERVER_BACKOFF_S, KEY_BACKOFF_S = 15.0, 30.0, 300.0
 AREA_INTERVAL_S = 0.12          # at most ~8 offline-area tiles a second
@@ -52,6 +55,7 @@ class Environment:
   network: str = "offline"          # offline, cellular, wifi
   onroad: bool = False
   map_enabled: bool = False
+  turns_enabled: bool = False
   position: tuple[float, float] | None = None
   bearing: float | None = None
   route: list[tuple[float, float]] = field(default_factory=list)
@@ -228,12 +232,13 @@ class TileDaemon:
 
   def plan(self, env: Environment) -> None:
     settings = self.state.settings()
-    if env.onroad and env.map_enabled and env.position is not None:
+    if env.onroad and (env.map_enabled or env.turns_enabled) and env.position is not None:
       lat, lon = env.position
-      cell = (round(lat * 200), round(lon * 200), None if env.bearing is None else round(env.bearing / 30))
+      cell = (round(lat * 200), round(lon * 200), None if env.bearing is None else round(env.bearing / 30), env.map_enabled)
       if cell != self.near_key:
         self.near_key = cell
-        self.urgent = deque(key for key in ahead_tiles(lat, lon, env.bearing))
+        near, ahead = (NEAR_RADIUS_M, AHEAD_M) if env.map_enabled else (TURN_NEAR_RADIUS_M, TURN_AHEAD_M)
+        self.urgent = deque(key for key in ahead_tiles(lat, lon, env.bearing, near, ahead))
     else:
       self.near_key = None
       self.urgent.clear()
@@ -451,9 +456,9 @@ def _map_enabled() -> bool:
     return False
 
 
-def _environment(sm, owner, map_enabled: bool, now_ns: int) -> Environment:
+def _environment(sm, owner, map_enabled: bool, now_ns: int, turns_enabled: bool = False) -> Environment:
   from openpilot.starpilot.navigation.runtime import location
-  env = Environment(map_enabled=map_enabled)
+  env = Environment(map_enabled=map_enabled, turns_enabled=turns_enabled)
   try:
     settings = owner.read()
     env.token = settings["token"]
@@ -493,13 +498,14 @@ def main() -> None:
   owner = NavigationOwner()
   from openpilot.starpilot.gps.source import GPS_SERVICES
   sm = messaging.SubMaster(["deviceState", *GPS_SERVICES])
-  map_enabled, layout_checked = False, -math.inf
+  map_enabled, turns_enabled, layout_checked = False, False, -math.inf
   while True:
     sm.update(0)
     now = time.monotonic()
     if now - layout_checked > LAYOUT_CHECK_S:
-      layout_checked, map_enabled = now, _map_enabled()
-    env = _environment(sm, owner, map_enabled, time.monotonic_ns())
+      from openpilot.starpilot.navigation.blinker_turns import mode as blinker_turn_mode
+      layout_checked, map_enabled, turns_enabled = now, _map_enabled(), blinker_turn_mode() in ('map', 'shadow')
+    env = _environment(sm, owner, map_enabled, time.monotonic_ns(), turns_enabled)
     daemon.plan(env)
     daemon.maintain()
     idle = False

@@ -8,6 +8,14 @@ from openpilot.common.constants import CV
 from openpilot.starpilot.navigation.intent import current_instruction, turn_desire, cruise_ceiling, turn_speed
 
 
+@pytest.fixture(autouse=True)
+def speed_mode_turns(monkeypatch):
+  """These tests cover the blinker gates with the original turn-at-once timing ("speed" mode)."""
+  from openpilot.starpilot.navigation import blinker_turns
+  monkeypatch.setattr(blinker_turns, 'mode', lambda path=None: 'speed')
+
+
+
 NOW = 20_000_000_000
 
 

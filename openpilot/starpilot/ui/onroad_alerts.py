@@ -67,7 +67,8 @@ class AlertRenderer:
     alert = replace(alert, text1=DisplayText(tr(text1)), text2=DisplayText(tr(text2)))
     if self.fonts.profile == Profile.COMPACT:
       lane_event = event_name in ('preLaneChangeLeft', 'preLaneChangeRight', 'laneChangeBlocked', 'laneChange',
-                                                                    'steerTempUnavailable', 'steerTempUnavailableSilent')
+                                  'turningLeft', 'turningRight',  # "Turning Left/Right" with the green blinker
+                                  'steerTempUnavailable', 'steerTempUnavailableSilent')
       if lane_event or (self._lane_visible and alert.size == AlertSize.NONE):
         if self._lane_renderer is None:
           self._lane_renderer = NativeAlertRenderer()

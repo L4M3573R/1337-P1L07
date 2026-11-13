@@ -120,6 +120,8 @@ def test_visible_pip_keeps_lane_text_without_the_full_width_banner():
   ('preLaneChangeRight', 1, 'turn_signal_left.png'),
   ('laneChange', 1, 'turn_signal_left.png'),
   ('laneChangeBlocked', -1, 'blind_spot_left.png'),
+  ('turningLeft', -1, 'turn_signal_left.png'),  # the green blinker shows with "Turning Left/Right" too
+  ('turningRight', 1, 'turn_signal_left.png'),
 ])
 def test_native_guidance_icon_text_shadow_share_entrance_and_exit(event, direction, icon):
   from openpilot.selfdrive.ui.mici.onroad import alert_renderer as native

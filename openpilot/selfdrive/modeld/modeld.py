@@ -507,7 +507,8 @@ def main(demo=False):
   pub_socks = ["modelIdentity", "modelV2", "drivingModelData", "cameraOdometry", "laneChangeAssistWire"] + (["chestnutGpuState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
   sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState",
-                  "carControl", "controlsState", "lateralDelay", "starpilotNavigation", "longitudinalPlan"])
+                  "carControl", "controlsState", "lateralDelay", "starpilotNavigation", "longitudinalPlan",
+                  "gpsLocationExternal", "gpsLocation", "starpilotCarState"])  # GPS: blinker turns timed to the road
 
   publish_state = PublishState()
   params = Params()

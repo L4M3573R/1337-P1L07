@@ -13,6 +13,14 @@ from openpilot.starpilot.ui.feature_settings_owner import FeatureSettingsOwner
 from openpilot.starpilot.ui.feature_settings_state import FeaturePage, row_change
 from openpilot.starpilot.ui.lane_change_feature import GUIDANCE
 
+
+@pytest.fixture(autouse=True)
+def speed_mode_turns(monkeypatch):
+  """These tests cover the blinker gates with the original turn-at-once timing ("speed" mode)."""
+  from openpilot.starpilot.navigation import blinker_turns
+  monkeypatch.setattr(blinker_turns, 'mode', lambda path=None: 'speed')
+
+
 NOW = 20_000_000_000
 
 
@@ -45,8 +53,19 @@ def test_global_direction_and_model_selection(case, brand):
   assert select(owner, sm) == log.Desire.turnLeft
   sm['carState'].leftBlinker, sm['carState'].rightBlinker = False, True
   assert select(owner, sm) == log.Desire.turnRight
-  for desire in (log.Desire.laneChangeLeft, log.Desire.laneChangeRight, log.Desire.turnLeft):
-    assert select(owner, sm, desire) == desire
+  assert select(owner, sm, log.Desire.turnLeft) == log.Desire.turnLeft  # an existing turn is kept
+
+
+@pytest.mark.parametrize('lane_change', [log.Desire.laneChangeLeft, log.Desire.laneChangeRight])
+def test_turn_wins_over_a_lane_change_below_the_cutoff(case, lane_change):
+  params, cp, sm = case
+  owner = TurnIntent(params, cp)
+  assert select(owner, sm, lane_change) == log.Desire.turnLeft  # left blinker at 11 mph
+  sm['carState'].vEgo = 10.  # 22 mph: above the cutoff the lane change stands
+  assert select(owner, sm, lane_change) == lane_change
+  sm['carState'].vEgo = 5.
+  sm['carState'].leftBlindspot = True  # a car in the blind spot still blocks the turn
+  assert select(owner, sm, lane_change) == lane_change
 
 
 @pytest.mark.parametrize('field,value', [('canValid', False), ('canTimeout', True), ('gearShifter', 'reverse'),
