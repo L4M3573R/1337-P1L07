@@ -62,6 +62,7 @@ def summarize(local: Path, host: str | None, gas_price: float | None = None, tan
   out['trips'] = [{'date': time.strftime('%m-%d %H:%M', time.localtime(t)), **trips.drive_summary(t, rs, gas_price)}
                   for t, rs in drives if rs]
   out['breakdowns'] = trips.breakdowns(records)
+  out['drive_modes_vs_eco'] = trips.drive_mode_comparison(records)
   out['fill_ups'] = trips.fill_ups(drives, tank_gal)
   out['tank_check'] = trips.tank_check(drives, tank_gal)
   try:

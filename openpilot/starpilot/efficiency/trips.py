@@ -112,6 +112,28 @@ def breakdowns(records: list[dict]) -> dict:
   return {name: {k: v.row() for k, v in sorted(t.items()) if v.mpg is not None} for name, t in tables.items()}
 
 
+def drive_mode_comparison(records: list[dict], baseline: str = 'eco') -> dict:
+  """Each drive mode against Eco on matching driving: same speed band, grade, curves, traffic and who drove.
+  Eco's fuel per mile is compared with the mode's on Eco's miles in every context both covered."""
+  cells: dict[tuple, dict[str, Tally]] = defaultdict(lambda: defaultdict(Tally))
+  for r in records:
+    if r.get('drive_mode') and r.get('ctx'):
+      cells[tuple(r['ctx']) + (side(r),)][r['drive_mode']].add(r)
+  out = {}
+  for mode in sorted({m for c in cells.values() for m in c} - {baseline}):
+    miles = base_gal = mode_gal = 0.0
+    for c in cells.values():
+      b, m = c.get(baseline), c.get(mode)
+      if b is None or m is None or b.miles < 0.5 or m.miles < 0.5 or b.gal <= 0 or m.gal <= 0:
+        continue
+      miles += b.miles
+      base_gal += b.gal
+      mode_gal += m.gal / m.miles * b.miles
+    out[mode] = {'matched_miles': round(miles, 1),
+                 'fuel_vs_eco': round(mode_gal / base_gal - 1.0, 4) if miles >= 5.0 and base_gal > 0 else None}
+  return out
+
+
 def fill_ups(drives: list[tuple[float, list[dict]]], tank_gal: float = TANK_GAL) -> list[dict]:
   """Tank-level rises between consecutive readings (within or across drives)."""
   events, last = [], None

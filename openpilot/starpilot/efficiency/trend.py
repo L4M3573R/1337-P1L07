@@ -36,7 +36,8 @@ def _side_mpg(fuel: float, soc: float, meters: float) -> float | None:
 def drive_point(t: float, doc: dict) -> DrivePoint | None:
   sums = {'driver': [0.0, 0.0, 0.0], 'comma': [0.0, 0.0, 0.0]}  # fuel gal, soc pts, metres
   for key, values in doc.get('contexts', {}).items():
-    mode = key.split('|')[-1]
+    parts = key.split('|')
+    mode = parts[4] if len(parts) > 4 else None
     side = 'driver' if mode == 'driver' else 'comma' if mode in COMMA_MODES else None
     if side is None:
       continue

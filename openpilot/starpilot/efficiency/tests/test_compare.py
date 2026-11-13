@@ -53,3 +53,14 @@ def test_headline_and_stored_ledger_round_trip(tmp_path):
   c = stored_comparison(tmp_path)
   assert c.ready and c.comma_saving == pytest.approx(0.5)
   assert headline(c) == f'comma saves 50% fuel · {MIN_MATCHED_MILES:.0f} mi'
+
+
+def test_drive_modes_are_never_mixed():
+  ctx = {
+    ('45-60 mph', 'flat', 'straight', 'open road', 'driver', 'eco'): t(10, 0.25),
+    ('45-60 mph', 'flat', 'straight', 'open road', 'chill', 'sport'): t(10, 0.40),  # comma only drove Sport here
+  }
+  assert compare(ctx).matched_miles == 0
+  ctx[('45-60 mph', 'flat', 'straight', 'open road', 'chill', 'eco')] = t(10, 0.20)
+  c = compare(ctx)
+  assert c.matched_miles == pytest.approx(10) and c.comma_saving == pytest.approx(0.2)

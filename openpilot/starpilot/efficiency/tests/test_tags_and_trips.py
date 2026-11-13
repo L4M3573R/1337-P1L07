@@ -76,3 +76,22 @@ def test_fill_up_detection_and_tank_check():
   assert len(fills) == 1 and fills[0]['from_pct'] == 55.0 and fills[0]['gallons_added'] == pytest.approx(4.8)
   check = trips.tank_check(drives, tank_gal=12.0)
   assert check['tank_gal'] == pytest.approx(0.6) and check['measured_gal'] == pytest.approx(0.62)
+
+
+def test_drive_mode_comparison_matches_context_and_driver():
+  ctx = ['45-60 mph', 'flat', 'straight', 'open road']
+  records = [rec(10, 0.25, ctx=ctx, drive_mode='eco'), rec(10, 0.30, ctx=ctx, drive_mode='sport'),
+             rec(10, 0.20, 'chill', ctx=ctx, drive_mode='smart'),  # comma-driven Smart has no comma Eco to match
+             rec(10, 0.24, ctx=['15-30 mph', 'flat', 'straight', 'stop-and-go'], drive_mode='smart')]
+  out = trips.drive_mode_comparison(records)
+  assert out['sport']['matched_miles'] == pytest.approx(10.0) and out['sport']['fuel_vs_eco'] == pytest.approx(0.2)
+  assert out['smart']['matched_miles'] == 0 and out['smart']['fuel_vs_eco'] is None
+
+
+def test_a_drive_mode_switch_starts_a_new_stretch():
+  ledger, t = Ledger(), 0.0
+  for i in range(200):
+    ledger.add(Sample(t=t, speed=20.0, accel=0.0, pitch=0.0, mass=1500.0, drive_mode='eco' if i < 100 else 'sport'))
+    t += 0.05
+  stretches = ledger.finish()
+  assert [s.context()[5] for s in stretches] == ['eco', 'sport']

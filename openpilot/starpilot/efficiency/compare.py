@@ -1,6 +1,7 @@
 """The comma's driving against the driver's, in measured fuel, on comparable driving only.
 
-Stretches are grouped by context (speed band, grade, curves, traffic). In every context where both the
+Stretches are grouped by context (speed band, grade, curves, traffic and the car's drive mode, so Sport is
+only ever compared with Sport). In every context where both the
 driver and the comma have enough measured (BlueDriver) miles, each side's battery-adjusted fuel per mile
 is taken, and the comma's rate is applied to the driver's miles there. Summed over those contexts this
 answers: "driving the same kind of roads you drove, how much fuel would the comma have used?"
@@ -42,12 +43,13 @@ def _adjusted_gal_per_mile(t: Totals) -> float | None:
 
 
 def compare(by_context: dict[tuple, Totals], modes: tuple[str, ...] = COMMA_MODES) -> Comparison:
-  """by_context: (speed, grade, curves, traffic, mode) -> Totals, as summarize() or the stored ledger gives."""
+  """by_context: (speed, grade, curves, traffic, who, drive mode) -> Totals, as summarize() or the stored ledger gives."""
   sides: dict[tuple, dict[str, Totals]] = {}
   for key, t in by_context.items():
     side = 'driver' if key[4] == 'driver' else 'comma' if key[4] in modes else None
     if side is not None:
-      sides.setdefault(tuple(key[:4]), {}).setdefault(side, Totals()).add_totals(t)
+      match = tuple(key[:4]) + (key[5] if len(key) > 5 else 'unknown',)  # older drive files have no drive mode
+      sides.setdefault(match, {}).setdefault(side, Totals()).add_totals(t)
   matched = driver_gal = comma_gal = 0.0
   contexts = 0
   for pair in sides.values():

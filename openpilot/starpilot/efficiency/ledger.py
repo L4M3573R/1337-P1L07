@@ -197,14 +197,16 @@ class Stretch:
   def mean_speed(self) -> float:
     return self.distance / self.duration if self.duration > 0 else 0.0
 
-  def context(self) -> tuple[str, str, str, str, str]:
+  def context(self) -> tuple[str, str, str, str, str, str]:
+    """(speed band, grade, curves, traffic, who drove, drive mode). Comparisons match on everything but the one compared."""
     speed = next(label for limit, label in SPEED_BANDS if self.mean_speed < limit)
     pitch = self.pitch_m / self.distance if self.distance > 0 else 0.0
     grade = "uphill" if math.tan(pitch) > GRADE_BAND else "downhill" if math.tan(pitch) < -GRADE_BAND else "flat"
     curve_avg = self.curve_m / self.distance if self.distance > 0 else 0.0
     curve = "curvy" if curve_avg > CURVE_TIGHT else "gentle curves" if curve_avg > CURVE_GENTLE else "straight"
     traffic = "stop-and-go" if self.stopped else "following" if self.lead_s > 0.5 * self.duration else "open road"
-    return speed, grade, curve, traffic, self.mode
+    drive_mode = max(self.mode_s, key=self.mode_s.get) if self.mode_s else "unknown"
+    return speed, grade, curve, traffic, self.mode, drive_mode
 
 
 @dataclass
@@ -271,6 +273,7 @@ class Ledger:
       self._track_obd(sample)
       return
     s = self._open
+    mode_switch = sample.drive_mode is not None and bool(s.mode_s) and sample.drive_mode not in s.mode_s
     speed = 0.5 * (sample.speed + last.speed)
     e = step(speed, sample.accel, sample.pitch, sample.mass, dt)
     d = max(speed, 0.0) * dt
@@ -297,7 +300,7 @@ class Ledger:
     if sample.power_meter is not None and math.isfinite(sample.power_meter):
       s.meter_sum += sample.power_meter
       s.meter_n += 1
-    if mode != s.mode or s.distance >= STRETCH_M or s.duration >= STRETCH_S:
+    if mode != s.mode or mode_switch or s.distance >= STRETCH_M or s.duration >= STRETCH_S:
       self._close(sample.t)
       self._open = self._new(mode, sample.t)
 

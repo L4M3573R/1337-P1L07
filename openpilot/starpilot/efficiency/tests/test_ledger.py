@@ -65,7 +65,7 @@ def test_stretches_split_by_distance_and_mode_and_carry_context():
   ledger_stretches = sum(1 for _ in by_context)
   assert ledger_stretches == 1
   key, = by_context
-  assert key == ("45-60 mph", "flat", "straight", "following", "experimental")
+  assert key == ("45-60 mph", "flat", "straight", "following", "experimental", "unknown")  # no drive mode in this test
   assert total.distance / STRETCH_M >= 4
 
 
