@@ -3,7 +3,8 @@
 
 Samples at the 20 Hz radarState cadence, checkpoints the drive file every minute and on shutdown.
 Real fuel comes from the dash average MPG since the last fill-up (tank.py); the hybrid power flow and
-the cluster readings come from the newest CAN batch only (conflated), which keeps this process light.
+the cluster readings come from the newest CAN batch only, which keeps this process light; older batches are only
+checked for the drive-mode signals.
 When the BlueDriver logger runs, its measured fuel flow and hybrid battery charge are read once a second
 from its live file and kept alongside the dash figure.
 """
@@ -16,7 +17,7 @@ import time
 from pathlib import Path
 
 from openpilot.starpilot.efficiency import store, tank as tank_store
-from openpilot.starpilot.efficiency.car_signals import CarSignals
+from openpilot.starpilot.efficiency.car_signals import MDPS11_ADDR, MODE_ADDR, CarSignals
 from openpilot.starpilot.efficiency.hybrid import Cluster, PowerFlow, scan
 from openpilot.starpilot.efficiency.ledger import Ledger, make_sample
 from openpilot.starpilot.obd.bluedriver import GRAMS_PER_GALLON
@@ -25,6 +26,7 @@ SERVICES = ['radarState', 'carState', 'carControl', 'selfdriveState', 'deviceMot
 GPS_MAX_ACCURACY_M = 25.0
 CHECKPOINT_S = 60.0
 OBD_READ_S = 1.0
+SIGNAL_ADDRS = (MODE_ADDR, MDPS11_ADDR)
 METERS_PER_MILE = 1609.344
 
 
@@ -143,7 +145,7 @@ def main() -> None:
   params = Params()
   cp = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
   sm = messaging.SubMaster(SERVICES, poll='radarState')
-  can_sock = messaging.sub_sock('can', conflate=True)
+  can_sock = messaging.sub_sock('can', conflate=False)
   recorder = Recorder(float(cp.mass), drive_id())
   last_obd_read = 0.0
 
@@ -154,12 +156,17 @@ def main() -> None:
   try:
     while True:
       sm.update()
-      raw = can_sock.receive(non_blocking=True)
-      if raw is not None:
+      # Every CAN batch is read for the drive-mode signals (the mode announcement lasts only a few frames); the
+      # cluster scan still uses just the newest batch, as before.
+      raws = messaging.drain_sock_raw(can_sock)
+      for i, raw in enumerate(raws):
         event = messaging.log_from_bytes(raw)
-        frames = [(c.address, bytes(c.dat), c.src) for c in event.can]
-        recorder.observe_can(*scan(frames))
-        recorder.signals.update(frames)
+        if i == len(raws) - 1:
+          frames = [(c.address, bytes(c.dat), c.src) for c in event.can]
+          recorder.observe_can(*scan(frames))
+          recorder.signals.update(frames)
+        else:
+          recorder.signals.update([(c.address, bytes(c.dat), c.src) for c in event.can if c.address in SIGNAL_ADDRS])
       if sm.updated['gpsLocationExternal']:
         recorder.observe_gps(sm['gpsLocationExternal'])
       if sm.seen['carState']:

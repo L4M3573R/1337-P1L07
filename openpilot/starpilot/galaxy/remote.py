@@ -212,6 +212,9 @@ serverPort = 7000
 [transport]
 tls.enable = true
 poolCount = 2
+# Notice a dead relay connection in ~10 s instead of the 30 s default (the network supervisor restarts sooner).
+tcpMuxKeepaliveInterval = 10
+dialServerTimeout = 5
 
 [[proxies]]
 name = "{slug}_galaxy"

@@ -76,6 +76,9 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
 - **Energy ledger** (`246ace1369`, `9eafb2765a`, `eb7c0ce812`, `9355d3146c`, `575dc06820`, `835eb17fa5`):
   `starpilot/efficiency/` (efficiencyd ancillary in `process_config.py` and `process_health.py`), dash fuel,
   hybrid power flow (0x595), drive mode / tire pressure / map limit tags (`car_signals.py`), per-stretch records.
+  Drive mode comes from the car's 0x2FC byte 7 announcement (0x40 Eco, 0x60 Sport, 0xA0 Smart) plus the MDPS11
+  Sport flag, never 0x44E; efficiencyd reads every CAN batch (not conflated) for those two addresses so the few-frame
+  announcement is not missed.
 - **BlueDriver Pro logger** (`eb47adb2ca`): `starpilot/obd/` (bluedriverd, opt-in, ancillary), measured fuel and
   battery in the ledger, tank level, read-only health check.
 - **Comma vs driver and PC reports** (`575dc06820`, `835eb17fa5`): `efficiency/compare.py`, `trend.py`, `trips.py`,
@@ -98,10 +101,43 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
 - **Partition links for AGNOS 20.5.1**: `launch_chffrplus.sh` (`partition_links`) recreates missing
   `/dev/disk/by-partlabel` links every boot; without `bluetooth_<slot>` the Bluetooth radio never starts (no
   BlueDriver). Drop it once an AGNOS release creates the links again (check `ls /dev/disk/by-partlabel` after boot).
+- **NNLC choice repeated every segment**: `selfdrive/controls/controlsd.py` re-logs the drive's `nnlc` choice every
+  `NNLC_RELOG_S` (55 s) so each rlog segment carries its steering label. Test: `selfdrive/controls/tests/test_nnlc_relog.py`.
+- **Battery reading glitch filter**: `starpilot/efficiency/ledger.py` `_smoothed_soc` holds back a jump of
+  `SOC_JUMP` (4) points until `SOC_CONFIRM` (3) readings agree. Tests in `efficiency/tests/test_measured_fuel.py`.
+- **Map curve speed (shadow mode)**: `starpilot/curve_speed/map_curves.py` (curves up to 1 km ahead from the stored
+  road tiles, highways included, as 10 m chunks via `profile_ahead`), `map_target.py` (chunk-by-chunk plan: each chunk's
+  limit is the lowest of learned comfort, 80% of the measured steering torque capability, and a lateral-jerk limit for
+  S-bends/quick tightening; a backward pass makes it reachable with a gentle slowdown; curve memory corrects the
+  map's tightness per remembered curve; the steering limit uses `steering_capability.py`, learned per speed band
+  from live comma steering), a live check in `curvemapd.Shadow._live` (inside a curve, measured tightness/torque vs
+  the plan's prediction; logs the mid-curve lowering it would make), `curve_memory.py` (remembers each curve; your own speed sets comfort when the curve set it (no radar lead within
+  3 s, you slowed for it); passes behind a lead are lower bounds only and their brake/gas are ignored; each pass is binned into
+  11 points through the curve (`pass_profile`) so the comfort curve learns every part at its own tightness and each
+  remembered curve keeps its shape and speed profile, which `map_target.adjustments` replays point by point;
+  takeovers learn
+  the speed actually taken: brake/cancel = too fast, gas =
+  too slow, steering into the curve >= 0.5 s or torque saturation = comma struggled; driver torque sign learned from
+  hand steering), `curvemapd.py` (ancillary process, logs only, never publishes control; config
+  `<storage>/curve_map.json`, logs `<storage>/curve_map/shadow/*.jsonl`). Depends on `side_road._polylines`
+  `include_motorway` and `side_road._path`, which follows the straightest branch at a split unless a blinker
+  `prefer`s the branch to its side within 600 m (`_take_branch` also catches ramps leaving mid-line); curvemapd passes
+  the blinker so exits are planned as soon as you signal. Camera checks (log only, `camera.py` + `curvemapd.CameraCheck`,
+  `<storage>/curve_map/camera/*.jsonl`): lane position from road edges/outer lane lines, which branch the model's path
+  follows at a split (`map_curves.branches_from_lines`), and map-vs-camera curve agreement; sign conventions are
+  learned from driving. Test: `starpilot/curve_speed/tests/test_map_curve_speed.py`.
+- **Galaxy remote ready as soon as there is internet**: `starpilot/galaxy/remote_service.py` (`network_route`)
+  restarts the frpc tunnel the moment the comma's internet route changes (boot, Wi-Fi to hotspot) instead of
+  waiting ~40 s for the dead relay connection's keepalive; `remote.py` `frpc_config` sets
+  `tcpMuxKeepaliveInterval = 10` and `dialServerTimeout = 5`. Test: `starpilot/galaxy/tests/test_remote_service.py`.
+  If upstream changes the frpc version, re-run `frpc verify` on the generated config (frpc rejects unknown keys).
 
 ## Outside the repo (not touched by merges, but must keep working)
 - **DR4L trainer** (Unraid, `/mnt/user/appdata/nnlc`, container `nnlc-trainer`): pulls logs over SSH, trains the
   personal NNLC, runs the trial, deploys to `/data/starpilot/nnlc`. Its source is not versioned in this repo yet.
+  Extract v4 (2026-11-13): drive mode from the 0x2FC announcement, carried across each drive's segments by
+  `extract.resolve_route` (rows store this segment's view, npz `mode_end` the mode at its end); training and scoring
+  load rows through `service.route_rows`. Previous code kept in `build/app.v3.bak`.
   It reads rlogs with its own copy of the cereal schema: re-copy `openpilot/cereal/*.capnp` into its
   `build/app/schema` after a merge that changes the schema.
 - **Comma files**: `/data/tailscale` (binaries + state), `/data/starpilot/nnlc/` (model, config, user override),

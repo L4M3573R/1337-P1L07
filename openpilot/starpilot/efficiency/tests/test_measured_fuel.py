@@ -52,3 +52,15 @@ def test_recorder_counter_survives_logger_restart_and_link_drop():
   assert r.obd_fuel_gal == pytest.approx(56.8 / 2840.0)
   r.observe_obd(None)
   assert r.obd_fuel_gal is None and r.soc is None
+
+
+def test_a_single_jumpy_battery_reading_does_not_swing_the_stretch():
+  # steady 60 %, but one reading glitches to 80 % right around a stretch boundary
+  glitch = run(lambda t: 0.0005 * t, soc_at=lambda t: 80.0 if 59.9 <= t < 60.1 else 60.0)
+  assert glitch.obd_soc_delta == pytest.approx(0.0, abs=0.01)
+
+
+def test_a_real_battery_jump_is_accepted_once_it_stays():
+  # a real step (e.g. the car's own recalibration) that persists is booked in full
+  stepped = run(lambda t: 0.0005 * t, soc_at=lambda t: 60.0 if t < 60.0 else 70.0)
+  assert stepped.obd_soc_delta == pytest.approx(10.0, abs=0.01)

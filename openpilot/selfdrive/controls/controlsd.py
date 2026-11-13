@@ -63,6 +63,7 @@ LaneChangeState = log.LaneChangeState
 LaneChangeDirection = log.LaneChangeDirection
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
+NNLC_RELOG_S = 55.0  # just under a log segment
 
 
 class Controls:
@@ -254,8 +255,10 @@ class Controls:
       from openpilot.starpilot.lateral.nnlc.trial import NNLC, choose_for_drive
 
       choice = choose_for_drive()
-      cloudlog.event('starpilot_feature', feature='nnlc', mode=choice.mode, reason=choice.reason,
-                     model_sha256=choice.model_sha256, drive=choice.drive)
+      self._nnlc_event = {'mode': choice.mode, 'reason': choice.reason, 'model_sha256': choice.model_sha256,
+                          'drive': choice.drive}
+      self._nnlc_logged = time.monotonic()
+      cloudlog.event('starpilot_feature', feature='nnlc', **self._nnlc_event)
       if choice.mode == NNLC and choice.model is not None:
         self.LaC.nnlc = NnlcFeedforward(choice.model, DT_CTRL, choice.model_sha256)
         return True
@@ -290,6 +293,12 @@ class Controls:
 
   def update(self, timeout: int = 15):
     self.sm.update(timeout)
+    # Repeat this drive's NNLC choice about once a segment, so every log segment says which steering drove it
+    # (the trainer and drive comparisons otherwise lose the label when a drive's first segment never arrives).
+    event = getattr(self, '_nnlc_event', None)
+    if event is not None and time.monotonic() - self._nnlc_logged >= NNLC_RELOG_S:
+      self._nnlc_logged = time.monotonic()
+      cloudlog.event('starpilot_feature', feature='nnlc', **event)
     if self.sm.updated["extrinsicsCalibration"]:
       self.pose_calibrator.feed_extrinsics_calibration(self.sm['extrinsicsCalibration'])
     if self.sm.updated["deviceMotion"]:

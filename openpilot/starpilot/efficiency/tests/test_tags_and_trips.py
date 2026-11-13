@@ -13,15 +13,25 @@ def mdps(mode):
   return bytes([0, 0, 0, 0, 0, 0, 0, (mode & 3) << 3])
 
 
+def announce(byte7):
+  return bytes([0, 0, 0, 0, 0, 0, 0, byte7])
+
+
 def test_car_signals_decode_drive_mode_tires_and_map():
   s = CarSignals()
   assert s.drive_mode is None
-  s.update([(0x381, mdps(0), 0), (0x44E, bytes([0x01]), 0)])
-  assert s.drive_mode == 'eco'
-  s.update([(0x381, mdps(1), 0)])
+  s.update([(0x381, mdps(0), 0)])
+  assert s.drive_mode == 'eco'  # every drive starts in Eco
+  s.update([(0x2FC, announce(0x60), 0), (0x381, mdps(1), 0)])  # as logged: announcement, then the steering flag
   assert s.drive_mode == 'sport'
-  s.update([(0x381, mdps(0), 0), (0x44E, bytes([0x81]), 0)])
+  s.update([(0x2FC, announce(0x00), 0)])  # the announcement ends; Sport stays
+  assert s.drive_mode == 'sport'
+  s.update([(0x2FC, announce(0xA0), 0), (0x381, mdps(0), 0)])
   assert s.drive_mode == 'smart'
+  s.update([(0x2FC, announce(0x00), 0), (0x44E, bytes([0x01]), 0)])  # 0x44E is not the mode
+  assert s.drive_mode == 'smart'
+  s.update([(0x2FC, announce(0x40), 0)])
+  assert s.drive_mode == 'eco'
   s.update([(0x593, bytes.fromhex('000122232223'), 0)])  # as on the speed-test drive
   assert s.tires_psi == (34, 35, 34, 35) and s.tire_avg == 34.5 and s.tire_min == 34
   s.update([(0x593, bytes.fromhex('0000ffffffff'), 0)])  # parked: sensors asleep
@@ -29,7 +39,18 @@ def test_car_signals_decode_drive_mode_tires_and_map():
   s.update([(0x544, bytes.fromhex('4160413a00000000'), 0)])
   assert s.map_limit == 65 and s.road_code == 1
   s.update([(0x544, bytes.fromhex('ff77ffff00000000'), 0), (0x381, mdps(1), 2)])  # unknown map; other bus ignored
-  assert s.map_limit is None and s.drive_mode == 'smart'
+  assert s.map_limit is None and s.drive_mode == 'eco'
+
+
+
+def test_missed_smart_announcement_is_inferred_from_sport_ending():
+  s = CarSignals()
+  s.update([(0x381, mdps(0), 0), (0x381, mdps(1), 0)])  # Sport, its announcement missed
+  assert s.drive_mode == 'sport'
+  s.update([(0x381, mdps(0), 0)])  # Sport ends, nothing announced: Eco > Sport > Smart, so Smart
+  assert s.drive_mode == 'smart'
+  s.update([(0x2FC, announce(0x40), 0)])
+  assert s.drive_mode == 'eco'
 
 
 def drive(seconds=60.0, **tags):

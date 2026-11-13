@@ -24,6 +24,8 @@ FLOW_ACCEL_BIN = 0.05  # m/s^2, acceleration with the road slope removed
 # The fuel counter dips slightly when the dash refreshes its average (a correction, kept so the sum
 # stays exact); a drop larger than this is a fill-up or a reseed, which is never bridged.
 FUEL_RESET_DROP_GAL = 0.05
+SOC_JUMP = 4.0     # battery % points: a reading this far from the last one is suspect
+SOC_CONFIRM = 3    # ...until this many readings in a row agree with it
 # Hybrid battery change is converted to fuel so a drive that drained (or charged) the battery is not
 # credited (or charged) for it: about 1.32 kWh pack, and roughly 0.09 gal of fuel to put 1 kWh back
 # through the engine and generator. Estimates; they only adjust the measured (BlueDriver) fuel.
@@ -219,6 +221,22 @@ class Ledger:
   _fuel_carry: float | None = None
   _obd_carry: float | None = None
   _soc_carry: float | None = None
+  # Battery readings: a sudden jump of SOC_JUMP points or more is held back until SOC_CONFIRM readings in a row agree
+  # with it, so one jumpy BlueDriver reading at a stretch boundary cannot swing that stretch's battery-adjusted MPG.
+  # Ordinary changes pass straight through (no lag on the drive's battery total).
+  _soc_accepted: float | None = field(default=None, repr=False)
+  _soc_pending: list = field(default_factory=list, repr=False)
+
+  def _smoothed_soc(self, t: float, raw: float | None) -> float | None:
+    if raw is None or not math.isfinite(raw) or not 0.0 <= raw <= 100.0:
+      return self._soc_accepted
+    if self._soc_accepted is None or abs(raw - self._soc_accepted) < SOC_JUMP:
+      self._soc_accepted, self._soc_pending = raw, []
+      return raw
+    self._soc_pending = [v for v in self._soc_pending if abs(v - raw) < SOC_JUMP] + [raw]
+    if len(self._soc_pending) >= SOC_CONFIRM:  # the jump is real (it stayed): accept it
+      self._soc_accepted, self._soc_pending = raw, []
+    return self._soc_accepted
 
   def _new(self, mode: str, t: float) -> Stretch:
     return Stretch(mode, t, t, fuel_first=self._fuel_carry, fuel_last=self._fuel_carry,
@@ -238,12 +256,13 @@ class Ledger:
       self._obd_carry = value
       if s is not None:
         s.obd_last = value
-    if sample.soc is not None and math.isfinite(sample.soc):
+    soc = self._smoothed_soc(sample.t, sample.soc) if sample.soc is not None else None
+    if soc is not None:
       if s is not None and s.soc_first is None:
-        s.soc_first = sample.soc
-      self._soc_carry = sample.soc
+        s.soc_first = soc
+      self._soc_carry = soc
       if s is not None:
-        s.soc_last = sample.soc
+        s.soc_last = soc
 
   def add(self, sample: Sample) -> None:
     last, self._last = self._last, sample
@@ -251,6 +270,7 @@ class Ledger:
     dt = sample.t - last.t if last is not None else 0.0
     if self._open is not None and not 0.0 < dt <= 1.0:
       self._obd_carry = self._soc_carry = None  # a gap: measured fuel is never carried across it
+      self._soc_accepted, self._soc_pending = None, []
     else:
       self._track_obd(sample)
     if sample.fuel_gal is not None and math.isfinite(sample.fuel_gal):
@@ -269,6 +289,7 @@ class Ledger:
     if not 0.0 < dt <= 1.0:  # gap in the log: start a fresh stretch
       self._close(last.t if last is not None else sample.t)
       self._fuel_carry = self._obd_carry = self._soc_carry = None
+      self._soc_accepted, self._soc_pending = None, []
       self._open = self._new(mode, sample.t)
       self._track_obd(sample)
       return
