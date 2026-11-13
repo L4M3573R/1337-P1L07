@@ -93,6 +93,9 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
 - **Decision logs** (`4f1ebefe17`, `2792a5f492`): `starpilot/diagnostics/features.py`, reserved
   `starpilotLongitudinalPlan` in `cereal/custom.capnp`.
 - **Tailscale on boot** (`eb47adb2ca`): `launch_chffrplus.sh` (`tailscale_init`).
+- **Partition links for AGNOS 20.5.1**: `launch_chffrplus.sh` (`partition_links`) recreates missing
+  `/dev/disk/by-partlabel` links every boot; without `bluetooth_<slot>` the Bluetooth radio never starts (no
+  BlueDriver). Drop it once an AGNOS release creates the links again (check `ls /dev/disk/by-partlabel` after boot).
 
 ## Outside the repo (not touched by merges, but must keep working)
 - **DR4L trainer** (Unraid, `/mnt/user/appdata/nnlc`, container `nnlc-trainer`): pulls logs over SSH, trains the

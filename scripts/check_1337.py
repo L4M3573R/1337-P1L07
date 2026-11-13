@@ -99,6 +99,8 @@ FEATURES = [
    [(STARPILOT + 'ui/feature_settings_compact.py', r'.')], [STARPILOT + 'ui/tests/test_compact_aol_save_refresh.py']),
   ('Tailscale starts on boot when installed under /data/tailscale',
    [('launch_chffrplus.sh', r'function tailscale_init'), ('launch_chffrplus.sh', r'^\s+tailscale_init$')], []),
+  ('AGNOS 20.5.1: recreate missing /dev/disk/by-partlabel links each boot (Bluetooth radio firmware)',
+   [('launch_chffrplus.sh', r'function partition_links'), ('launch_chffrplus.sh', r'^\s+partition_links$')], []),
 ]
 
 

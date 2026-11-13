@@ -57,6 +57,20 @@ EOF
   fi
 }
 
+# AGNOS 20.5.1 no longer creates every /dev/disk/by-partlabel link (the Bluetooth radio unit needs
+# bluetooth_<slot> for its firmware, and retries forever without it). Recreate any missing link from the
+# kernel's partition names; existing links are left alone. /dev is rebuilt each boot, so this runs every boot.
+function partition_links {
+  sudo timeout -k 1s 10s sh -c '
+    mkdir -p /dev/disk/by-partlabel
+    for uevent in /sys/class/block/*/uevent; do
+      name=$(sed -n "s/^PARTNAME=//p" "$uevent"); dev=$(sed -n "s/^DEVNAME=//p" "$uevent")
+      [ -n "$name" ] && [ -n "$dev" ] && [ -b "/dev/$dev" ] && [ ! -e "/dev/disk/by-partlabel/$name" ] &&
+        ln -s "../../$dev" "/dev/disk/by-partlabel/$name"
+    done
+    true' || echo "Partition link repair failed; continuing startup."
+}
+
 # Optional remote access: starts only when the owner installed Tailscale under /data/tailscale.
 # Its login lives in that folder's state file; nothing here can stop openpilot from starting.
 function tailscale_init {
@@ -160,6 +174,7 @@ function launch {
     if ! "$DIR/scripts/install_boot_logo.sh"; then
       echo "StarPilot boot image update failed; continuing startup."
     fi
+    partition_links
     tailscale_init
   fi
 
