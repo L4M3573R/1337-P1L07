@@ -1,7 +1,10 @@
 """Self-learning fuel efficiency, the judging half: which variant of each experiment (experiment.py) used the least fuel.
 
 Fuel is the BlueDriver's measured gallons per stretch, adjusted for the hybrid battery (charge used is fuel spent
-earlier, charge gained is fuel banked: ledger.GAL_PER_BATTERY_KWH). Two ways of scoring a variant:
+earlier, charge gained is fuel banked: ledger.GAL_PER_BATTERY_KWH), then corrected for the road and the speed change:
+the fuel a stretch spent (or saved) climbing (its height change, from the pitch) and changing speed (half the change of
+speed squared) is removed, at costs fitted on every stored stretch (fuel = a * metres + b * climb + c * speed change), so
+a variant is not flattered by happening to run slightly downhill or by ending slower. Two ways of scoring a variant:
   - steady situations (hills, cruise, Pulse and Glide, following, EV): gallons per mile over its stretches;
   - launches and speeding up: gallons per mile over a fixed distance from where each episode began (WINDOW_M), so a
     gentle start is not flattered by covering less road in the same time.
@@ -12,8 +15,11 @@ The winners go to <efficiency>/experiments.json, which the planner's experimente
 from __future__ import annotations
 
 import json
+import math
 import random
 from pathlib import Path
+
+import numpy as np
 
 from openpilot.starpilot.efficiency.experiment import CATEGORIES
 from openpilot.starpilot.efficiency.ledger import BATTERY_KWH, GAL_PER_BATTERY_KWH
@@ -25,6 +31,52 @@ MIN_GAIN = 0.03          # 3 % less fuel than the baseline
 CONFIDENCE = 0.8
 RESAMPLES = 400
 WINDOW_M = {'launch': 400.0, 'accelerate': 600.0}
+# physics fallback for the corrections (until enough stretches to fit them): a 1450 kg car at 30 % engine-to-wheel
+MASS_KG, G, ETA, J_PER_GAL = 1450.0, 9.81, 0.30, 121.3e6
+DEFAULT_CLIMB = MASS_KG * G / (ETA * J_PER_GAL)   # gallons per metre climbed (about 0.0004)
+DEFAULT_SPEED = MASS_KG / (ETA * J_PER_GAL)       # gallons per (m/s)^2 of half-speed-squared gained
+MIN_FIT_STRETCHES = 300
+
+
+def climb_m(stretch: dict) -> float:
+  pitch, metres = stretch.get('pitch'), stretch.get('m') or 0.0
+  return metres * math.sin(pitch) if isinstance(pitch, (int, float)) and math.isfinite(pitch) else 0.0
+
+
+def speed_change(stretch: dict) -> float:
+  v0, v1 = stretch.get('v0'), stretch.get('v1')
+  return (v1 * v1 - v0 * v0) / 2.0 if isinstance(v0, (int, float)) and isinstance(v1, (int, float)) else 0.0
+
+
+def fit_corrections(drives: list[list[dict]]) -> dict:
+  """Fuel per metre climbed and per unit of speed gained, fitted on every stored stretch with measured fuel (least
+  squares, fuel = a * metres + b * climb + c * speed change); physics defaults when too few or not physical."""
+  rows = [(s.get('m') or 0.0, climb_m(s), speed_change(s), g) for d in drives for s in d
+          if (g := adjusted_gal(s)) is not None and (s.get('m') or 0.0) > 50.0]
+  out = {'climb': DEFAULT_CLIMB, 'speed': DEFAULT_SPEED, 'source': 'physics', 'stretches': len(rows)}
+  with_speed = [r for r in rows if r[2] != 0.0]
+  if len(rows) < MIN_FIT_STRETCHES:
+    return out
+  x = np.array([[r[0], r[1], r[2]] for r in rows])
+  y = np.array([r[3] for r in rows])
+  if len(with_speed) < MIN_FIT_STRETCHES:
+    x = x[:, :2]
+  coef, *_ = np.linalg.lstsq(x, y, rcond=None)
+  climb = float(coef[1])
+  speed = float(coef[2]) if len(coef) > 2 else DEFAULT_SPEED
+  # a fit far from physics (noise, too little hill data) is not trusted
+  if 0.25 * DEFAULT_CLIMB <= climb <= 4 * DEFAULT_CLIMB:
+    out.update(climb=climb, source='fitted')
+  if len(coef) > 2 and 0.25 * DEFAULT_SPEED <= speed <= 4 * DEFAULT_SPEED:
+    out.update(speed=speed)
+  return out
+
+
+def corrected_gal(stretch: dict, corrections: dict) -> float | None:
+  gal = adjusted_gal(stretch)
+  if gal is None:
+    return None
+  return gal - corrections['climb'] * climb_m(stretch) - corrections['speed'] * speed_change(stretch)
 
 
 def adjusted_gal(stretch: dict) -> float | None:
@@ -36,8 +88,10 @@ def adjusted_gal(stretch: dict) -> float | None:
   return gal - battery   # charge used (soc_d < 0) adds the fuel it stands for
 
 
-def samples(drives: list[list[dict]]) -> dict[tuple[str, str, str], list[tuple[float, float]]]:
-  """(category, context, variant) -> [(gallons, metres)] per stretch (steady) or per episode window (launches)."""
+def samples(drives: list[list[dict]], corrections: dict | None = None) -> dict[tuple[str, str, str], list[tuple[float, float]]]:
+  """(category, context, variant) -> [(gallons, metres)] per stretch (steady) or per episode window (launches), the
+  gallons corrected for climb and speed change."""
+  corrections = corrections or {'climb': 0.0, 'speed': 0.0}
   out: dict[tuple[str, str, str], list[tuple[float, float]]] = {}
   for stretches in drives:
     prev_tag = None
@@ -55,7 +109,7 @@ def samples(drives: list[list[dict]]) -> dict[tuple[str, str, str], list[tuple[f
           continue
         gal, metres = 0.0, 0.0
         for nxt in stretches[i:]:
-          g, m = adjusted_gal(nxt), nxt.get('m') or 0.0
+          g, m = corrected_gal(nxt, corrections), nxt.get('m') or 0.0
           if g is None:
             gal = None
             break
@@ -65,7 +119,7 @@ def samples(drives: list[list[dict]]) -> dict[tuple[str, str, str], list[tuple[f
         if gal is not None and metres >= WINDOW_M[category]:
           out.setdefault((category, context, variant), []).append((gal, metres))
       else:
-        g, m = adjusted_gal(s), s.get('m') or 0.0
+        g, m = corrected_gal(s, corrections), s.get('m') or 0.0
         if g is not None and m > 0:
           out.setdefault((category, context, variant), []).append((g, m))
   return out
@@ -131,8 +185,11 @@ def load_drives(root: Path) -> list[list[dict]]:
 
 def update(root: Path) -> dict:
   """Judge every stored drive and write <root>/experiments.json (the winners the experimenter reads)."""
-  results = judge(samples(load_drives(root)))
-  doc = {'version': 1, 'winners': {k: r['winner'] for k, r in results.items() if r['winner']}, 'results': results}
+  drives = load_drives(root)
+  corrections = fit_corrections(drives)
+  results = judge(samples(drives, corrections))
+  doc = {'version': 1, 'winners': {k: r['winner'] for k, r in results.items() if r['winner']}, 'results': results,
+         'corrections': corrections}
   path = root / 'experiments.json'
   tmp = path.with_suffix('.tmp')
   tmp.write_text(json.dumps(doc, indent=1))
@@ -141,7 +198,9 @@ def update(root: Path) -> dict:
 
 
 def report_lines(doc: dict) -> list[str]:
-  lines = ['Fuel experiments (BlueDriver, battery-adjusted):']
+  c = doc.get('corrections') or {}
+  lines = ['Fuel experiments (BlueDriver, battery-adjusted, corrected for climb and speed change'
+           + (f": {c.get('climb', 0) * 1000:.2f} gal per km climbed, {c.get('source', '?')})" if c else ')')]
   for key, r in sorted(doc.get('results', {}).items()):
     scores = ', '.join(f'{v} {x:.2f}' for v, x in r['gal_per_100mi'].items())
     lines.append(f"  {key:22s} {r['status']}  [gal/100mi: {scores}]")

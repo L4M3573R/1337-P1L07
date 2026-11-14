@@ -168,6 +168,11 @@ def test_lead_accel_shadow_times_each_braking_onset():
   shadow.observe(10.25, 7, 0.0, -0.2, 30.0, 12.0)
   assert len(log) == count
   # a lead change, missing radar data and bad numbers never raise or mis-time
+  # an impossible radar reading (a glitch) is ignored, not called braking
+  count = len(log)
+  for k in range(5):
+    shadow.observe(10.5 + k * 0.05, 7, -23.5, -0.2, 18.0, 4.0)
+  assert len(log) == count
   shadow.observe(11.0, None, None, 0.0, 0.0, 0.0)
   shadow.observe(11.1, 8, float('nan'), 0.0, 0.0, 0.0)
   shadow.observe(11.2, 8, 0.0, float('inf'), 0.0, 0.0)

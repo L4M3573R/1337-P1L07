@@ -238,6 +238,7 @@ LEAD_BRAKE_ONSET = -0.8      # m/s2: radard's Kalman estimate counts as showing 
 # 70/82) and led openpilot by a median 0.20 s. The old single-frame -0.8 trigger was right only 55% (82 false/hour).
 LEAD_RADAR_TRIGGER = -1.2
 LEAD_RADAR_FRAMES = 2
+LEAD_RADAR_PLAUSIBLE = (-10.0, 6.0)   # m/s2: a radar reading outside this is a glitch (seen: -23.5 at 9 mph, 2026-11-14)
 LEAD_BRAKE_REARM = -0.3      # ...and a new onset can start once both estimates are back above this
 LEAD_BRAKE_WAIT_S = 3.0      # how long to wait for radard's estimate to follow
 
@@ -265,7 +266,8 @@ class LeadAccelShadow:
 
   def observe(self, t: float, track: int | None, radar_accel: float | None, kalman_accel: float, d_rel: float, v_ego: float) -> None:
     try:
-      if track is None or radar_accel is None or not math.isfinite(radar_accel) or not math.isfinite(kalman_accel):
+      if (track is None or radar_accel is None or not math.isfinite(radar_accel) or not math.isfinite(kalman_accel) or
+          not LEAD_RADAR_PLAUSIBLE[0] <= radar_accel <= LEAD_RADAR_PLAUSIBLE[1]):
         self.pending = None
         return
       if self.pending is not None and self.pending['track'] != track:

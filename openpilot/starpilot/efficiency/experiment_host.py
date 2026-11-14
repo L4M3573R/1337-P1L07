@@ -99,8 +99,14 @@ class ExperimentHost:
                     float(cs.aEgo))
       plan = self.exp.sample(frame)
       if self.exp.vetoes != self.saved_vetoes:   # the driver pressed on during a slower variant: remember it
-        self.saved_vetoes = dict(self.exp.vetoes)
-        save_vetoes(self.root_now / 'vetoes.json', self.saved_vetoes)
+        # merge with the file (it may have gained entries since the drive began), keeping the higher count
+        path = self.root_now / 'vetoes.json'
+        merged = load_vetoes(path)
+        for key, count in self.exp.vetoes.items():
+          merged[key] = max(merged.get(key, 0), count)
+        self.exp.vetoes = dict(merged)
+        self.saved_vetoes = dict(merged)
+        save_vetoes(path, merged)
       self._apply_pulse_glide(plan, owner)
       if now >= self.next_status or plan.tag != self.last_tag:
         self.next_status = now + STATUS_WRITE_S

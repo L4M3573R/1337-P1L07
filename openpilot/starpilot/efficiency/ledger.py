@@ -130,6 +130,8 @@ class Stretch:
   level_first: float | None = None
   level_last: float | None = None
   experiment: str | None = None  # the fuel experiment in force for the whole stretch
+  v_start: float | None = None   # m/s at the stretch's start and end: the fuel judge corrects for a speed change
+  v_end: float | None = None
   lat: float | None = None
   lon: float | None = None
   bearing: float | None = None
@@ -172,7 +174,7 @@ class Stretch:
       'ambient_c': r(self.ambient_sum / self.ambient_n if self.ambient_n else None, 1),
       'level0': r(self.level_first, 1), 'level1': r(self.level_last, 1),
       'lat': r(self.lat, 5), 'lon': r(self.lon, 5), 'bearing': r(self.bearing, 0),
-      'exp': self.experiment,
+      'exp': self.experiment, 'v0': r(self.v_start), 'v1': r(self.v_end),
     }
 
   @property
@@ -303,6 +305,9 @@ class Ledger:
     e = step(speed, sample.accel, sample.pitch, sample.mass, dt)
     d = max(speed, 0.0) * dt
     s.end = sample.t
+    if s.v_start is None:
+      s.v_start = last.speed
+    s.v_end = sample.speed
     s.distance += d
     s.propulsion += e.propulsion_j
     s.regen += e.regen_j

@@ -238,6 +238,18 @@ class OnroadView:
     x = 1390 + (self.projection_viewport[0] if self.projection_viewport else state.viewport_width) - 1860
     self.fonts.draw(shown[0], FontRole.SEMI_BOLD, 25, x, y, shown[1])
 
+  def _pulse_glide_badge_compact(self, state: OnroadState) -> None:
+    """The comma 4's small screen: the Pulse and Glide state in the bottom-right corner, on a dark pill."""
+    shown = self.PULSE_GLIDE_LABELS.get(state.pulse_glide) if state.pulse_glide else None
+    if shown is None or state.alert.size != AlertSize.NONE:
+      return
+    size = 22
+    measured = self.fonts.measure(shown[0], FontRole.SEMI_BOLD, size)
+    right, bottom = 462, 228
+    pill = rl.Rectangle(right - measured.width - 16, bottom - measured.height - 8, measured.width + 16, measured.height + 8)
+    rl.draw_rectangle_rounded(pill, 0.5, 8, rl.Color(0, 0, 0, 170))
+    self.fonts.draw(shown[0], FontRole.SEMI_BOLD, size, pill.x + 8, pill.y + 4, shown[1])
+
   def _driving_mode(self, state: OnroadState, center_shift: float = 0) -> None:
     profile = self.fonts.profile
     position = placement(state.customization, profile, MODE_WIDGET)
@@ -558,6 +570,8 @@ class OnroadView:
         self._weather(state)
       if not ordered and not driver_camera and manual_slc_confirmation(self.fonts.profile, state):
         self._slc_actions(state)
+      if not driver_camera:
+        self._pulse_glide_badge_compact(state)
       signals = state.border_signals
       direction = (-1 if signals.left_blinker else 1 if signals.right_blinker else 0) if signals else 0
       if not ordered and state.alert.size != AlertSize.FULL:

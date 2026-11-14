@@ -1,5 +1,6 @@
 """Self-learning fuel efficiency: judging experiment variants from measured fuel."""
 import json
+import math
 import random
 
 from openpilot.starpilot.efficiency import experiment_learn as el
@@ -61,3 +62,31 @@ def test_update_writes_winners(tmp_path):
   assert doc['winners'] == {'downhill|30-45': 'carry2'}
   assert json.loads((tmp_path / 'experiments.json').read_text())['winners'] == {'downhill|30-45': 'carry2'}
   assert any('downhill' in line for line in el.report_lines(doc))
+
+
+def test_a_variant_that_happened_to_run_downhill_is_not_flattered():
+  # both variants burn the same on level road; 'pg' was always measured on a 1 % downhill
+  rng = random.Random(7)
+  base = 0.030 * 250 / 1609.344
+  drive = []
+  for _ in range(40):
+    climb = -0.01 * 250
+    drive.append({'exp': 'pulse_glide|30-45|steady', 'obd_gal': max(0.0, rng.gauss(base, base * 0.05)), 'm': 250.0,
+                  'pitch': 0.0, 'soc_d': 0.0})
+    drive.append({'exp': 'pulse_glide|30-45|pg', 'obd_gal': max(0.0, rng.gauss(base + el.DEFAULT_CLIMB * climb, base * 0.05)),
+                  'm': 250.0, 'pitch': math.asin(-0.01), 'soc_d': 0.0})
+  raw = el.judge(el.samples([drive]))['pulse_glide|30-45']
+  assert raw['winner'] == 'pg'   # uncorrected, the downhill makes it look better
+  fixed = el.judge(el.samples([drive], {'climb': el.DEFAULT_CLIMB, 'speed': el.DEFAULT_SPEED}))['pulse_glide|30-45']
+  assert fixed['winner'] != 'pg'
+
+
+def test_speed_change_is_charged():
+  c = {'climb': 0.0, 'speed': el.DEFAULT_SPEED}
+  slower_end = {'obd_gal': 0.004, 'm': 400.0, 'v0': 0.0, 'v1': 10.0}
+  faster_end = {'obd_gal': 0.004, 'm': 400.0, 'v0': 0.0, 'v1': 15.0}
+  assert el.corrected_gal(faster_end, c) < el.corrected_gal(slower_end, c)   # it banked more speed for the same fuel
+
+
+def test_fit_falls_back_to_physics_without_enough_data():
+  assert el.fit_corrections([[{'obd_gal': 0.004, 'm': 250.0, 'pitch': 0.01}]])['source'] == 'physics'
