@@ -232,7 +232,12 @@ class LeadLossLog:
                  radar_still_tracking=still)
 
 
-LEAD_BRAKE_ONSET = -0.8      # m/s2: the lead counts as braking below this
+LEAD_BRAKE_ONSET = -0.8      # m/s2: radard's Kalman estimate counts as showing the braking below this
+# The radar's trigger, tuned on 392 recorded segments (154 min of radar leads, 82 real braking onsets, 2026-11-14):
+# below -1.2 m/s2 for 2 radar frames was right 90% of the time (8 false calls/hour), caught 79/82 onsets (openpilot
+# 70/82) and led openpilot by a median 0.20 s. The old single-frame -0.8 trigger was right only 55% (82 false/hour).
+LEAD_RADAR_TRIGGER = -1.2
+LEAD_RADAR_FRAMES = 2
 LEAD_BRAKE_REARM = -0.3      # ...and a new onset can start once both estimates are back above this
 LEAD_BRAKE_WAIT_S = 3.0      # how long to wait for radard's estimate to follow
 
@@ -245,6 +250,8 @@ class LeadAccelShadow:
     self.log = log
     self.pending: dict | None = None
     self.armed = True
+    self.below = 0           # consecutive radar frames under the trigger, for the current lead
+    self.below_track = None
 
   def _emit(self, **fields) -> None:
     try:
@@ -263,7 +270,9 @@ class LeadAccelShadow:
         return
       if self.pending is not None and self.pending['track'] != track:
         self.pending = None  # a different lead: that onset can no longer be compared
-      if self.pending is None and self.armed and radar_accel < LEAD_BRAKE_ONSET:
+      self.below = self.below + 1 if radar_accel < LEAD_RADAR_TRIGGER and track == self.below_track else int(radar_accel < LEAD_RADAR_TRIGGER)
+      self.below_track = track
+      if self.pending is None and self.armed and self.below >= LEAD_RADAR_FRAMES:
         self.armed = False
         if kalman_accel < LEAD_BRAKE_ONSET:
           self._emit(what='braking seen', radar_earlier_s=0.0, radar_accel=_finite(radar_accel), kalman_accel=_finite(kalman_accel),

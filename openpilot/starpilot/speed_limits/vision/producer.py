@@ -119,17 +119,25 @@ def _camera_frame(client) -> tuple[np.ndarray, int, int] | None:
 
 
 _sign_log = None
+_sign_limit = None
 
 
 def _log_sign(status: str, result, stop_sample) -> None:
-  """Decision log: what the reader currently reports (status, speed limit read, stop sign in view), once per change."""
-  global _sign_log
+  """Decision log: what the reader reports (the limit it holds, stop sign in view, or that it is down), once per
+  change. A held limit alternates between 'valid' and 'unknown' frames, so the last limit read is kept until the
+  reader goes stale or unavailable."""
+  global _sign_log, _sign_limit
   try:
     if _sign_log is None:
       from openpilot.starpilot.diagnostics.features import ChangeLog
       _sign_log = ChangeLog('speed_sign', min_gap_s=1.0)
+    if status in ('stale', 'unavailable'):
+      _sign_limit = None
+    elif result is not None:
+      _sign_limit = int(result[0])
     boxes = stop_sample.boxes if stop_sample is not None and status in ('valid', 'unknown') else ()
-    _sign_log.observe({'status': status, 'limit': int(result[0]) if result is not None else None, 'stop_sign': bool(boxes)},
+    _sign_log.observe({'status': status if status in ('stale', 'unavailable') else 'reading', 'limit': _sign_limit,
+                       'stop_sign': bool(boxes)},
                       {'confidence': round(float(result[1]), 2) if result is not None else None,
                        'stop_confidence': round(max(float(b.confidence) for b in boxes), 2) if boxes else None})
   except Exception:

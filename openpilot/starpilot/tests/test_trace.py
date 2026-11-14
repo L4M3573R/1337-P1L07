@@ -149,16 +149,25 @@ def test_lead_accel_shadow_times_each_braking_onset():
     radar = -1.5 if t >= 1.0 else 0.0
     kalman = -1.2 if t >= 1.6 else -0.2
     shadow.observe(t, 7, radar, kalman, 40.0, 15.0)
-  assert len(log) == 1 and log[0]['what'] == 'braking seen' and abs(log[0]['radar_earlier_s'] - 0.6) < 0.06
+  # the trigger needs 2 radar frames under -1.2 m/s2, so it fires at 1.05 s
+  assert len(log) == 1 and log[0]['what'] == 'braking seen' and abs(log[0]['radar_earlier_s'] - 0.55) < 0.03
   # still braking: no second event until both estimates recover above -0.3 m/s2
   shadow.observe(3.2, 7, -1.6, -1.4, 35.0, 14.0)
   assert len(log) == 1
   shadow.observe(4.0, 7, 0.0, 0.0, 35.0, 14.0)
   # an onset openpilot never shows within 3 s
   for k in range(80):
-    shadow.observe(5.0 + k * 0.05, 7, -1.0, -0.5, 30.0, 12.0)
-  assert log[-1]['radar_earlier_s'] is None and log[-1]['radar_peak'] == -1.0
+    shadow.observe(5.0 + k * 0.05, 7, -1.3, -0.5, 30.0, 12.0)
+  assert log[-1]['radar_earlier_s'] is None and log[-1]['radar_peak'] == -1.3
+  # a mild dip (-1.0) or a single-frame spike is not a braking call any more
+  shadow.observe(9.0, 7, 0.0, 0.0, 30.0, 12.0)
+  count = len(log)
+  for k in range(20):
+    shadow.observe(9.1 + k * 0.05, 7, -1.0, -0.2, 30.0, 12.0)
+  shadow.observe(10.2, 7, -2.0, -0.2, 30.0, 12.0)
+  shadow.observe(10.25, 7, 0.0, -0.2, 30.0, 12.0)
+  assert len(log) == count
   # a lead change, missing radar data and bad numbers never raise or mis-time
-  shadow.observe(10.0, None, None, 0.0, 0.0, 0.0)
-  shadow.observe(10.1, 8, float('nan'), 0.0, 0.0, 0.0)
-  shadow.observe(10.2, 8, 0.0, float('inf'), 0.0, 0.0)
+  shadow.observe(11.0, None, None, 0.0, 0.0, 0.0)
+  shadow.observe(11.1, 8, float('nan'), 0.0, 0.0, 0.0)
+  shadow.observe(11.2, 8, 0.0, float('inf'), 0.0, 0.0)

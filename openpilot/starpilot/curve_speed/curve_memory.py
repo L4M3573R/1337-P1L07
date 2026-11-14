@@ -32,6 +32,7 @@ CURVE_K = 0.002            # 500 m radius
 MIN_SPEED = 7.0            # m/s; slower is a turn or parking, not a curve
 MIN_PASS_S = 2.0
 APPROACH_S = 6.0           # takeovers this long before the curve count for it
+TURN_SIGNAL_S = 3.0        # a "curve" with the blinker on (or on this long before it) is a turn or lane change
 STRUGGLE_SATURATED_S = 0.3
 GRID_DEG = 0.00025         # ~25 m apex cells
 MATCH_RADIUS_M = 40.0
@@ -49,7 +50,7 @@ PROFILE_POINTS = 11        # a curve is learned at 0%, 10% ... 100% of the way t
 # through a curve teaches your comfort when the curve set it (you slowed for it, no car ahead). A pass where the curve
 # did not set the speed (cruising, the comma's own speed, a car ahead) only shows that speed was fine: a lower bound
 # that may raise comfort, never lower it.
-WEIGHTS = {'manual': 10, 'confirmed': 2, 'too fast': 20, 'too slow': 20, 'struggled': 0, 'following': 0}
+WEIGHTS = {'manual': 10, 'confirmed': 2, 'too fast': 20, 'too slow': 20, 'struggled': 0, 'following': 0, 'turn': 0}
 LOWER_BOUND_WEIGHT = 2
 
 
@@ -72,6 +73,7 @@ class Sample:
   torque: float = 0.0         # the comma's steering command, -1..1
   lead_gap_s: float = math.inf  # time gap to the car ahead (inf: none)
   lead_speed: float = math.nan  # its speed, m/s
+  blinker: bool = False         # a turn signal is on
 
 
 @dataclass
@@ -196,9 +198,14 @@ class PassTracker:
     comma_steering = sum(x.lat_active for x in curve) > 0.8 * len(curve)
     approach_speed = max((x.v for x in approach), default=float(v[0]))
     a = curve[apex]
+    # 1337: a turn at an intersection (or a lane change) is not a curve of the road; on 2026-11-13/14 about 7 of 55
+    # "struggled" passes were intersection turns at ~16 mph on roads the map shows straight, teaching the planner a
+    # tight curve there. They are logged as 'turn' and never learned.
+    signalled = any(x.blinker for x in curve) or any(x.blinker for x in approach if x.t >= curve[0].t - TURN_SIGNAL_S)
+    verdict = 'turn' if signalled else verdict_for(events, comma_speed, following)
     return CurvePass(curve[0].t, curve[-1].t - curve[0].t, float(np.percentile(k, 80)), float(np.percentile(lat, 90)),
                      float(v[apex]), a.latitude, a.longitude, a.bearing, comma_speed, comma_steering,
-                     verdict_for(events, comma_speed, following), sorted(events), approach_speed - float(v.min()) >= SLOWED_MPS,
+                     verdict, sorted(events), approach_speed - float(v.min()) >= SLOWED_MPS,
                      following, float(lat[apex]), pass_profile(curve, approach_speed))
 
 

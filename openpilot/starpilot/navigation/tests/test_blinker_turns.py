@@ -151,3 +151,9 @@ def test_map_mode_waits_instead_of_turning_at_once(monkeypatch, turn_case):
   assert select(owner, sm) == log.Desire.turnLeft and owner.source == 'nudge'
   sm['carState'].steeringPressed = False
   assert select(owner, sm) == log.Desire.turnLeft  # held after the nudge
+
+
+def test_trigger_distance_starts_the_turn_before_the_driver_would():
+  # calibrated on recorded turns: about 3.2 s of travel plus 7 m before the side road (at least 5 m)
+  assert bt.trigger_distance(0.0) == pytest.approx(7.0)
+  assert bt.trigger_distance(6.0) == pytest.approx(6.0 * 3.2 + 7.0)

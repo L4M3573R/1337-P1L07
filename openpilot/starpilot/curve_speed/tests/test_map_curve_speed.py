@@ -136,9 +136,10 @@ def test_remembered_curves_use_their_own_tightness_and_comfort():
 
 
 def sample(t, v=25.0, k=0.0, lat=True, long=True, brake=False, gas=False, steer=False, sat=False, cruise=True, torque=0.0,
-           command=0.0, lead_gap_s=math.inf, lead_speed=math.nan):
+           command=0.0, lead_gap_s=math.inf, lead_speed=math.nan, blinker=False):
   # torque: the driver's (signed like curvature); command: the comma's steering command
-  return Sample(t, v, k, lat, long, brake, gas, steer, sat, cruise, 34.0, -117.0, 0.0, torque, command, lead_gap_s, lead_speed)
+  return Sample(t, v, k, lat, long, brake, gas, steer, sat, cruise, 34.0, -117.0, 0.0, torque, command, lead_gap_s, lead_speed,
+                blinker=blinker)
 
 
 # this car reports driver torque opposite to curvature, so steering INTO a left (positive) curve reads negative
@@ -275,6 +276,21 @@ def test_shadow_links_what_it_planned_to_the_curve_driven(tmp_path):
   assert curves[0].start_m <= plan['distance_m'] <= curves[0].end_m and len(plan['plan_every_50m']) == 11
   line = shadow.finish(CurvePass(5.0, 4.0, 1 / 200, 2.4, 22.0, plan['apex_lat'], plan['apex_lon'], 0.0, True, True, 'confirmed'), False)
   assert line['map_seen'] and line['would_have_slowed'] and line['planned_apex_speed'] == plan['apex_speed']
+
+
+def test_a_signalled_turn_is_not_a_curve(tmp_path):
+  # blinker on in the approach (within 3 s) or during the curve: an intersection turn or lane change
+  for on_at in (4.0, 7.0):
+    p = drive({round(on_at + i * 0.05, 2): {'blinker': True} for i in range(20)}, k=1 / 40)
+    assert p is not None and p.verdict == 'turn', on_at
+  # a blinker long before the curve (a lane change earlier on) does not hide a real curve
+  p = drive({round(1.0 + i * 0.05, 2): {'blinker': True} for i in range(20)})
+  assert p.verdict == 'confirmed'
+  # a turn is logged but never taught to the curve memory
+  memory = CurveMemory(tmp_path / 'c.json')
+  shadow = Shadow(memory)
+  line = shadow.finish(CurvePass(5.0, 4.0, 1 / 40, 2.4, 7.0, 34.0, -117.0, 0.0, True, True, 'turn', ['steer']), False)
+  assert line['curve']['verdict'] == 'turn' and line['curve_passes'] == 0 and memory.records == {}
 
 
 def test_mode_defaults_to_shadow(tmp_path):

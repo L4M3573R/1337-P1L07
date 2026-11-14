@@ -137,6 +137,28 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   limit read, stop sign in view, why the reader restarted), `efficiency_sources` (which fuel inputs the ledger has),
   `edge_map` / `efficiency` recording start and stop summaries, `steer_learner` status/reason. edgemapd and efficiencyd
   now keep recording through a bad frame or failed save. Tests in `starpilot/tests/test_trace_coverage.py`.
+- **Self-learning fuel experiments** (2026-11-14): `starpilot/efficiency/experiment.py` (the experimenter: situations
+  launch / accelerate / follow / uphill / downhill / ev / pulse_glide / cruise, each with variants; untried variants
+  first, then the learned winner 4 in 5 and another 1 in 5; 15 s minimum episodes with entry/exit hysteresis; a
+  2.5 min/engaged-hour time budget for variants that cost time; downhill carry at most 2 mph), `experiment_host.py`
+  (plannerd: frame from sm, Pulse and Glide on/off through the coast owner with hand-back and the driver's choice
+  respected, status in /dev/shm for the ledger, `efficiency_experiment` decision log; config
+  `<efficiency>/experiment.json` mode on/off), `longitudinal_planner.update(efficiency_plan=...)` (lower cruise target,
+  the capped downhill carry over an unlimited set speed, a final positive-accel cap; leads/stops still win),
+  `ledger` stretches tagged `exp` and split on a variant change, `experiment_learn.py` (battery-adjusted BlueDriver gal
+  per mile, or per fixed window for launches; winner needs enough miles/episodes, 3 % gain and 80 % bootstrap
+  confidence; writes `<efficiency>/experiments.json` at the end of each drive). Tests in
+  `starpilot/efficiency/tests/test_experiment*.py`.
+- **Curve memory ignores turns** (2026-11-14): `curve_memory.PassTracker` marks a pass with the blinker on (or on in
+  the 3 s before) as verdict `turn`; `curvemapd.Shadow.finish` never learns it (intersection turns had taught tight
+  curves at slight mapped bends).
+- **Blinker turns trigger earlier** (2026-11-14): `blinker_turns.trigger_distance` = 3.2 s of travel + 7 m (fitted on
+  17 recorded map-timed turns; the old 1 s + 3 m started the turn 1.7 s after the driver's steering passed 45 deg).
+- **Radar braking shadow trigger** (2026-11-14): `features.LeadAccelShadow` fires below -1.2 m/s2 for 2 radar frames
+  (tuned on 392 segments: 90 % real, 8 false/hour, 0.2 s ahead of radard).
+- **Pulse and Glide badge** (2026-11-14): `onroad.py` `_pulse_glide_badge` ("P&G: pulse/glide/on/hill pause",
+  "Coasting") from `starpilotLongitudinalPlan` (`runtime_snapshot.pulse_glide_badge`; ui_state subscribes it as an
+  optional service).
 - **Tailscale on boot** (`eb47adb2ca`): `launch_chffrplus.sh` (`tailscale_init`).
 - **Partition links for AGNOS 20.5.1**: `launch_chffrplus.sh` (`partition_links`) recreates missing
   `/dev/disk/by-partlabel` links every boot; without `bluetooth_<slot>` the Bluetooth radio never starts (no

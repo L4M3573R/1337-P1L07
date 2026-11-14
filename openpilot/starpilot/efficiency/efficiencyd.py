@@ -18,6 +18,7 @@ from pathlib import Path
 
 from openpilot.starpilot.diagnostics.features import EVENT, ChangeLog, log_error
 from openpilot.starpilot.efficiency import store, tank as tank_store
+from openpilot.starpilot.efficiency.experiment import read_tag
 from openpilot.starpilot.efficiency.car_signals import MDPS11_ADDR, MODE_ADDR, CarSignals
 from openpilot.starpilot.efficiency.hybrid import Cluster, PowerFlow, scan
 from openpilot.starpilot.efficiency.ledger import Ledger, make_sample
@@ -33,7 +34,7 @@ ANNOUNCE_AFTER_S = 10.0   # the start event waits until the trace daemon (starte
 
 
 class Recorder:
-  def __init__(self, mass: float, drive_id: str, root: Path | None = None, checkpoint_s: float = CHECKPOINT_S,
+  def __init__(self, mass: float, drive_id: str | None, root: Path | None = None, checkpoint_s: float = CHECKPOINT_S,
                tank_path: Path | None = None):
     self.mass, self.drive_id, self.root, self.checkpoint_s = mass, drive_id, root, checkpoint_s
     self.tank_path = tank_path if tank_path is not None else (root / "tank.json" if root is not None else None)
@@ -50,6 +51,7 @@ class Recorder:
     self.ambient_c: float | None = None
     self.fuel_level: float | None = None
     self.position: tuple[float, float, float] | None = None  # lat, lon, bearing
+    self.experiment: str | None = None  # the fuel experiment in force (plannerd's status, read once a second)
     self._obd_prev: tuple[str, float] | None = None
     self._obd_total_g = 0.0
 
@@ -92,7 +94,7 @@ class Recorder:
     lat, lon, bearing = self.position if self.position is not None else (None, None, None)
     return {'drive_mode': self.signals.drive_mode, 'tire_avg': self.signals.tire_avg, 'tire_min': self.signals.tire_min,
             'map_limit': self.signals.map_limit, 'road_code': self.signals.road_code, 'ambient_c': self.ambient_c,
-            'fuel_level': self.fuel_level, 'lat': lat, 'lon': lon, 'bearing': bearing}
+            'fuel_level': self.fuel_level, 'lat': lat, 'lon': lon, 'bearing': bearing, 'experiment': self.experiment}
 
   def observe(self, t: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, device_motion=None,
               pulse_glide: str | None = None) -> None:
@@ -107,6 +109,10 @@ class Recorder:
 
   def save(self) -> None:
     try:
+      if self.drive_id is None:
+        # named at the first save (a minute in), once the clock has synced: at process start it can still read the
+        # previous boot's date (drives on 2026-11-14 were named 20261012)
+        self.drive_id = drive_id()
       if self.ledger.stretches:
         store.save_drive(self.drive_id, list(self.ledger.stretches), self.root, self.ledger.flow_hist)
       tank_store.save(self.tank, self.tank_path)
@@ -157,7 +163,7 @@ def main() -> None:
   sm = messaging.SubMaster(SERVICES, poll='radarState')
   can_sock = messaging.sub_sock('can', conflate=False)
   from openpilot.common.swaglog import cloudlog
-  recorder = Recorder(float(cp.mass), drive_id())
+  recorder = Recorder(float(cp.mass), None)
   last_obd_read = 0.0
   sources_log = ChangeLog('efficiency_sources', min_gap_s=5.0)
   started = time.monotonic()
@@ -183,6 +189,7 @@ def main() -> None:
           recorder.observe_obd(read_live(now=now))
         except Exception as e:
           log_error('efficiency', e, where='BlueDriver live file')
+        recorder.experiment = read_tag(now)
         sources_log.observe(recorder.sources(), {'ledger_stretches': len(recorder.ledger.stretches)}, now=now)
       if not announced and now - started >= ANNOUNCE_AFTER_S:
         announced = True
@@ -190,6 +197,12 @@ def main() -> None:
       recorder.maybe_checkpoint(now)
   finally:
     recorder.finish()
+    try:
+      # judge the fuel experiments with this drive included; the planner reads the winners next drive
+      from openpilot.starpilot.efficiency import experiment_learn
+      experiment_learn.update(recorder.root if recorder.root is not None else store.default_root())
+    except Exception as e:
+      log_error('efficiency', e, where='experiment learning')
     try:
       cloudlog.event(EVENT, feature='efficiency', what='stopped', drive=recorder.drive_id,
                      stretches=len(recorder.ledger.stretches), minutes=round((time.monotonic() - started) / 60, 1),

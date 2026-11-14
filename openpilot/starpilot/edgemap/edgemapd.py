@@ -26,7 +26,7 @@ def main() -> None:
 
   os.nice(10)
   sm = messaging.SubMaster(SERVICES, poll='modelV2')
-  log = DriveLog(drive_id())
+  log = DriveLog(None, name_drive=drive_id)  # named at the first save, once the clock has synced
   last_checkpoint = time.monotonic()
 
   from openpilot.common.swaglog import cloudlog

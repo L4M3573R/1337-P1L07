@@ -140,11 +140,13 @@ class Shadow:
     planned = [x for x in self.predictions if x['t'] <= p.start_t + p.duration and
                math.hypot((x['apex_lat'] - p.latitude) * 111_320.0,
                           (x['apex_lon'] - p.longitude) * 111_320.0 * math.cos(math.radians(p.latitude))) <= PREDICTION_MATCH_M]
-    record = self.memory.learn(p)
+    # a turn or lane change is logged but never learned (it is not the road's curve)
+    record = self.memory.learn(p) if p.verdict != 'turn' else None
     live, self.live = self.live, {}
     self.ratios.clear()
-    line = {'curve': asdict(p), 'experimental': experimental, 'learned_comfort': round(record.comfort, 2),
-            'curve_passes': record.passes, 'map_seen': bool(planned),
+    line = {'curve': asdict(p), 'experimental': experimental,
+            'learned_comfort': round(record.comfort if record is not None else self.memory.comfort.comfort(p.curvature), 2),
+            'curve_passes': record.passes if record is not None else 0, 'map_seen': bool(planned),
             'live': {k: round(v, 3) if isinstance(v, float) else v for k, v in live.items()},
             'would_lower_mid_curve': 'lowered_to' in live}
     if planned:
@@ -288,7 +290,8 @@ def sample_from(sm) -> Sample:
   return Sample(sm.logMonoTime['carState'] / 1e9, float(cs.vEgo), measured_curvature(sm), bool(cc.latActive),
                 bool(cc.longActive), bool(cs.brakePressed), bool(cs.gasPressed), bool(cs.steeringPressed), saturated,
                 bool(cs.cruiseState.enabled), float(gps.latitude), float(gps.longitude), float(gps.bearingDeg),
-                float(cs.steeringTorque), float(cc.actuators.torque), *lead_of(sm, float(cs.vEgo)))
+                float(cs.steeringTorque), float(cc.actuators.torque), *lead_of(sm, float(cs.vEgo)),
+                blinker=bool(cs.leftBlinker or cs.rightBlinker))
 
 
 def lead_of(sm, v: float) -> tuple[float, float]:

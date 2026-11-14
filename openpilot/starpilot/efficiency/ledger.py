@@ -63,6 +63,7 @@ class Sample:
   lat: float | None = None
   lon: float | None = None
   bearing: float | None = None  # degrees from north
+  experiment: str | None = None  # 'category|context|variant' of the fuel experiment in force (experiment.py)
 
 
 def make_sample(t: float, mass: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, device_motion=None,
@@ -128,6 +129,7 @@ class Stretch:
   ambient_n: int = 0
   level_first: float | None = None
   level_last: float | None = None
+  experiment: str | None = None  # the fuel experiment in force for the whole stretch
   lat: float | None = None
   lon: float | None = None
   bearing: float | None = None
@@ -170,6 +172,7 @@ class Stretch:
       'ambient_c': r(self.ambient_sum / self.ambient_n if self.ambient_n else None, 1),
       'level0': r(self.level_first, 1), 'level1': r(self.level_last, 1),
       'lat': r(self.lat, 5), 'lon': r(self.lon, 5), 'bearing': r(self.bearing, 0),
+      'exp': self.experiment,
     }
 
   @property
@@ -238,9 +241,10 @@ class Ledger:
       self._soc_accepted, self._soc_pending = raw, []
     return self._soc_accepted
 
-  def _new(self, mode: str, t: float) -> Stretch:
+  def _new(self, mode: str, t: float, experiment: str | None = None) -> Stretch:
     return Stretch(mode, t, t, fuel_first=self._fuel_carry, fuel_last=self._fuel_carry,
-                   obd_first=self._obd_carry, obd_last=self._obd_carry, soc_first=self._soc_carry, soc_last=self._soc_carry)
+                   obd_first=self._obd_carry, obd_last=self._obd_carry, soc_first=self._soc_carry, soc_last=self._soc_carry,
+                   experiment=experiment)
 
   def _track_obd(self, sample: Sample) -> None:
     s = self._open
@@ -284,13 +288,13 @@ class Ledger:
       if self._open is not None:
         self._open.fuel_last = sample.fuel_gal
     if self._open is None:
-      self._open = self._new(mode, sample.t)
+      self._open = self._new(mode, sample.t, sample.experiment)
       return
     if not 0.0 < dt <= 1.0:  # gap in the log: start a fresh stretch
       self._close(last.t if last is not None else sample.t)
       self._fuel_carry = self._obd_carry = self._soc_carry = None
       self._soc_accepted, self._soc_pending = None, []
-      self._open = self._new(mode, sample.t)
+      self._open = self._new(mode, sample.t, sample.experiment)
       self._track_obd(sample)
       return
     s = self._open
@@ -321,9 +325,11 @@ class Ledger:
     if sample.power_meter is not None and math.isfinite(sample.power_meter):
       s.meter_sum += sample.power_meter
       s.meter_n += 1
-    if mode != s.mode or mode_switch or s.distance >= STRETCH_M or s.duration >= STRETCH_S:
+    # a new fuel experiment variant starts a new stretch, so each stretch's fuel belongs to one variant
+    if (mode != s.mode or mode_switch or s.distance >= STRETCH_M or s.duration >= STRETCH_S or
+        sample.experiment != s.experiment):
       self._close(sample.t)
-      self._open = self._new(mode, sample.t)
+      self._open = self._new(mode, sample.t, sample.experiment)
 
   def _observe_flow(self, sample: Sample) -> None:
     flat_accel = sample.accel + (G * math.sin(sample.pitch) if sample.pitch is not None else 0.0)

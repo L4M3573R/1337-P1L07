@@ -154,7 +154,8 @@ class LongitudinalPlanner:
              lead_approach_key: LeadApproachKey | None = None,
              force_stop_provider: Callable[[float], StopPlan] | None = None,
              faster_lead_takeoff: bool = False, takeoff_drive_id: int = 0,
-             now_ns: int | None = None, drive_id: int = 0, wheel_coast=None, experimental_speed_nudge: bool = True):
+             now_ns: int | None = None, drive_id: int = 0, wheel_coast=None, experimental_speed_nudge: bool = True,
+             efficiency_plan=None):
     if curve_ceiling is not None and curve_provider is not None:
       raise ValueError('choose explicit Curve ceiling or same-cycle provider')
     if self.plan_drive_id != drive_id:
@@ -324,6 +325,13 @@ class LongitudinalPlanner:
       self.coast_log = (coast_plan, owner)
       if coast_plan.speed_ceiling_mps is not None:
         v_cruise = min(v_cruise, coast_plan.speed_ceiling_mps)
+    # 1337 fuel experiments (starpilot/efficiency/experiment.py): a lower cruise target, or the downhill carry (at most
+    # 2 mph) over a set speed nothing else is limiting; leads, stops and Force Stop still win in the plan below.
+    if efficiency_plan is not None:
+      if efficiency_plan.speed_ceiling_mps is not None:
+        v_cruise = min(v_cruise, efficiency_plan.speed_ceiling_mps)
+      elif efficiency_plan.speed_bonus_mps > 0 and v_cruise >= v_cruise_kph * CV.KPH_TO_MS - 0.05:
+        v_cruise += min(efficiency_plan.speed_bonus_mps, 2.0 * CV.MPH_TO_MS)
     if sm['controlsState'].forceDecel or coast_plan is not None and coast_plan.force_decel:
       v_cruise = 0.0
 
@@ -494,6 +502,8 @@ class LongitudinalPlanner:
       output_a_target, self.output_should_stop = self.ford_stop_approach.sample(
         sm, now_ns=sample_now_ns, drive_id=drive_id, target=float(output_a_target),
         stopping=self.output_should_stop, accel_min=ACCEL_MIN, active=profile_eligible and not reset_state)
+    if efficiency_plan is not None and efficiency_plan.accel_max is not None:
+      output_a_target = min(output_a_target, efficiency_plan.accel_max)   # fuel experiment: a gentler throttle only
     self.output_a_target = np.clip(output_a_target, ACCEL_MIN, accel_ceiling)
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0

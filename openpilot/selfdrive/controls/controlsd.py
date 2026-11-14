@@ -223,7 +223,7 @@ class Controls:
       except (OSError, ValueError):
         offset = 0.0
       body = interface_dimensions(self.CI, self.CP)
-      self.curve_guard_log = ChangeLog('curve_guard')
+      self.curve_guard_log = ChangeLog('curve_guard', min_gap_s=1.0)  # folds on/off flicker on gentle curves
       return CurveGuard(body.width if body is not None else None, camera_offset_left_m=-offset, enabled=enabled)
     except Exception:
       cloudlog.exception('curve guard setup failed; off')

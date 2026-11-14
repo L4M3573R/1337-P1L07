@@ -124,6 +124,23 @@ def current_message(sm: Any, service: str, now_ns: int, *, after_frame: int = 0,
   return _message_at_age(sm, service, now_ns, after_frame, max_age_ns)
 
 
+def pulse_glide_badge(plan: Any | None) -> str | None:
+  """The Pulse and Glide badge from the current planner message: None when the mode is off (or no fresh message)."""
+  try:
+    if plan is None:
+      return None
+    phase = str(plan.pulseGlidePhase)
+    if phase == 'forceCoast':
+      return 'coast'
+    if not plan.pulseGlideEnabled:
+      return None
+    if plan.pulseGlideHillPaused:
+      return 'hill'
+    return phase if phase in ('pulse', 'glide') else 'waiting'
+  except (AttributeError, TypeError, ValueError):
+    return None
+
+
 def display_message(sm: Any, service: str, now_ns: int, *, after_frame: int = 0) -> Any | None:
   """Allow a bounded UI frame gap without extending control-action freshness."""
   max_age_ns = 200_000_000
@@ -487,6 +504,8 @@ class RuntimeSnapshotAdapter:
     display_model = display_message(sm, "modelV2", now_ns, after_frame=after) if started else None
     display_radar = display_message(sm, "radarState", now_ns, after_frame=after) if started else None
     display_plan = display_message(sm, 'longitudinalPlan', now_ns, after_frame=after) if started else None
+    pulse_glide = pulse_glide_badge(display_message(sm, 'starpilotLongitudinalPlan', now_ns, after_frame=after)
+                                    if started else None)
     display_events = _message_at_age(sm, 'onroadEvents', now_ns, after, EVENTS_DISPLAY_MAX_AGE_NS) if started else None
     display_monitor = display_message(sm, 'driverMonitoringState', now_ns, after_frame=after) if started else None
     if display_monitor is not None:
@@ -749,6 +768,7 @@ class RuntimeSnapshotAdapter:
                          traffic_mode=bool(traffic is not None and traffic.state == 'active'),
                          traffic_selected=bool(started and self._traffic.drive_id == drive_id and self._traffic.requested),
                          traffic_display=traffic,
+                         pulse_glide=pulse_glide,
                          torque_utilization=torque.utilization if torque.utilization is not None else 0.0,
                          torque_source_available=torque.utilization is not None,
                          torque_is_demand=torque.source == "lateral_acceleration_demand",

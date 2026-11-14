@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -77,8 +78,9 @@ def sample_row(t: float, model, car_state, car_control=None, device_motion=None,
 
 
 class DriveLog:
-  def __init__(self, drive_id: str, root: Path | None = None, period_s: float = SAMPLE_PERIOD_S):
+  def __init__(self, drive_id: str | None, root: Path | None = None, period_s: float = SAMPLE_PERIOD_S, name_drive=None):
     self.drive_id, self.root, self.period_s = drive_id, root, period_s
+    self.name_drive = name_drive   # names the drive at its first save, once the clock has synced
     self.rows: list[list[float]] = []
     self._last_t: float | None = None
 
@@ -95,6 +97,8 @@ class DriveLog:
   def save(self) -> Path | None:
     if not self.rows:
       return None
+    if self.drive_id is None:
+      self.drive_id = self.name_drive() if self.name_drive is not None else time.strftime('%Y%m%d-%H%M%S')
     return save_drive(self.drive_id, np.asarray(self.rows, dtype=np.float64), self.root)
 
 

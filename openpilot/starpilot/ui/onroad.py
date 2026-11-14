@@ -224,6 +224,20 @@ class OnroadView:
     x = 1390 + (self.projection_viewport[0] if self.projection_viewport else state.viewport_width) - 1860
     self.fonts.draw(state.traffic_display.label, FontRole.SEMI_BOLD, 25, x, y, traffic_color)
 
+  PULSE_GLIDE_LABELS = {'pulse': ('P&G: pulse', rl.Color(255, 191, 0, 255)),
+                        'glide': ('P&G: glide', rl.Color(80, 220, 120, 255)),
+                        'waiting': ('P&G: on', rl.Color(165, 175, 180, 255)),
+                        'hill': ('P&G: hill pause', rl.Color(165, 175, 180, 255)),
+                        'coast': ('Coasting', rl.Color(80, 220, 120, 255))}
+
+  def _pulse_glide_badge(self, state: OnroadState, y: int) -> None:
+    """1337: Pulse and Glide had no on-screen state, so a toggle could not be seen (and a second press undid it)."""
+    shown = self.PULSE_GLIDE_LABELS.get(state.pulse_glide) if state.pulse_glide else None
+    if shown is None or state.alert.size == AlertSize.FULL:
+      return
+    x = 1390 + (self.projection_viewport[0] if self.projection_viewport else state.viewport_width) - 1860
+    self.fonts.draw(shown[0], FontRole.SEMI_BOLD, 25, x, y, shown[1])
+
   def _driving_mode(self, state: OnroadState, center_shift: float = 0) -> None:
     profile = self.fonts.profile
     position = placement(state.customization, profile, MODE_WIDGET)
@@ -469,6 +483,7 @@ class OnroadView:
       self.fonts.draw(label, FontRole.SEMI_BOLD, 29, 1390 + right_shift, 56,
                       curve_color)
     self._traffic_badge(state, 56 + 45 * int(label is not None))
+    self._pulse_glide_badge(state, 56 + 45 * (int(label is not None) + int(state.traffic_display is not None)))
     render_glow(content, state, border_width=30, time_s=state.observed_ns / 1e9 if state.observed_ns else rl.get_time(),
                 phase=getattr(self, "_curve_glow_phase", None))
     rl.draw_rectangle_lines_ex(frame, 30, rl.BLACK)

@@ -197,6 +197,7 @@ class OnroadState:
   traffic_mode: bool = False
   traffic_selected: bool = False
   traffic_display: TrafficDisplay | None = None
+  pulse_glide: str | None = None   # Pulse and Glide badge: 'pulse', 'glide', 'coast', 'hill', 'waiting', or None when off
   aol_latched: bool | None = None
   aol_armed_at_stop: bool = False
   lateral_active: bool = False

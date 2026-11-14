@@ -101,6 +101,9 @@ class UIState:
     self.projection_read_only = os.environ.get("STARPILOT_PROJECTION_READ_ONLY") == "1"
     params = Params()
     self.params = ProjectionParams(params) if self.projection_read_only else params
+    # display-only inputs: missing or late ones never mark the UI unhealthy
+    optional = ["slcVisionObservation", "starpilotLongitudinalPlan", "starpilotSelfdriveState", "starpilotLateralState",
+                "aolAxisState", "starpilotCarState"]
     self.sm = messaging.SubMaster(
       [
         "modelV2",
@@ -135,15 +138,16 @@ class UIState:
         "aolIntentWire",
         "slcState",
         "slcVisionObservation",
+        "starpilotLongitudinalPlan",
         "vehicleParameters",
         "testJoystick",
         "rawAudioData",
         *(["customReserved6", "cabinCameraState", "narrowRoadEncodeIdx", "wideRoadEncodeIdx", "cabinEncodeIdx"]
           if self.replay_clock is not None else []),
       ],
-      ignore_alive=["slcVisionObservation", "starpilotSelfdriveState", "starpilotLateralState", "aolAxisState", "starpilotCarState"],
-      ignore_valid=["slcVisionObservation", "starpilotSelfdriveState", "starpilotLateralState", "aolAxisState", "starpilotCarState"],
-      ignore_avg_freq=["slcVisionObservation", "starpilotSelfdriveState", "starpilotLateralState", "aolAxisState", "starpilotCarState"],
+      ignore_alive=optional,
+      ignore_valid=optional,
+      ignore_avg_freq=optional,
     )
 
     self.prime_state = ProjectionPrimeState(self.params) if self.replay_clock is not None or isinstance(self.params, ProjectionParams) else PrimeState()

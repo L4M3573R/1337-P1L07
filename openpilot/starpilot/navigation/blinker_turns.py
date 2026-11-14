@@ -56,9 +56,17 @@ def mode(path: Path | None = None) -> str:
   return value if value in MODES else 'shadow'
 
 
+TRIGGER_S = 3.2   # seconds of travel before the side road's centreline...
+TRIGGER_M = 7.0   # ...plus this, so the turn starts ~1 s before the steering passes 45 degrees
+
+
 def trigger_distance(v_ego: float) -> float:
-  """How far before the junction (road centreline) the turn starts: about a second of travel, at least 5 m."""
-  return max(5.0, v_ego * 1.0 + 3.0)
+  """How far before the junction (the side road's centreline) the turn starts.
+
+  Fitted on 17 map-timed blinker turns (2026-11-14): at the old 1 s + 3 m the turn began a median 1.7 s after the
+  driver's steering had passed 45 degrees (the driver starts turning well before the centreline, and GPS lags);
+  3.2 s + 7 m starts it a median 1.3 s before (10-90%: 1.7-0.4 s before)."""
+  return max(5.0, v_ego * TRIGGER_S + TRIGGER_M)
 
 
 @dataclass(frozen=True)
