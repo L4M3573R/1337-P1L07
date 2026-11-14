@@ -99,6 +99,7 @@ class Frame:
   soc: float | None = None      # hybrid battery %, from the BlueDriver
   pulse_glide_by_driver: bool = False  # the driver chose Pulse and Glide on or off this drive: leave it alone
   a_ego: float = 0.0            # m/s^2: a speed-up episode only starts while the car is actually speeding up
+  blinker: bool = False         # a turn signal is on: a turn or lane change is coming, no experiment
 
 
 @dataclass(frozen=True)
@@ -205,7 +206,7 @@ class Experimenter:
   # ---------- situations ----------
   def situation(self, f: Frame) -> tuple[str, str] | None:
     """(category, context) the car is in now, or None (no experiment applies)."""
-    if not f.long_active or f.gas or f.brake or f.stop_ahead:
+    if not f.long_active or f.gas or f.brake or f.stop_ahead or f.blinker:
       return None
     ep = self.episode
     if ep is not None and self._continues(ep, f):

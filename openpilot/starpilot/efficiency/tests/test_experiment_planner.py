@@ -44,3 +44,14 @@ class ExperimentPlannerTests(unittest.TestCase):
     asked_too_much = self.run_pair(Plan(speed_bonus_mps=10.0))
     allowed = self.run_pair(Plan(speed_bonus_mps=2 * 0.44704))
     self.assertEqual([b for _, b in asked_too_much], [b for _, b in allowed])   # clipped to the 2 mph allowance
+
+  def test_turn_speed_ceiling_only_lowers_and_the_car_ahead_still_wins(self):
+    for lead in (False, True):   # fresh planners per case: their speed state must start equal
+      plain, tested = LongitudinalPlanner(self.cp, init_v=V_EGO), LongitudinalPlanner(self.cp, init_v=V_EGO)
+      for _ in range(FRAMES):
+        sm, _ = messages(lead=lead)
+        plain.update(sm)
+        sm, _ = messages(lead=lead)
+        tested.update(sm, turn_ceiling_mps=5.0)   # a turn at 11 mph while doing 45
+        self.assertLessEqual(float(tested.output_a_target), float(plain.output_a_target) + 1e-6)
+      self.assertLess(float(tested.output_a_target), 0.0)   # it slows for the turn

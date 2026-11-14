@@ -96,7 +96,7 @@ class ExperimentHost:
                         (lead.present and lead.vLead < 1.0 and lead.dRel < 60.0))
       frame = Frame(now, v_ego, float(cs.vCruise) * KPH_TO_MS, bool(cc.longActive and cc.enabled), bool(cs.gasPressed),
                     bool(cs.brakePressed), bool(cs.standstill), grade, gap, stop_ahead, self.soc, self.driver_pulse_glide,
-                    float(cs.aEgo))
+                    float(cs.aEgo), bool(cs.leftBlinker or cs.rightBlinker))
       plan = self.exp.sample(frame)
       if self.exp.vetoes != self.saved_vetoes:   # the driver pressed on during a slower variant: remember it
         # merge with the file (it may have gained entries since the drive began), keeping the higher count

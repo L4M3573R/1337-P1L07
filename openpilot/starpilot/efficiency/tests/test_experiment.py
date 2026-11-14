@@ -188,3 +188,11 @@ def test_no_speed_up_test_while_still_slowing():
   assert not (p.tag or '').startswith('accelerate')
   p = exp.sample(cruise(0.05, v=15 * MPH, v_set=40 * MPH, a_ego=0.6))
   assert (p.tag or '').startswith('accelerate')
+
+
+
+def test_no_experiment_with_a_turn_signal_on():
+  exp = Experimenter()
+  assert exp.sample(cruise(0.0, grade=0.04)).tag
+  p = exp.sample(cruise(0.05, grade=0.04, blinker=True))
+  assert p.tag is None and p.speed_ceiling_mps is None

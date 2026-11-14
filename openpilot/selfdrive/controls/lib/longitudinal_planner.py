@@ -155,7 +155,7 @@ class LongitudinalPlanner:
              force_stop_provider: Callable[[float], StopPlan] | None = None,
              faster_lead_takeoff: bool = False, takeoff_drive_id: int = 0,
              now_ns: int | None = None, drive_id: int = 0, wheel_coast=None, experimental_speed_nudge: bool = True,
-             efficiency_plan=None):
+             efficiency_plan=None, turn_ceiling_mps: float | None = None):
     if curve_ceiling is not None and curve_provider is not None:
       raise ValueError('choose explicit Curve ceiling or same-cycle provider')
     if self.plan_drive_id != drive_id:
@@ -327,6 +327,9 @@ class LongitudinalPlanner:
         v_cruise = min(v_cruise, coast_plan.speed_ceiling_mps)
     # 1337 fuel experiments (starpilot/efficiency/experiment.py): a lower cruise target, or the downhill carry (at most
     # 2 mph) over a set speed nothing else is limiting; leads, stops and Force Stop still win in the plan below.
+    # 1337 turn speed (starpilot/navigation/turn_speed.py): ease to the learned speed for a signalled turn
+    if turn_ceiling_mps is not None and math.isfinite(turn_ceiling_mps) and turn_ceiling_mps > 0:
+      v_cruise = min(v_cruise, turn_ceiling_mps)
     if efficiency_plan is not None:
       if efficiency_plan.speed_ceiling_mps is not None:
         v_cruise = min(v_cruise, efficiency_plan.speed_ceiling_mps)

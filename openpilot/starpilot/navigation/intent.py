@@ -144,6 +144,14 @@ class TurnIntent:
                                         nudged_toward(side, cs.steeringPressed, cs.steeringTorque))
     self.turn_distance = decision.distance_m
     self.shadow_turning, self.shadow_reason = decision.turning, decision.reason
+    # for plannerd's turn speed (turn_speed.py): side, turn under way, distance to the side road and its angle
+    if now_ns - getattr(self, '_turn_status_ns', 0) >= 100_000_000:
+      self._turn_status_ns = now_ns
+      road = lookup.road if lookup is not None else None
+      from openpilot.starpilot.navigation.turn_speed import write_status
+      write_status({'t': now_ns / 1e9, 'side': side, 'turning': bool(decision.turning),
+                    'distance_m': decision.distance_m if road is not None else None,
+                    'angle_deg': float(road.angle_deg) if road is not None else None})
     if decision.turning and not was_turning:
       self.shadow_start_m = None if decision.distance_m is None else round(decision.distance_m)
     elif not decision.turning:

@@ -149,6 +149,14 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   per mile, or per fixed window for launches; winner needs enough miles/episodes, 3 % gain and 80 % bootstrap
   confidence; writes `<efficiency>/experiments.json` at the end of each drive). Tests in
   `starpilot/efficiency/tests/test_experiment*.py`.
+- **Turn speed for signalled turns** (2026-11-14): `starpilot/navigation/turn_speed.py`. modeld's blinker-turn logic
+  (`intent._timed_turn`) publishes side / turning / distance to the side road / its map angle to
+  /dev/shm/starpilot_turn_status.json; plannerd's `TurnSpeedHost` caps the cruise target (`longitudinal_planner.update(
+  turn_ceiling_mps=...)`) to ease at 1 m/s2 to the learned turn speed where the turn begins (`blinker_turns.trigger_distance`)
+  and hold it through the turn. `TurnLearner` learns the slowest speed through every signalled turn of 60 deg+ (yaw
+  rate) per side and sharpness (map angle: shallow < 70, square 70-110, sharp > 110, unknown): the driver's own speed,
+  or for comma-driven turns the braked-to / pressed-to speed (no pedal confirms); <storage>/turn_speed.json (seeded
+  from 35 recorded turns: right 10.7, left 10.3 mph). Fuel experiments skip while a turn signal is on.
 - **Curve memory ignores turns** (2026-11-14): `curve_memory.PassTracker` marks a pass with the blinker on (or on in
   the 3 s before) as verdict `turn`; `curvemapd.Shadow.finish` never learns it (intersection turns had taught tight
   curves at slight mapped bends).
