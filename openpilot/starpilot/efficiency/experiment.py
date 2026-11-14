@@ -40,9 +40,15 @@ FOLLOW_GAP_S = 3.0             # a car ahead within this time gap starts "follow
 FOLLOW_EXIT_GAP_S = 4.5        # ...which lasts until the gap opens past this
 RAMP_MPS2 = 0.3                # how fast a speed offset is put on or taken off
 DOWNHILL_CARRY_MPH = 2.0
-ACCEL_VARIANTS = {'gentle': 0.5, 'moderate': 0.9}   # m/s^2 caps for launches and speeding up ('normal': the planner's)
-NORMAL_ACCEL = 1.2             # about the planner's own cruise acceleration, for the time-cost estimate
-ACCELERATE_GAP_MPS = 3 * MPH   # the set speed this far above the car's speed: an "accelerate" episode
+# Launches and speeding up: a share of the planner's own acceleration at that speed ('normal': the planner's). A fixed
+# 0.5 m/s2 (a third of normal at 11 mph) was far too slow on 2026-11-14 and the driver had to press on.
+ACCEL_VARIANTS = {'gentle': 0.75, 'moderate': 0.9}
+NORMAL_ACCEL_BP = (0.0, 10.0, 25.0, 40.0)   # m/s: the planner's A_CRUISE_MAX table
+NORMAL_ACCEL_V = (1.6, 1.2, 0.8, 0.6)
+VETO_LIMIT = 2                 # the driver pressed the gas during a slower variant this many times: never offer it there
+SLOWER_VARIANTS = {'gentle', 'moderate', 'smooth', 'sag3', 'under2', 'under4'}
+ACCELERATE_GAP_MPS = 3 * MPH   # the set speed this far above the car's speed: an "accelerate" episode...
+ACCELERATE_MIN_ACCEL = 0.1     # ...once the car is actually speeding up (not still slowing behind a car or into a turn)
 FOLLOW_SMOOTH_ACCEL = 0.6
 EV_GENTLE_ACCEL = 0.3
 SPEED_BANDS = ((30 * MPH, '25-30'), (45 * MPH, '30-45'), (60 * MPH, '45-60'), (math.inf, '60+'))
@@ -63,6 +69,17 @@ COSTS_TIME = {('launch', 'gentle'), ('launch', 'moderate'), ('accelerate', 'gent
 UNDER_MPH = {'sag3': 3.0, 'under2': 2.0, 'under4': 4.0}
 
 
+def normal_accel(v: float) -> float:
+  """About the planner's own cruise acceleration limit at speed v (its A_CRUISE_MAX table)."""
+  bp, val = NORMAL_ACCEL_BP, NORMAL_ACCEL_V
+  if v <= bp[0]:
+    return val[0]
+  for (x0, y0), (x1, y1) in zip(zip(bp, val, strict=True), zip(bp[1:], val[1:], strict=True), strict=False):
+    if v <= x1:
+      return y0 + (y1 - y0) * (v - x0) / (x1 - x0)
+  return val[-1]
+
+
 def band(v: float) -> str:
   return next(name for top, name in SPEED_BANDS if v < top)
 
@@ -81,6 +98,7 @@ class Frame:
   stop_ahead: bool = False      # Force Stop, the model's stop, or a stopping lead
   soc: float | None = None      # hybrid battery %, from the BlueDriver
   pulse_glide_by_driver: bool = False  # the driver chose Pulse and Glide on or off this drive: leave it alone
+  a_ego: float = 0.0            # m/s^2: a speed-up episode only starts while the car is actually speeding up
 
 
 @dataclass(frozen=True)
@@ -131,6 +149,25 @@ def read_tag(now: float, path: Path = STATUS_PATH) -> str | None:
   return None
 
 
+def load_vetoes(path: Path | None) -> dict[str, int]:
+  """{'category|context|variant': times the driver pressed on during it} across drives."""
+  try:
+    doc = json.loads(path.read_text()) if path is not None else {}
+    return {k: int(v) for k, v in doc.get('vetoes', {}).items() if isinstance(k, str) and k.count('|') == 2}
+  except (OSError, ValueError, TypeError, AttributeError):
+    return {}
+
+
+def save_vetoes(path: Path, vetoes: dict[str, int]) -> None:
+  try:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps({'version': 1, 'vetoes': vetoes}, indent=1))
+    tmp.replace(path)
+  except OSError:
+    pass
+
+
 def load_winners(path: Path | None) -> dict[str, str]:
   """{'category|context': variant} learned so far; {} when there is no (valid) file yet."""
   try:
@@ -158,6 +195,8 @@ class Experimenter:
   last_t: float | None = None
   was_standstill: bool = False
   cruise_turn: int = 0           # alternates the cruising experiments between Pulse and Glide and cruise speed
+  vetoes: dict[str, int] = field(default_factory=dict)   # 'category|context|variant' -> driver gas presses (all drives)
+  vetoed_episode: int = 0        # the episode a veto was already counted for
 
   # ---------- budget ----------
   def budget_left_s(self) -> float:
@@ -173,6 +212,11 @@ class Experimenter:
       return ep.category, ep.context
     return self._enter(f)
 
+  def _own_target(self, f: Frame) -> float:
+    """The speed the car is actually being asked for: the set speed less what an experiment is still taking off it
+    (a gap an experiment made itself is ramped away, never treated as a speed-up to experiment on)."""
+    return f.v_set + min(self.offset_mps, 0.0)
+
   def _ev_ok(self, f: Frame, margin: float = 0.0) -> bool:
     return (5.0 < f.v_ego < EV_MAX_MPS + margin and f.soc is not None and f.soc >= EV_MIN_SOC and
             abs(f.v_ego - f.v_set) < 3.0 + margin)
@@ -183,7 +227,7 @@ class Experimenter:
     if f.standstill:
       return False
     if ep.category == 'accelerate':
-      return f.v_set - f.v_ego > 1.0
+      return self._own_target(f) - f.v_ego > 1.0
     dwell = f.t - ep.start_t < MIN_EPISODE_S
     if ep.category == 'follow':
       return dwell or f.lead_gap_s < FOLLOW_EXIT_GAP_S
@@ -203,7 +247,7 @@ class Experimenter:
       return None
     if f.lead_gap_s < FOLLOW_GAP_S and f.v_ego > 5.0:
       return 'follow', band(f.v_ego)
-    if f.v_ego > 5.0 and f.v_set - f.v_ego > ACCELERATE_GAP_MPS:
+    if f.v_ego > 5.0 and f.a_ego > ACCELERATE_MIN_ACCEL and self._own_target(f) - f.v_ego > ACCELERATE_GAP_MPS:
       return 'accelerate', band(f.v_set)   # learned per target speed
     if f.v_ego >= CRUISE_MIN_MPS and f.grade is not None and f.grade > GRADE_ENTER:
       return 'uphill', band(f.v_ego)
@@ -223,7 +267,8 @@ class Experimenter:
 
   def draw(self, category: str, context: str) -> str:
     variants = CATEGORIES[category]
-    allowed = [v for v in variants if (category, v) not in COSTS_TIME or self.budget_left_s() > 0]
+    allowed = [v for v in variants if ((category, v) not in COSTS_TIME or self.budget_left_s() > 0) and
+               self.vetoes.get(f'{category}|{context}|{v}', 0) < VETO_LIMIT]
     if len(allowed) == 1:
       return allowed[0]
     winner = self.winners.get(f'{category}|{context}')
@@ -249,6 +294,12 @@ class Experimenter:
   def _sample(self, f: Frame) -> Plan:
     dt = 0.0 if self.last_t is None else min(max(f.t - self.last_t, 0.0), 0.5)
     self.last_t = f.t
+    ep = self.episode
+    if f.gas and ep is not None and ep.variant in SLOWER_VARIANTS and self.vetoed_episode != ep.number:
+      # the driver pressed on during a slower variant: it was not acceptable here
+      self.vetoed_episode = ep.number
+      key = ep.tag()
+      self.vetoes[key] = self.vetoes.get(key, 0) + 1
     if f.long_active:
       self.engaged_s += dt
       self.distance_m += max(f.v_ego, 0.0) * dt
@@ -268,7 +319,8 @@ class Experimenter:
         if ep.category in ('launch', 'accelerate') and variant in ACCEL_VARIANTS:
           # speeding up by dv at a takes dv / (2 a) longer than being at speed: the extra over the normal rate
           dv = max(min(f.v_set, LAUNCH_END_MPS) if ep.category == 'launch' else f.v_set - f.v_ego, 0.0)
-          self.spent_s += dv / 2.0 * (1.0 / ACCEL_VARIANTS[variant] - 1.0 / NORMAL_ACCEL)
+          normal = normal_accel(f.v_ego + dv / 2.0)
+          self.spent_s += dv / 2.0 * (1.0 / (ACCEL_VARIANTS[variant] * normal) - 1.0 / normal)
     self.was_standstill = f.standstill
     return self._plan(f, ep, dt)
 
@@ -283,7 +335,7 @@ class Experimenter:
       elif ep.category == 'downhill' and v == 'carry2':
         target_offset = DOWNHILL_CARRY_MPH * MPH
       elif ep.category in ('launch', 'accelerate') and v in ACCEL_VARIANTS:
-        accel_max = ACCEL_VARIANTS[v]
+        accel_max = ACCEL_VARIANTS[v] * normal_accel(f.v_ego)
       elif ep.category == 'follow' and v == 'smooth':
         accel_max = FOLLOW_SMOOTH_ACCEL
       elif ep.category == 'ev' and v == 'gentle':

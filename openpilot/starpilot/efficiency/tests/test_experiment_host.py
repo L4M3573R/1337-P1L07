@@ -10,7 +10,7 @@ MPH = ex.MPH
 
 def sm(v=50 * MPH, set_mph=50, grade_pitch=0.0, lead=None, gas=False, brake=False, standstill=False):
   lead = lead or NS(present=False, dRel=0.0, vLead=0.0)
-  return {'carState': NS(vEgo=v, vCruise=set_mph * 1.609344, gasPressed=gas, brakePressed=brake, standstill=standstill),
+  return {'carState': NS(vEgo=v, aEgo=0.0, vCruise=set_mph * 1.609344, gasPressed=gas, brakePressed=brake, standstill=standstill),
           'carControl': NS(longActive=True, enabled=True, orientationNED=[0.0, grade_pitch, 0.0]),
           'radarState': NS(leadOne=lead), 'modelV2': NS(action=NS(shouldStop=False)), 'controlsState': NS(forceDecel=False)}
 

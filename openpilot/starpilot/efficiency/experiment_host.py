@@ -12,7 +12,8 @@ import math
 import time
 from pathlib import Path
 
-from openpilot.starpilot.efficiency.experiment import STATUS_PATH, Experimenter, Frame, Plan, load_winners, write_status
+from openpilot.starpilot.efficiency.experiment import (STATUS_PATH, Experimenter, Frame, Plan, load_vetoes, load_winners,
+                                                       save_vetoes, write_status)
 
 KPH_TO_MS = 1 / 3.6
 SOC_READ_S = 1.0
@@ -53,7 +54,9 @@ class ExperimentHost:
     root = self.root if self.root is not None else efficiency_root()
     self.drive = drive
     self.enabled = mode(root) == 'on'
-    self.exp = Experimenter(winners=load_winners(root / 'experiments.json'))
+    self.root_now = root
+    self.exp = Experimenter(winners=load_winners(root / 'experiments.json'), vetoes=load_vetoes(root / 'vetoes.json'))
+    self.saved_vetoes = dict(self.exp.vetoes)
     self.driver_pulse_glide = False
     self.we_turned_pulse_glide_on = False
     from openpilot.starpilot.diagnostics.features import ChangeLog
@@ -92,8 +95,12 @@ class ExperimentHost:
       stop_ahead = bool(force_stop_forcing or sm['modelV2'].action.shouldStop or sm['controlsState'].forceDecel or
                         (lead.present and lead.vLead < 1.0 and lead.dRel < 60.0))
       frame = Frame(now, v_ego, float(cs.vCruise) * KPH_TO_MS, bool(cc.longActive and cc.enabled), bool(cs.gasPressed),
-                    bool(cs.brakePressed), bool(cs.standstill), grade, gap, stop_ahead, self.soc, self.driver_pulse_glide)
+                    bool(cs.brakePressed), bool(cs.standstill), grade, gap, stop_ahead, self.soc, self.driver_pulse_glide,
+                    float(cs.aEgo))
       plan = self.exp.sample(frame)
+      if self.exp.vetoes != self.saved_vetoes:   # the driver pressed on during a slower variant: remember it
+        self.saved_vetoes = dict(self.exp.vetoes)
+        save_vetoes(self.root_now / 'vetoes.json', self.saved_vetoes)
       self._apply_pulse_glide(plan, owner)
       if now >= self.next_status or plan.tag != self.last_tag:
         self.next_status = now + STATUS_WRITE_S

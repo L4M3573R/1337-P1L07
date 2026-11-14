@@ -68,7 +68,7 @@ def test_launch_rates_and_end_at_20_mph():
   exp.rng.random = lambda: 0.99
   exp.sample(Frame(0.0, 0.0, 30 * MPH, True, standstill=True))
   p = exp.sample(Frame(0.05, 0.3, 30 * MPH, True))
-  assert p.tag == 'launch|launch|gentle' and p.accel_max == ex.ACCEL_VARIANTS['gentle']
+  assert p.tag == 'launch|launch|gentle' and p.accel_max == pytest.approx(0.75 * ex.normal_accel(0.3))
   p = exp.sample(Frame(0.1, 21 * MPH, 30 * MPH, True))
   assert not (p.tag or '').startswith('launch')
 
@@ -76,8 +76,8 @@ def test_launch_rates_and_end_at_20_mph():
 def test_speeding_up_to_the_set_speed_is_learned_per_target_band():
   exp = Experimenter(winners={'accelerate|45-60': 'moderate'})
   exp.rng.random = lambda: 0.99
-  p = exp.sample(cruise(0.0, v=30 * MPH, v_set=50 * MPH))
-  assert p.tag == 'accelerate|45-60|moderate' and p.accel_max == ex.ACCEL_VARIANTS['moderate']
+  p = exp.sample(cruise(0.0, v=30 * MPH, v_set=50 * MPH, a_ego=0.5))
+  assert p.tag == 'accelerate|45-60|moderate' and p.accel_max == pytest.approx(0.9 * ex.normal_accel(30 * MPH))
   assert exp.spent_s > 0
 
 
@@ -132,3 +132,59 @@ def test_episodes_last_long_enough_to_measure():
   assert len({t for t in tags if t}) == 1 and exp.episodes == 1
   # but a pedal ends it at once, dwell or not
   assert exp.sample(cruise(20.05, grade=0.03, brake=True)).tag is None
+
+
+def test_a_slowdown_an_experiment_made_is_not_a_speed_up_to_test():
+  exp = Experimenter(winners={'cruise|30-45': 'under4', 'pulse_glide|30-45': 'steady'})
+  exp.rng.random = lambda: 0.99
+  exp.cruise_turn = 1   # the cruise-speed experiment's turn
+  t = 0.0
+  for _ in range(400):   # 20 s at 4 under: the car has slowed to the lower target
+    t += 0.05
+    exp.sample(cruise(t, v=44 * MPH + min(exp.offset_mps, 0.0), v_set=44 * MPH, grade=0.0))
+  assert exp.episode.tag() == 'cruise|30-45|under4'
+  # the episode ends without a pedal (a brief stop signal): the offset ramps back, the car follows it
+  assert exp.sample(cruise(t + 0.05, v=40 * MPH, v_set=44 * MPH, stop_ahead=True)).tag is None
+  p = exp.sample(cruise(t + 0.1, v=40 * MPH, v_set=44 * MPH))
+  assert not (p.tag or '').startswith('accelerate')
+  # after a pedal the planner goes straight back to the set speed: that speed-up is real and may be tested
+  exp.sample(cruise(t + 0.15, v=40 * MPH, v_set=44 * MPH, brake=True))
+  p = exp.sample(cruise(t + 0.2, v=40 * MPH, v_set=44 * MPH, a_ego=0.5))
+  assert (p.tag or '').startswith('accelerate')
+
+
+
+def test_slower_variants_are_shares_of_normal_acceleration():
+  assert ex.normal_accel(0.0) == pytest.approx(1.6) and ex.normal_accel(5.0) == pytest.approx(1.4)
+  assert ex.normal_accel(60.0) == pytest.approx(0.6)
+  # at 11 mph gentle is about 1 m/s2 now, not the 0.5 that was far too slow
+  assert 1.0 < 0.75 * ex.normal_accel(11 * MPH) < 1.1
+
+
+def test_pressing_on_during_a_slower_variant_vetoes_it_after_two_times():
+  exp = Experimenter(winners={'accelerate|30-45': 'gentle'})
+  exp.rng.random = lambda: 0.99
+  for drive in range(2):
+    exp.episode = None
+    p = exp.sample(cruise(drive * 100.0, v=20 * MPH, v_set=40 * MPH, a_ego=0.5))
+    assert p.tag == 'accelerate|30-45|gentle'
+    exp.sample(cruise(drive * 100.0 + 0.05, v=20 * MPH, v_set=40 * MPH, gas=True))
+    exp.sample(cruise(drive * 100.0 + 0.1, v=20 * MPH, v_set=40 * MPH, gas=True))   # one veto per episode
+  assert exp.vetoes == {'accelerate|30-45|gentle': 2}
+  assert all(exp.draw('accelerate', '30-45') != 'gentle' for _ in range(200))   # never offered there again
+
+
+def test_vetoes_file(tmp_path):
+  path = tmp_path / 'vetoes.json'
+  assert ex.load_vetoes(path) == {}
+  ex.save_vetoes(path, {'accelerate|30-45|gentle': 2})
+  assert ex.load_vetoes(path) == {'accelerate|30-45|gentle': 2}
+
+
+
+def test_no_speed_up_test_while_still_slowing():
+  exp = Experimenter()
+  p = exp.sample(cruise(0.0, v=15 * MPH, v_set=40 * MPH, a_ego=-1.0))   # slowing behind a car or into a turn
+  assert not (p.tag or '').startswith('accelerate')
+  p = exp.sample(cruise(0.05, v=15 * MPH, v_set=40 * MPH, a_ego=0.6))
+  assert (p.tag or '').startswith('accelerate')
