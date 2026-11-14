@@ -345,6 +345,9 @@ def starpilot_main():
   curve_host = curve_preferences.make_host(replay='REPLAY' in os.environ) if curve_preferences is not None else None
   curve_status = CurveStatusPublisher() if curve_host is not None else None
   force_stop_owner = ForceStopRuntime(params) if CP.openpilotLongitudinalControl else None
+  from openpilot.starpilot.diagnostics.features import ChangeLog, log_error
+  force_stop_log = ChangeLog('force_stop', min_gap_s=1.0)     # decision log: why Force Stop is or is not stopping
+  curve_speed_log = ChangeLog('curve_speed', min_gap_s=1.0)   # decision log: the curve speed controller's state
   takeoff_preferences = TakeoffPreferences(params) if CP.openpilotLongitudinalControl else None
   stop_resume_sock = messaging.sub_sock("carState", conflate=False) if force_stop_owner is not None else None
   conditional_host = (ConditionalPlannerHost(params, enabled_scene_owners=(frozenset({'traffic_mode'}) if traffic_capable else frozenset()) |
@@ -551,6 +554,19 @@ def starpilot_main():
                                                now_ns=now_ns, model_ns=int(sm.logMonoTime['modelV2']),
                                                persistence_status=curve_preferences.status,
                                                road_curvature=curve_geometry[0] if curve_geometry is not None else None)
+        try:
+          if force_stop_owner is not None:
+            force_stop_log.observe(force_stop_owner.decision(), force_stop_owner.decision_context())
+          if curve_result is not None:
+            ceiling, candidate = curve_result.ceiling_mps, curve_result.candidate_mps
+            curve_speed_log.observe({'reason': str(curve_result.reason),
+                                     'slowing': bool(longitudinal_planner.last_curve_ceiling_applied)},
+                                    {'ceiling_mph': round(ceiling * 2.237, 1) if ceiling is not None else None,
+                                     'candidate_mph': round(candidate * 2.237, 1) if candidate is not None else None,
+                                     'binding_m': round(float(curve_result.binding_distance_m), 1),
+                                     'v_mph': round(float(sm['carState'].vEgo) * 2.237, 1)})
+        except Exception as e:
+          log_error('plannerd_decision_logs', e)
         if conditional_host is not None and 'REPLAY' not in os.environ:
           if drive_changed:
             conditional_host.reset()

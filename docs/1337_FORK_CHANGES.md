@@ -110,6 +110,33 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   the reason (`coast.py` `change_reason` / `admission_failure`), slow map lookups (`features.log_if_slow` in
   `sideroadd.py` and `curvemapd.py`). PC timeline: `python -m openpilot.starpilot.diagnostics.trace_report <folder>
   <route> [--from M:SS --to M:SS]`. Tests in `starpilot/tests/test_trace.py`.
+- **Front radar: trimmed decoding + REL_ACCEL** (2026-11-14): `opendbc/car/hyundai/radar_interface.py` decodes only the
+  used fields of the 0x210-0x21F / MRR30 banks (STATE, LONG_DIST, LAT_DIST, REL_SPEED, REL_ACCEL; identical points on
+  15519 recorded radar updates, ~half the parse time in card) and, for the Elantra Hybrid (`relative_accel`), puts each
+  track's REL_ACCEL in the point's reserved `deprecated.aRel` with `deprecated.measured=True`. Tracks stay keyed by
+  slot: OBJECT_ID repeats within a cycle (not unique). REL_ACCEL showed a lead's braking ~0.5 s before radard's Kalman
+  aLeadK on 63 onsets over 70 min of drives.
+- **Radar shadow logs** (2026-11-14): `features.LeadAccelShadow` (`lead_accel_shadow` events: how much earlier REL_ACCEL
+  showed each lead braking onset) and `LeadLossLog(track_alive=...)` (`radar_still_tracking`, `same_radar_track`: the
+  lead-hold shadow), fed in `radard.py`. Log only.
+- **Car yaw rate** (2026-11-14): `opendbc/car/hyundai/carstate.py` sets `carState.yawRate` from ESP12 YAW_RATE (deg/s,
+  right positive) for the Elantra Hybrid only (nothing on Hyundai read it; 0.994 correlation with curvature x speed);
+  `curvemapd.measured_curvature` uses yaw/speed above 5 m/s, else controlsState.curvature.
+- **BlueDriver direct fuel rate + battery voltage** (2026-11-14): `starpilot/obd/bluedriver.py` PIDs 019D (the ECU's
+  fuel rate, matched the MAF/lambda estimate at idle) and 019A (hybrid battery system voltage; current needs a
+  multi-frame read); `bluedriverd.py` integrates `fuel_direct_g` alongside `fuel_g` for comparison.
+- **Trace coverage: crashes, errors, every system** (2026-11-14): `traced.py` also writes `process` lines (a program
+  that died while it should run, with its exit code / killing signal and a CPU snapshot; restarted under a new pid;
+  still down after 5 s; back up) from managerState, and `error` lines (every error-level app-log line, with the
+  traceback tail, once per program and message per 30 s) from errorLogMessage; `trace_report` shows both from rlogs.
+  `features.log_error` / `log_event` replace silent `except: pass` in the shadow and daemon code (rate-limited, error
+  level). `ChangeLog(min_gap_s=...)` folds a flickering decision into one event with `flickers`. New decision logs:
+  `force_stop` (plannerd: the gate, what the stop follows - light / sign / queue / holding - or what holds it back:
+  lead, curve, turn, override, light too far, sign too fast; `ForceStop.decision`, `ForceStopRuntime.gate`),
+  `curve_speed` (plannerd: reason and whether it is slowing), `speed_sign` / `speed_sign_reset` (vision_slc producer:
+  limit read, stop sign in view, why the reader restarted), `efficiency_sources` (which fuel inputs the ledger has),
+  `edge_map` / `efficiency` recording start and stop summaries, `steer_learner` status/reason. edgemapd and efficiencyd
+  now keep recording through a bad frame or failed save. Tests in `starpilot/tests/test_trace_coverage.py`.
 - **Tailscale on boot** (`eb47adb2ca`): `launch_chffrplus.sh` (`tailscale_init`).
 - **Partition links for AGNOS 20.5.1**: `launch_chffrplus.sh` (`partition_links`) recreates missing
   `/dev/disk/by-partlabel` links every boot; without `bluetooth_<slot>` the Bluetooth radio never starts (no

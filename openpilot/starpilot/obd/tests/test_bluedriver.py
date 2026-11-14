@@ -79,7 +79,7 @@ class FakeLink:
   """Answers like the scanner did with the engine idling."""
   REPLIES = {'010C': '15 C4', '0110': '02 AA', '0144': '7E E0', '015B': '80', '0162': '8F', '0106': '7A', '0107': '7C',
              '0104': '4B', '0105': '4C', '0146': '2F', '0142': '35 C4', '01A6': '00 02 39 9E', '0163': '01 2C', '012F': '7A',
-             '010F': '40'}
+             '010F': '40', '019D': '00 10 00 10', '019A': '9A 07 00 3B AB'}
 
   def __init__(self, clock, fail_after=None):
     self.clock, self.count, self.fail_after = clock, 0, fail_after
@@ -181,3 +181,33 @@ def test_health_check_writes_codes_without_clearing(tmp_path):
   assert doc['mil'] is True and doc['dtc_count'] == 1 and doc['stored'] == ['P0420'] and doc['pending'] == []
   assert json.loads((tmp_path / 'health.json').read_text())['stored'] == ['P0420']
   assert '04' not in link.sent  # mode 04 would clear codes; never sent
+
+
+def test_direct_fuel_rate_and_battery_voltage_from_this_cars_replies():
+  # 11-14 probe on the Elantra Hybrid, engine idling
+  assert bd.decode('019D', '00 10 00 10') == pytest.approx(0.32)
+  assert bd.decode('019D', '9D 00 10 00 10') == pytest.approx(0.32)   # PID echoed in front
+  assert bd.decode('019D', 'FF FF 00 00') is None                    # 1310 g/s: not a real reading
+  assert bd.decode('019D', 'NO DATA') is None
+  assert bd.decode('019A', '9A 07 00 3B AB') == pytest.approx(238.67, abs=0.01)
+  assert bd.decode('019A', '07 00 3B AB') == pytest.approx(238.67, abs=0.01)
+  assert bd.decode('019A', '07 00 00 10') is None                    # 0.25 V: outside a hybrid pack's range
+  assert bd.decode('019A', '07 00') is None
+
+
+def test_direct_fuel_is_polled_every_cycle_and_voltage_every_fifth():
+  assert all('019D' in bd.plan(c) for c in range(10))
+  assert ['019A' in bd.plan(c) for c in range(5)] == [True, False, False, False, False]
+
+
+def test_session_integrates_both_fuel_figures_and_never_bridges_a_missing_answer(tmp_path):
+  from openpilot.starpilot.obd.bluedriverd import Session
+  s = Session(tmp_path, 'drive')
+  for i in range(11):
+    s.update('019D', 0.32, i * 0.1)
+  assert s.fuel_direct.grams == pytest.approx(0.32, abs=1e-6)
+  s.update('019D', None, 1.1)
+  s.update('019D', 0.32, 1.2)
+  s.update('019D', 0.32, 1.3)
+  assert s.fuel_direct.grams == pytest.approx(0.352, abs=1e-6)        # the gap was not integrated
+  assert s.live_document(2.0)['fuel_direct_g'] == pytest.approx(0.352, abs=1e-3)

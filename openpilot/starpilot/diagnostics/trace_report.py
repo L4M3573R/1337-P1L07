@@ -62,6 +62,8 @@ class Timeline:
     self.counts: dict[int, int] = {}
     self.second_speed: dict[int, float] = {}
     self.procs: list[tuple[float, dict]] = []
+    from openpilot.starpilot.diagnostics.traced import Trace
+    self.watch = Trace()   # the on-device trace's crash/restart and error rules, applied to the recorded drive
 
   def emit(self, t: float, text: str, speed: float | None = None) -> None:
     speed = self.speed if speed is None else speed
@@ -123,6 +125,17 @@ class Timeline:
         return
       if isinstance(msg, dict) and msg.get('event') == 'starpilot_feature' and (self.show_all or msg.get('feature') not in NOISY_FEATURES):
         self.emit(t, feature_text(msg))
+    elif w == 'errorLogMessage':
+      from openpilot.starpilot.diagnostics.traced import error_record
+      line = self.watch.error(t, error_record(m.errorLogMessage))
+      if line is not None:
+        exc = f" | {line['exception'][-1]}" if line.get('exception') else ''
+        self.emit(t, f"ERROR [{line['daemon'] or line['where']}] {line['msg'][:160]}{exc}")
+    elif w == 'managerState':
+      states = [(str(p.name), bool(p.running), bool(p.shouldBeRunning), int(p.pid), int(p.exitCode)) for p in m.managerState.processes]
+      for line in self.watch.processes(t, states):
+        detail = f" ({line['meaning']})" if line.get('meaning') else ''
+        self.emit(t, f"PROGRAM {line['name']} {line['what']}{detail}")
     elif w == 'procLog':
       self.procs.append((t, {int(p.pid): (float(p.cpuUser + p.cpuSystem), ' '.join(p.cmdline)[-48:] or p.name) for p in m.procLog.procs}))
 

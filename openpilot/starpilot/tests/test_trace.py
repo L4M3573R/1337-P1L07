@@ -91,6 +91,11 @@ def test_alert_snapshot_names_the_busy_processes_and_cores():
   assert line['events'] == ['selfdrivedLagging'] and line['cores_now'][4] == 100.0
   assert line['busiest_last_4s'] == [('card', 95.0), ('controlsd', 80.0)]
   assert trace.events(2.5, {'selfdrivedLagging'}) is None   # the same alert still showing: one line only
+  # a flickering alert (off and on again every few frames, as on 11-13) is snapshotted once per 10 s
+  for k in range(20):
+    assert trace.events(2.6 + k * 0.02, set() if k % 2 == 0 else {'selfdrivedLagging'}) is None
+  assert trace.events(12.5, set()) is None
+  assert trace.events(12.6, {'selfdrivedLagging'})['events'] == ['selfdrivedLagging']
 
 
 def test_per_minute_load_line_and_name_order_pruning(tmp_path):
@@ -114,3 +119,46 @@ def test_timeline_counts_only_whole_slow_seconds():
   t.finish()
   assert [line for _, line in t.lines] == [' 15.7 mph  safety loop slow: 80/100 per second']
   assert trace_report.parse_clock('25:02.5') == 1502.5 and trace_report.clock(1502.5) == '25:02.5'
+
+
+def test_lead_hold_shadow_says_whether_radard_still_had_the_track():
+  log = Events()
+  tracker = LeadLossLog(log)
+  tracker.observe(0.0, {**lead(40.0, -5.0), 'radarTrackId': 12}, 15.0, track_alive=lambda tid: tid == 12)
+  tracker.observe(0.05, NO_LEAD, 15.0, track_alive=lambda tid: tid == 12)
+  assert log[-1]['what'] == 'lost' and log[-1]['radar_still_tracking'] is True
+  tracker.observe(0.4, {**lead(38.0, -5.0), 'radarTrackId': 12}, 15.0)
+  assert log[-1]['what'] == 'returned' and log[-1]['same_radar_track']
+  tracker.observe(1.0, lead(30.0, -2.0, radar=False), 15.0, track_alive=lambda tid: True)   # vision-only lead: no track id
+  tracker.observe(1.05, NO_LEAD, 15.0, track_alive=lambda tid: True)
+  assert log[-1]['radar_still_tracking'] is None
+  broken = LeadLossLog(Events())
+  broken.observe(0.0, {**lead(20.0, -5.0), 'radarTrackId': 3}, 10.0)
+  broken.observe(0.05, NO_LEAD, 10.0, track_alive=lambda tid: 1 / 0)   # a failing check never raises
+  assert broken.log[-1]['radar_still_tracking'] is None
+
+
+def test_lead_accel_shadow_times_each_braking_onset():
+  from openpilot.starpilot.diagnostics.features import LeadAccelShadow
+  log = Events()
+  shadow = LeadAccelShadow(log)
+  t = 0.0
+  # the radar shows the lead braking at 1.0 s, the Kalman estimate follows 0.6 s later
+  for k in range(60):
+    t = k * 0.05
+    radar = -1.5 if t >= 1.0 else 0.0
+    kalman = -1.2 if t >= 1.6 else -0.2
+    shadow.observe(t, 7, radar, kalman, 40.0, 15.0)
+  assert len(log) == 1 and log[0]['what'] == 'braking seen' and abs(log[0]['radar_earlier_s'] - 0.6) < 0.06
+  # still braking: no second event until both estimates recover above -0.3 m/s2
+  shadow.observe(3.2, 7, -1.6, -1.4, 35.0, 14.0)
+  assert len(log) == 1
+  shadow.observe(4.0, 7, 0.0, 0.0, 35.0, 14.0)
+  # an onset openpilot never shows within 3 s
+  for k in range(80):
+    shadow.observe(5.0 + k * 0.05, 7, -1.0, -0.5, 30.0, 12.0)
+  assert log[-1]['radar_earlier_s'] is None and log[-1]['radar_peak'] == -1.0
+  # a lead change, missing radar data and bad numbers never raise or mis-time
+  shadow.observe(10.0, None, None, 0.0, 0.0, 0.0)
+  shadow.observe(10.1, 8, float('nan'), 0.0, 0.0, 0.0)
+  shadow.observe(10.2, 8, 0.0, float('inf'), 0.0, 0.0)

@@ -15,6 +15,8 @@ class TestProducerResetReasons(unittest.TestCase):
   def reasons(self):
     reasons = []
     for call in self.events.call_args_list:
+      if call.args == ('starpilot_feature',):
+        continue  # 1337 decision logs (speed_sign, speed_sign_reset) ride the same logger
       self.assertEqual(call.args, ('vision.session_reset',))
       self.assertEqual(set(call.kwargs), {'reason', 'session', 'stream'})
       self.assertRegex(call.kwargs['session'], r'^[0-9a-f]{32}$')

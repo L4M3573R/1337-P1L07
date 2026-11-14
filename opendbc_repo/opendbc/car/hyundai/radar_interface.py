@@ -163,7 +163,15 @@ def get_radar_can_parser(CP):
   mrr30 = radar_dbc(CP) == HYUNDAI_MRR30_RADAR_DBC
   # MRR35 publishes many unused/unknown fields in each object packet. Decode
   # the four consumed track fields, retaining parser integrity fields automatically.
-  selected = ({name: ('STATE', 'LONG_DIST', 'LAT_DIST', 'REL_SPEED') for name, _ in messages} if mrr35 else None)
+  # 1337: the MRR30 / 0x210-0x21F banks carry two tracks of 16 fields per message, of which _update reads the same four
+  # per track; decoding only those cuts card's radar parsing to a quarter (card shares its core with controlsd).
+  if mrr35:
+    selected = {name: ('STATE', 'LONG_DIST', 'LAT_DIST', 'REL_SPEED') for name, _ in messages}
+  elif mrr30 or gv70:
+    fields = ('STATE', 'LONG_DIST', 'LAT_DIST', 'REL_SPEED', 'REL_ACCEL')
+    selected = {name: tuple(f'{i}_{f}' for i in (1, 2) for f in fields) for name, _ in messages}
+  else:
+    selected = None
   return CANParser(radar_dbc(CP), messages, radar_bus(CP) if mrr35 or mrr30 or gv70 else 1, signals=selected)
 
 
@@ -201,6 +209,11 @@ class RadarInterface(RadarInterfaceBase):
 
     self.radar_off_can = CP.radarUnavailable
     self.rcp = get_radar_can_parser(CP)
+    # 1337: the Elantra Hybrid's 0x210-0x21F bank reports each track's relative acceleration (REL_ACCEL); it shows a
+    # lead's braking about 0.5 s before radard's Kalman estimate (63 onsets over 70 min of drives). It rides along in
+    # the point's reserved aRel field, measured=True marking it valid, for radard's shadow comparison.
+    # (OBJECT_ID is not unique within a cycle - many tracks share a value - so tracks stay keyed by slot.)
+    self.relative_accel = self.gv70 and CP.carFingerprint == CAR.HYUNDAI_ELANTRA_HEV_2024
 
   def update(self, can_strings):
     if self.radar_off_can or (self.rcp is None):
@@ -310,6 +323,9 @@ class RadarInterface(RadarInterfaceBase):
             point.dRel = msg[f"{index}_LONG_DIST"]
             point.yRel = msg[f"{index}_LAT_DIST"]
             point.vRel = msg[f"{index}_REL_SPEED"]
+            if self.relative_accel:
+              point.deprecated.aRel = msg[f"{index}_REL_ACCEL"]
+              point.deprecated.measured = True
           elif track_key in self.pts:
             del self.pts[track_key]
         continue

@@ -33,7 +33,8 @@ INIT_TIMEOUT_S = 3.0
 STARTUP_SETTLE_S = 5.0
 BACKOFF_S = (5.0, 10.0, 30.0, 60.0)
 CSV_FIELDS = ('t', 'rpm', 'maf', 'lambda', 'fuel_gps', 'fuel_g', 'torque_pct', 'soc', 'stft', 'ltft', 'load', 'coolant',
-              'ambient', 'intake', 'volts', 'fuel_level', 'odometer_km', 'speed_kph')
+              'ambient', 'intake', 'volts', 'fuel_level', 'odometer_km', 'speed_kph', 'fuel_rate_direct', 'fuel_direct_g',
+              'hv_volts')
 HEALTH_TIMEOUT_S = 3.0
 VENDOR = Path(__file__).resolve().parents[1] / 'galaxy_bluetooth' / 'vendor'
 MAX_CONFIG_BYTES = 4096
@@ -85,6 +86,7 @@ class Session:
     self.root, self.drive_id, self.clock = root, drive_id, clock
     self.values: dict[str, float] = {}
     self.fuel = bd.FuelIntegrator()
+    self.fuel_direct = bd.FuelIntegrator()  # the ECU's own fuel rate (PID 9D), kept alongside for comparison
     self.fuel_gps: float | None = None
     self.connected = False
     self._csv = None
@@ -100,16 +102,20 @@ class Session:
     if code == '0144':  # the second fuel reading of the cycle: integrate with the newest air flow and rpm
       self.fuel_gps = bd.fuel_rate_gps(self.values.get('maf'), self.values.get('lambda'), self.values.get('rpm'))
       self.fuel.add(t, self.fuel_gps)
+    elif code == '019D':
+      self.fuel_direct.add(t, value)  # None (no answer) breaks the integration rather than bridging it
 
   def disconnected(self) -> None:
     self.connected = False
     self.fuel.add(self.clock(), None)  # never integrate across a dropped link
+    self.fuel_direct.add(self.clock(), None)
     self.fuel_gps = None
 
   def live_document(self, now: float) -> dict:
     return {'version': LIVE_VERSION, 'drive': self.drive_id, 't': now, 'connected': self.connected,
             'fuel_g': round(self.fuel.grams, 3), 'fuel_s': round(self.fuel.seconds, 2),
             'fuel_gps': None if self.fuel_gps is None else round(self.fuel_gps, 4),
+            'fuel_direct_g': round(self.fuel_direct.grams, 3),
             **{k: round(v, 4) for k, v in self.values.items()}}
 
   def maybe_write(self, now: float, period: float = 1.0) -> bool:
@@ -130,7 +136,8 @@ class Session:
       if self._csv.tell() == 0:
         self._writer.writeheader()
       prune(drives)
-    row = {'t': round(now, 2), 'fuel_gps': self.fuel_gps, 'fuel_g': round(self.fuel.grams, 3), **self.values}
+    row = {'t': round(now, 2), 'fuel_gps': self.fuel_gps, 'fuel_g': round(self.fuel.grams, 3),
+           'fuel_direct_g': round(self.fuel_direct.grams, 3), **self.values}
     self._writer.writerow({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()})
     self._csv.flush()
 

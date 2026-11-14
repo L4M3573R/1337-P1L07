@@ -122,6 +122,7 @@ class ForceStop:
     self.queue_sign_ns = 0
     self.queue_line = None
     self._clear_sign_estimate()
+    self.decision = {'path': 'none', 'blocked_by': 'reset', 'light': False, 'sign': False}
 
   def _clear_sign_estimate(self):
     self.dash_distance = None
@@ -167,6 +168,26 @@ class ForceStop:
     self.standstill_clear_ns = 0
     self.standstill_reason = None
 
+  def _decision(self, frame: StopFrame, available: bool, model_path: bool, sign_path: bool, queue_path: bool, held: bool,
+                overridden: bool, turn: bool, curved: bool, lead: bool, model_active: bool, approach: float) -> dict:
+    """Decision log: what the stop is following, or (when a light, sign or stopping model is seen) what holds it back."""
+    path = ('holding at the stop' if held and self.forcing else 'light' if model_path else 'sign' if sign_path else
+            'queue' if queue_path else 'continuing a committed stop' if self.forcing else
+            'slowing toward a light' if approach > 0 else 'none')
+    blocked = ''
+    if not self.forcing and (frame.light or frame.sign or frame.raw_model_stopped):
+      blocked = ('perception unavailable' if not available else
+                 'driver override (10 s after gas, resume or a released hold)' if overridden else
+                 'in a curve' if frame.driving_in_curve or curved else
+                 'turning' if turn else
+                 'lead car ahead (it does the stopping)' if frame.tracking_lead or lead else
+                 'light too far (model horizon over 100 m)' if frame.light and not model_active else
+                 'sign: too fast for a sign stop' if frame.sign and not frame.light and frame.speed_mps >= SIGN_MAX_SPEED_MPS else
+                 'sign: model does not agree yet' if frame.sign and not frame.light else
+                 'model slowing without a light or sign' if frame.raw_model_stopped and not frame.light else
+                 'confirming (timer)')
+    return {'path': path, 'blocked_by': blocked, 'light': bool(frame.light), 'sign': bool(frame.sign)}
+
   @property
   def can_commit_next_frame(self) -> bool:
     return self.timer + SIGN_CONFIRM_STEP_S >= STOP_COMMIT_TIME_S
@@ -176,11 +197,13 @@ class ForceStop:
     if (type(now) is not int or now <= 0 or now <= self.last_model_ns or
         self.last_model_ns and now - self.last_model_ns > 250_000_000):
       self.reset()
+      self.decision = {**self.decision, 'blocked_by': 'model frames out of order or late'}
       return StopPlan()
     dt = (now - self.last_model_ns) / 1e9 if self.last_model_ns else DT_MDL
     self.last_model_ns = now
     if not frame.enabled:
       self.reset()
+      self.decision = {**self.decision, 'blocked_by': 'not enabled'}
       return StopPlan(model_ns=now)
     speed = frame.speed_mps
     horizon = frame.horizon_m if frame.horizon_m is not None else math.nan
@@ -188,6 +211,7 @@ class ForceStop:
     if (not all(math.isfinite(value) for value in (speed, frame.steering_angle_deg)) or
         frame.perception_available and not all(math.isfinite(value) for value in (horizon, curvature))):
       self.reset()
+      self.decision = {**self.decision, 'blocked_by': 'invalid inputs (not finite)'}
       return StopPlan()
     available = frame.perception_available
     sign_estimate = self._sign_estimate(frame, now, max(0.0, speed) * dt)
@@ -354,6 +378,8 @@ class ForceStop:
       obstacle = max(0.0,min(self.distance * .93 + offset + tune.distance_bias_m,
                              (self.distance + offset + tune.distance_bias_m) * .93))
     should_stop = self.stop_requested if tune.distance_control else bool(self.forcing and ceiling is not None and ceiling <= .5)
+    self.decision = self._decision(frame, available, model_path, sign_path, queue_path, held, overridden, turn, curved, lead,
+                                   model_active, approach)
     return StopPlan(now, ceiling, obstacle, self.forcing, should_stop,
                     max(0.0,self.distance) if self.forcing else 0.0, approach,
                     tune.jerk_scale if self.forcing or approach > 0 else 1.0, bool(held and self.forcing and not overridden),

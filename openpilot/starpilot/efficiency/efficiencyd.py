@@ -16,6 +16,7 @@ import signal
 import time
 from pathlib import Path
 
+from openpilot.starpilot.diagnostics.features import EVENT, ChangeLog, log_error
 from openpilot.starpilot.efficiency import store, tank as tank_store
 from openpilot.starpilot.efficiency.car_signals import MDPS11_ADDR, MODE_ADDR, CarSignals
 from openpilot.starpilot.efficiency.hybrid import Cluster, PowerFlow, scan
@@ -104,9 +105,17 @@ class Recorder:
                                 obd_fuel_gal=self.obd_fuel_gal, soc=self.soc, **self.tags()))
 
   def save(self) -> None:
-    if self.ledger.stretches:
-      store.save_drive(self.drive_id, list(self.ledger.stretches), self.root, self.ledger.flow_hist)
-    tank_store.save(self.tank, self.tank_path)
+    try:
+      if self.ledger.stretches:
+        store.save_drive(self.drive_id, list(self.ledger.stretches), self.root, self.ledger.flow_hist)
+      tank_store.save(self.tank, self.tank_path)
+    except Exception as e:   # a failed checkpoint is retried next minute; it must not end the drive's ledger
+      log_error('efficiency', e, where='save')
+
+  def sources(self) -> dict:
+    """Decision log key: which inputs the ledger has right now (a fuel source dropping out shows up here)."""
+    return {'bluedriver_fuel': self.obd_fuel_gal is not None, 'dash_fuel': self.fuel_gal is not None,
+            'hybrid_flow': self.flow is not None, 'gps': self.position is not None}
 
   def maybe_checkpoint(self, now: float) -> bool:
     if self.last_checkpoint is None:
@@ -146,8 +155,13 @@ def main() -> None:
   cp = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
   sm = messaging.SubMaster(SERVICES, poll='radarState')
   can_sock = messaging.sub_sock('can', conflate=False)
+  from openpilot.common.swaglog import cloudlog
   recorder = Recorder(float(cp.mass), drive_id())
   last_obd_read = 0.0
+  sources_log = ChangeLog('efficiency_sources', min_gap_s=5.0)
+  started = time.monotonic()
+  loop_errors = 0
+  cloudlog.event(EVENT, feature='efficiency', what='recording', drive=recorder.drive_id)
 
   def stop(*_):
     raise SystemExit(0)
@@ -156,30 +170,49 @@ def main() -> None:
   try:
     while True:
       sm.update()
-      # Every CAN batch is read for the drive-mode signals (the mode announcement lasts only a few frames); the
-      # cluster scan still uses just the newest batch, as before.
-      raws = messaging.drain_sock_raw(can_sock)
-      for i, raw in enumerate(raws):
-        event = messaging.log_from_bytes(raw)
-        if i == len(raws) - 1:
-          frames = [(c.address, bytes(c.dat), c.src) for c in event.can]
-          recorder.observe_can(*scan(frames))
-          recorder.signals.update(frames)
-        else:
-          recorder.signals.update([(c.address, bytes(c.dat), c.src) for c in event.can if c.address in SIGNAL_ADDRS])
-      if sm.updated['gpsLocationExternal']:
-        recorder.observe_gps(sm['gpsLocationExternal'])
-      if sm.seen['carState']:
-        optional = {name: (sm[name] if sm.seen[name] else None) for name in ('carControl', 'radarState', 'selfdriveState', 'deviceMotion')}
-        recorder.observe(sm.logMonoTime['carState'] / 1e9, sm['carState'], optional['carControl'], optional['radarState'],
-                         optional['selfdriveState'], optional['deviceMotion'], pulse_glide_phase(sm))
+      try:
+        step(sm, can_sock, recorder, messaging)
+      except Exception as e:   # one bad frame must not end the drive's ledger
+        loop_errors += 1
+        log_error('efficiency', e, where='main loop')
       now = time.monotonic()
       if now - last_obd_read >= OBD_READ_S:
         last_obd_read = now
-        recorder.observe_obd(read_live(now=now))
+        try:
+          recorder.observe_obd(read_live(now=now))
+        except Exception as e:
+          log_error('efficiency', e, where='BlueDriver live file')
+        sources_log.observe(recorder.sources(), {'ledger_stretches': len(recorder.ledger.stretches)}, now=now)
       recorder.maybe_checkpoint(now)
   finally:
     recorder.finish()
+    try:
+      cloudlog.event(EVENT, feature='efficiency', what='stopped', drive=recorder.drive_id,
+                     stretches=len(recorder.ledger.stretches), minutes=round((time.monotonic() - started) / 60, 1),
+                     loop_errors=loop_errors, **recorder.sources())
+    except Exception:
+      pass
+
+
+def step(sm, can_sock, recorder: Recorder, messaging) -> None:
+  """One radarState wake-up: CAN signals, GPS and the ledger sample (errors raise to the caller)."""
+  # Every CAN batch is read for the drive-mode signals (the mode announcement lasts only a few frames); the
+  # cluster scan still uses just the newest batch, as before.
+  raws = messaging.drain_sock_raw(can_sock)
+  for i, raw in enumerate(raws):
+    event = messaging.log_from_bytes(raw)
+    if i == len(raws) - 1:
+      frames = [(c.address, bytes(c.dat), c.src) for c in event.can]
+      recorder.observe_can(*scan(frames))
+      recorder.signals.update(frames)
+    else:
+      recorder.signals.update([(c.address, bytes(c.dat), c.src) for c in event.can if c.address in SIGNAL_ADDRS])
+  if sm.updated['gpsLocationExternal']:
+    recorder.observe_gps(sm['gpsLocationExternal'])
+  if sm.seen['carState']:
+    optional = {name: (sm[name] if sm.seen[name] else None) for name in ('carControl', 'radarState', 'selfdriveState', 'deviceMotion')}
+    recorder.observe(sm.logMonoTime['carState'] / 1e9, sm['carState'], optional['carControl'], optional['radarState'],
+                     optional['selfdriveState'], optional['deviceMotion'], pulse_glide_phase(sm))
 
 
 if __name__ == "__main__":

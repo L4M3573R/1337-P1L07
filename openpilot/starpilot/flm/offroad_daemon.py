@@ -11,6 +11,7 @@ from typing import Any
 
 from openpilot.cereal import messaging
 from openpilot.common.params import Params
+from openpilot.starpilot.diagnostics.features import ChangeLog, log_error
 from openpilot.starpilot.flm.offroad_worker import OffroadWorker
 from openpilot.starpilot.flm.training_report import report_path, READ_MAX_BYTES, _report_bounded
 
@@ -23,6 +24,7 @@ class StatusReport:
     self.current: dict[str, Any] = {'status': 'collecting', 'reason': 'waiting_for_completed_drive', 'vehicle': ''}
     self.previous: dict[str, Any] = {}
     self.next_ns = 0
+    self.decision_log = ChangeLog('steer_learner')  # decision log: the learner's status and why
 
   def set(self, value):
     changed = (self.current.get('status'), self.current.get('reason')) != (value.get('status'), value.get('reason'))
@@ -31,6 +33,8 @@ class StatusReport:
       self.previous = dict(value)
     if changed:
       self.next_ns = 0
+    self.decision_log.observe({'status': str(value.get('status', '')), 'reason': str(value.get('reason', ''))[:120]},
+                              {'route': value.get('completed_route')})
 
   def analyzing(self, value):
     # Keep the last completed findings and saved values readable during a fit.
@@ -87,8 +91,9 @@ class StatusReport:
           inputs = SimpleNamespace(groups=groups, diagnostic_groups=assessment.get('diagnostic_groups', ()))
           result['recommendations'] = recorded_recommendations(inputs, baselines[0], assessment)
       self.previous = result
-    except (OSError, KeyError, ValueError, TypeError, AttributeError):
-      pass  # The normal worker reports unreadable inputs; historical display is optional.
+    except (OSError, KeyError, ValueError, TypeError, AttributeError) as e:
+      # The normal worker reports unreadable inputs; historical display is optional.
+      log_error('steer_learner', e, where='previous result display')
 
   def publish(self):
     now = self.clock_ns()
@@ -227,8 +232,8 @@ class StatusReport:
       with os.fdopen(fd, 'wb') as stream:
         stream.write(raw)
       os.replace(temporary, self.path)
-    except OSError:
-      pass  # Diagnostics cannot provide authority or interrupt Controls.
+    except OSError as e:
+      log_error('steer_learner', e, where='status file write')  # diagnostics cannot provide authority or interrupt Controls
     finally:
       if temporary is not None:
         Path(temporary).unlink(missing_ok=True)
@@ -348,6 +353,7 @@ def main():
           report.set(worker.run_once())
         except (ValueError, OSError, RuntimeError) as error:
           traceback.print_exc()
+          log_error('steer_learner', error, where='offroad analysis')
           failure = worker.record_failure(error)
           report.set(failure if failure is not None else {'status': 'unavailable', 'reason': str(error)[:300]})
       report.publish()

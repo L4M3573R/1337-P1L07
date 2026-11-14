@@ -540,3 +540,16 @@ def test_daemon_reads_only_fields_that_exist_in_the_real_messages():
   lane = camera.lane_position(sm['modelV2'])
   assert lane.rightmost and lane.right_edge_m == pytest.approx(1.8)
 
+
+
+def test_measured_curvature_prefers_the_cars_yaw_rate_and_falls_back():
+  from openpilot.starpilot.curve_speed.curvemapd import measured_curvature, sample_from
+  sm = _RealSubMaster()
+  assert measured_curvature(sm) == pytest.approx(0.004)               # yaw rate 0 (not reported): controlsState's
+  sm['carState'].yawRate = 0.1                                         # 0.1 rad/s at 20 m/s = 0.005 1/m
+  assert measured_curvature(sm) == pytest.approx(0.005)
+  assert sample_from(sm).curvature == pytest.approx(0.005)
+  sm['carState'].vEgo = 3.0                                            # too slow for yaw / speed
+  assert measured_curvature(sm) == pytest.approx(0.004)
+  sm['carState'].vEgo, sm['carState'].yawRate = 20.0, float('nan')
+  assert measured_curvature(sm) == pytest.approx(0.004)

@@ -425,9 +425,10 @@ def main() -> None:
               honda_bosch_a_radar=honda_bosch_a, use_voacc=voacc_selected(params, CP),
               tandem_fusion=tandem_supported(CP.carFingerprint, CP.radarUnavailable))
   pm = messaging.PubMaster(['radarState', 'starpilotRadarState'] if adjacent_enabled else ['radarState'])
-  from openpilot.starpilot.diagnostics.features import ChangeLog, LeadLossLog, radar_context, radar_decision
+  from openpilot.starpilot.diagnostics.features import ChangeLog, LeadAccelShadow, LeadLossLog, log_error, radar_context, radar_decision
   fusion_log = ChangeLog('tandem_fusion')  # decision log for remote route review
-  lead_loss_log = LeadLossLog()  # decision log: a near or closing lead disappearing, and its return
+  lead_loss_log = LeadLossLog()  # decision log: a near or closing lead disappearing, its return, and the lead-hold shadow
+  lead_accel_shadow = LeadAccelShadow()  # shadow: the radar's own lead acceleration vs radard's Kalman estimate
   set_core_affinity([3, 5])
 
   while 1:
@@ -439,9 +440,19 @@ def main() -> None:
       fusion_log.observe(radar_decision(RD.tandem), radar_context(RD.tandem, RD.radar_state.leadOne))
     if RD.radar_state is not None:
       try:
-        lead_loss_log.observe(time.monotonic(), RD.radar_state.leadOne, float(sm['carState'].vEgo))
-      except Exception:
-        pass
+        now = time.monotonic()
+        lead = RD.radar_state.leadOne
+        lead_loss_log.observe(now, lead, float(sm['carState'].vEgo), track_alive=lambda track_id: track_id in RD.tracks)
+        track = int(lead.radarTrackId) if lead.present and lead.radar else None
+        radar_accel = None
+        if track is not None:
+          for pt in sm['radarTracks'].points:
+            if pt.trackId == track and pt.deprecated.measured:
+              radar_accel = float(pt.deprecated.aRel) + float(sm['carState'].aEgo)
+              break
+        lead_accel_shadow.observe(now, track, radar_accel, float(lead.aLeadK), float(lead.dRel), float(sm['carState'].vEgo))
+      except Exception as e:
+        log_error('radard_shadows', e, where='main loop')
 
 
 if __name__ == "__main__":

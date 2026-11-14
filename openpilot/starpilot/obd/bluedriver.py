@@ -115,30 +115,57 @@ DECODERS = {
   '0162': lambda b: b[0] - 125.0,  # actual engine torque, % of reference
   '0163': lambda b: float(_u16(b)),  # engine reference torque, Nm
   '01A6': lambda b: (b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3]) / 10,  # odometer, km
+  # 11-14 probe on this car: '00 10 00 10' (0.32 g/s at idle, matching the MAF/lambda estimate of 0.323)
+  '019D': lambda b: _u16(b) * 0.02,  # engine fuel rate, g/s (the ECU's own figure; bytes 3-4 repeat it as vehicle fuel rate)
 }
+HV_VOLTS_RANGE = (50.0, 500.0)
+DIRECT_FUEL_MAX_GPS = 15.0
 PIDS = {p.code: p for p in (
   Pid('0104', 'load', 1), Pid('0105', 'coolant', 1), Pid('0106', 'stft', 1), Pid('0107', 'ltft', 1),
   Pid('010C', 'rpm', 2), Pid('010D', 'speed_kph', 1), Pid('0110', 'maf', 2), Pid('0142', 'volts', 2),
   Pid('010F', 'intake', 1), Pid('012F', 'fuel_level', 1),
   Pid('0144', 'lambda', 2), Pid('0146', 'ambient', 1), Pid('015B', 'soc', 1), Pid('0162', 'torque_pct', 1),
-  Pid('0163', 'torque_ref', 2), Pid('01A6', 'odometer_km', 4),
+  Pid('0163', 'torque_ref', 2), Pid('01A6', 'odometer_km', 4), Pid('019D', 'fuel_rate_direct', 4),
+  Pid('019A', 'hv_volts', 4),
 )}
+
+
+def hv_volts(b: bytes) -> float | None:
+  """PID 9A (hybrid/EV battery): A support bits, B charging state, C-D system voltage at 1/64 V. This car's single-frame
+  reply ends after C-D ('9A 07 00 3B AB' = 238.7 V); the current in E-F would need a multi-frame read."""
+  if len(b) < 4:
+    return None
+  volts = (b[2] << 8 | b[3]) / 64.0
+  return volts if HV_VOLTS_RANGE[0] <= volts <= HV_VOLTS_RANGE[1] else None
 
 
 def decode(code: str, text: str | None) -> float | None:
   """Decoded value for a mode 01 PID reply, or None when the reply is missing, an error or the wrong size."""
   pid = PIDS[code]
   b = reply_bytes(text)
-  if b is None or len(b) != pid.size:
+  if b is None:
+    return None
+  # Some replies keep the PID number in front of the data ('9A 07 00 3B AB'): drop it when that is all that differs.
+  if len(b) == pid.size + 1 and b[0] == int(code[2:], 16):
+    b = b[1:]
+  if code == '019A':
+    return hv_volts(b) if len(b) == pid.size else None
+  if len(b) != pid.size:
     return None
   value = pid.decode(b)
-  return value if math.isfinite(value) else None
+  if not math.isfinite(value):
+    return None
+  if code == '019D' and not 0.0 <= value <= DIRECT_FUEL_MAX_GPS:
+    return None
+  return value
 
 
 # Poll plan: the fuel PIDs every cycle, the rest round-robin every N cycles (about 40 ms a query).
 FAST = ('0110', '0144', '010C')
 SLOW = (('0162', 1), ('015B', 3), ('0106', 5), ('0107', 10), ('0104', 5), ('0105', 25), ('0146', 50),
-        ('0142', 25), ('012F', 50), ('01A6', 100), ('0163', 500))
+        ('0142', 25), ('012F', 50), ('01A6', 100), ('0163', 500),
+        # the ECU's own fuel rate every cycle (compared against the MAF/lambda estimate), battery voltage every 5th
+        ('019D', 1), ('019A', 5))
 
 
 def plan(cycle: int) -> list[str]:

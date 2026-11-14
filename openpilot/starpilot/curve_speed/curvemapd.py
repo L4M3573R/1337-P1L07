@@ -268,11 +268,24 @@ class CameraCheck:
             'signs_known': cam_k is not None}
 
 
+YAW_MIN_SPEED = 5.0  # m/s: below this yaw rate / speed is too noisy to be a curvature
+
+
+def measured_curvature(sm) -> float:
+  """The curvature the car is actually driving: the stability system's yaw rate over speed where the car reports it
+  (about 0.1 s sooner than controlsState's steering-angle curvature on 11-14 drives), else controlsState's."""
+  cs = sm['carState']
+  v, yaw = float(cs.vEgo), float(cs.yawRate)
+  if v > YAW_MIN_SPEED and yaw != 0.0 and math.isfinite(yaw):
+    return yaw / v
+  return float(sm['controlsState'].curvature)
+
+
 def sample_from(sm) -> Sample:
   cs, cc, ctl, gps = sm['carState'], sm['carControl'], sm['controlsState'], sm['gpsLocationExternal']
   lcs = ctl.lateralControlState
   saturated = lcs.which() == 'torqueState' and bool(lcs.torqueState.saturated)
-  return Sample(sm.logMonoTime['carState'] / 1e9, float(cs.vEgo), float(ctl.curvature), bool(cc.latActive),
+  return Sample(sm.logMonoTime['carState'] / 1e9, float(cs.vEgo), measured_curvature(sm), bool(cc.latActive),
                 bool(cc.longActive), bool(cs.brakePressed), bool(cs.gasPressed), bool(cs.steeringPressed), saturated,
                 bool(cs.cruiseState.enabled), float(gps.latitude), float(gps.longitude), float(gps.bearingDeg),
                 float(cs.steeringTorque), float(cc.actuators.torque), *lead_of(sm, float(cs.vEgo)))
@@ -331,7 +344,7 @@ def main() -> None:
       found = lookup.latest()
       model = sm['modelV2'] if sm.seen['modelV2'] else None
       cam = camera.camera_curvature(model) if model is not None else None
-      measured_k = float(sm['controlsState'].curvature)
+      measured_k = measured_curvature(sm)
       # every frame: the camera against the measured curvature, and the measured curvature against the map at the
       # car's position on the newest map profile (so the sign conventions are learned in seconds, not minutes)
       map_traveled += float(sm['carState'].vEgo) * 0.05

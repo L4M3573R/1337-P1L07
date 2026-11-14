@@ -338,6 +338,11 @@ class CarState(CarStateBase):
       ret.leftBlindspot = cp.vl["LCA11"]["CF_Lca_IndLeft"] != 0
       ret.rightBlindspot = cp.vl["LCA11"]["CF_Lca_IndRight"] != 0
 
+    if self.CP.carFingerprint == CAR.HYUNDAI_ELANTRA_HEV_2024:
+      # 1337: the stability system's yaw rate (ESP12, already parsed at 100 Hz) is deg/s with right turns positive
+      # (-0.997 correlation with curvature x speed on 11-13 drives); carState.yawRate is rad/s, left positive.
+      ret.yawRate = -cp.vl["ESP12"]["YAW_RATE"] * CV.DEG_TO_RAD
+
     # save the entire LKAS11 and CLU11
     if is_blended(self.CP):
       if self.CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG:

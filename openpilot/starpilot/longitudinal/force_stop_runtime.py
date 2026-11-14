@@ -66,6 +66,20 @@ class ForceStopRuntime:
     self.offset = 0
     self.options = CEMOptions()
     self.clock_offset = None
+    self.gate = 'starting'
+    self.context: dict = {}
+
+  def decision(self) -> dict:
+    """Decision log key: the gate that decided this frame and, past the gates, what the stop policy did."""
+    key = {'gate': self.gate, 'forcing': bool(self.plan.forcing), 'held': bool(self.plan.manual_hold)}
+    if self.gate == 'active':
+      key.update(self.policy.decision)
+    return key
+
+  def decision_context(self) -> dict:
+    ceiling = self.plan.speed_ceiling_mps
+    return {**self.context, 'ceiling_mph': round(ceiling * 2.237, 1) if ceiling is not None else None,
+            'stop_in_m': round(self.plan.tracked_distance_m, 1) if self.plan.forcing else None}
 
   def reset(self):
     self.vision_stop.reset()
@@ -97,10 +111,12 @@ class ForceStopRuntime:
       self.options = decode_preferences(conditional).cem if conditional is not None else CEMOptions()
       self.enabled = master == b'1' and safe in (None, b'0')
       self.takeoff_preferences_valid = True
-    except (OSError, RuntimeError, TypeError, ValueError, PreferenceError):
+    except (OSError, RuntimeError, TypeError, ValueError, PreferenceError) as e:
       self.enabled = False
       self.takeoff_preferences_valid = False
       self.reset()
+      from openpilot.starpilot.diagnostics.features import log_error
+      log_error('force_stop', e, where='settings (Force Stop stays off)')
 
   def sample(self, sm, cp, *, now_ns: int, now_boot_ns: int, drive_id: int,
              follow_seconds: float | None, traffic_mode: bool | None, takeoff_enabled: bool = False) -> StopPlan:
@@ -115,6 +131,7 @@ class ForceStopRuntime:
       if self.clock_offset is None or abs(offset - self.clock_offset) > 1_000_000:
         self.clock_offset = offset
         self.reset()
+        self.gate = 'clock re-sync'
         return self.plan
       services = ('modelV2', 'carState', 'carControl', 'controlsState', 'selfdriveState', 'radarState')
       current = all(sm.valid[name] and sm.alive[name] and
@@ -123,15 +140,27 @@ class ForceStopRuntime:
                     drive_id < int(sm.recv_time[name] * 1e9) <= now_ns and
                     0 <= now_ns - int(sm.recv_time[name] * 1e9) <= SOURCE_AGE_NS for name in services)
       car, control, state, model = (sm[name] for name in ('carState', 'carControl', 'selfdriveState', 'modelV2'))
+      lead_now = sm['radarState'].leadOne
+      self.context = {'v_mph': round(float(car.vEgo) * 2.237, 1),
+                      'lead_m': round(float(lead_now.dRel), 1) if lead_now.present else None}
       if ((not self.enabled and not takeoff_enabled) or (takeoff_enabled and not self.takeoff_preferences_valid) or
           not identity[1] or any(identity[2:]) or drive_id <= 0 or not current or
           not car.canValid or car.canTimeout or not (control.longActive or control.latActive) or
           sm['controlsState'].forceDecel or (traffic_mode is not False and not self.policy.forcing) or
           not 0 < model.timestampEof <= now_boot_ns or now_boot_ns - model.timestampEof > SOURCE_AGE_NS):
         self.reset()
+        self.gate = ('off' if not self.enabled and not takeoff_enabled else
+                     'settings unreadable' if takeoff_enabled and not self.takeoff_preferences_valid else
+                     'car not supported' if not identity[1] or any(identity[2:]) else
+                     'inputs not current' if drive_id <= 0 or not current or not 0 < model.timestampEof <= now_boot_ns or
+                     now_boot_ns - model.timestampEof > SOURCE_AGE_NS else
+                     'car CAN invalid' if not car.canValid or car.canTimeout else
+                     'not engaged' if not (control.longActive or control.latActive) else
+                     'forced decel' if sm['controlsState'].forceDecel else 'traffic mode')
         return self.plan
       stamp = int(sm.logMonoTime['modelV2'])
       horizon = _horizon(model)
+      self.context['horizon_m'] = round(horizon, 1) if horizon is not None else None
       curvature = road_curvature(model, car.vEgo)
       raw_curve = frozen_raw_curve(model, car.vEgo, sm['controlsState'].curvature, car.leftBlinker, car.rightBlinker)
       lead = sm['radarState'].leadOne
@@ -174,6 +203,7 @@ class ForceStopRuntime:
         self.policy.reset()
         self.plan = StopPlan(model_ns=stamp, takeoff_light_observed=takeoff_observed,
                              takeoff_light=takeoff_light)
+        self.gate = 'takeoff only (Force Stop off)'
         return self.plan
       # Model trajectories can oscillate around zero velocity at a predicted
       # stop. Invalid geometry cannot acquire a stop or prove that it is clear;
@@ -185,6 +215,7 @@ class ForceStopRuntime:
         self.resume.reset()
         self.policy.reset()
         self.plan = StopPlan()
+        self.gate = 'driver braking' if car.brakePressed else 'openpilot not controlling speed'
         return self.plan
       vision_sign = self.vision_stop.observe_message(
         sm, now_ns=now_ns, now_boot_ns=now_boot_ns, drive_id=drive_id)
@@ -207,9 +238,13 @@ class ForceStopRuntime:
                                             math.isfinite(model.velocity.x[-1])))
       tune = replace(vehicle_tune(str(cp.carFingerprint)), distance_control=distance_braking_eligible(cp))
       self.plan = self.policy.step(frame, tune, self.offset)
+      self.gate = 'active'
       if takeoff_enabled:
         self.plan = replace(self.plan, takeoff_light_observed=takeoff_observed, takeoff_light=takeoff_light)
       return self.plan
-    except (AttributeError, KeyError, TypeError, ValueError, OverflowError, RuntimeError):
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError, RuntimeError) as e:
       self.reset()
+      self.gate = 'error'
+      from openpilot.starpilot.diagnostics.features import log_error
+      log_error('force_stop', e, where='sample')
       return self.plan
