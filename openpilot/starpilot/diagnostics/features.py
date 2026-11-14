@@ -77,6 +77,85 @@ def radar_context(tandem, lead_one) -> dict:
   return context
 
 
+SLOW_LOG_MIN_GAP_S = 10.0
+_slow_last: dict[str, float] = {}
+
+
+def log_if_slow(feature: str, seconds: float, threshold_s: float, *, log=None, now: float | None = None, **fields) -> bool:
+  """Decision log for background work that took longer than it should (at most one event per feature per 10 s)."""
+  try:
+    if not seconds > threshold_s:
+      return False
+    import time
+    now = time.monotonic() if now is None else now
+    if now - _slow_last.get(feature, -1e9) < SLOW_LOG_MIN_GAP_S:
+      return False
+    _slow_last[feature] = now
+    if log is None:
+      from openpilot.common.swaglog import cloudlog
+      log = cloudlog.event
+    log(EVENT, feature=feature, slow_s=round(seconds, 3), threshold_s=threshold_s, **fields)
+    return True
+  except Exception:
+    return False
+
+
+LEAD_LOSS_NEAR_M = 30.0        # a lead this close that disappears is always logged
+LEAD_LOSS_MAX_M = 80.0         # ...and one up to this far if the car was closing in on it
+LEAD_LOSS_CLOSING_MPS = -1.0
+LEAD_REGAIN_WINDOW_S = 20.0    # a lead appearing within this long after a loss is logged as its return
+LEAD_SAMPLE_MAX_GAP_S = 0.5
+
+
+def _lead_fields(lead_one):
+  get = (lambda k, d=None: lead_one.get(k, d)) if isinstance(lead_one, dict) else (lambda k, d=None: getattr(lead_one, k, d))
+  present = bool(get('present', False)) if lead_one is not None else False
+  if not present:
+    return False, None, None, None, None
+  return True, _finite(get('dRel')), _finite(get('vRel')), _finite(get('modelProb')), bool(get('radar', False))
+
+
+class LeadLossLog:
+  """radard: one event when a lead that mattered (near, or being closed on) disappears, and one when a lead returns,
+  with where it would have been had it been tracked all along (a stopped car lost and found again shows up as
+  "returned at about the expected distance")."""
+
+  def __init__(self, log=None):
+    self.log = log
+    self.last: dict | None = None
+    self.lost: dict | None = None
+
+  def _emit(self, **fields) -> None:
+    try:
+      log = self.log
+      if log is None:
+        from openpilot.common.swaglog import cloudlog
+        log = cloudlog.event
+      log(EVENT, feature='lead_loss', **fields)
+    except Exception:
+      pass
+
+  def observe(self, t: float, lead_one, v_ego: float) -> None:
+    present, d, v, prob, radar = _lead_fields(lead_one)
+    if present:
+      if self.lost is not None and t - self.lost['t'] <= LEAD_REGAIN_WINDOW_S:
+        gap = t - self.lost['t']
+        expected = max(self.lost['drel'] + self.lost['vrel'] * gap, 0.0)
+        self._emit(what='returned', gap_s=round(gap, 2), drel=d, vrel=v, model_prob=prob, radar=radar,
+                   expected_drel=round(expected, 1), v_ego=_finite(v_ego),
+                   likely_same_object=abs(d - expected) <= max(10.0, 0.3 * self.lost['drel']))
+      self.lost = None
+      self.last = {'t': t, 'drel': d, 'vrel': v, 'model_prob': prob, 'radar': radar}
+      return
+    last, self.last = self.last, None
+    if last is None or t - last['t'] > LEAD_SAMPLE_MAX_GAP_S:
+      return
+    if last['drel'] < LEAD_LOSS_NEAR_M or (last['drel'] < LEAD_LOSS_MAX_M and last['vrel'] < LEAD_LOSS_CLOSING_MPS):
+      self.lost = last
+      self._emit(what='lost', drel=last['drel'], vrel=last['vrel'], model_prob=last['model_prob'], radar=last['radar'],
+                 v_ego=_finite(v_ego), time_to_reach_s=round(last['drel'] / -last['vrel'], 1) if last['vrel'] < -0.1 else None)
+
+
 def aol_decision(intent) -> dict:
   """card: the AOL latch, the arm kept for the Panda, why the latch last dropped, and a pending gear re-arm."""
   retained = getattr(intent, 'lateral_arm_retained', None)

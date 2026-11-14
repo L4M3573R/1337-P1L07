@@ -25,8 +25,11 @@ from openpilot.starpilot.navigation.road_tiles import LINK
 from openpilot.starpilot.curve_speed.curve_memory import CURVE_K, MIN_SPEED as CURVE_MIN_SPEED, CurveMemory, CurvePass, PassTracker, Sample
 
 SERVICES = ['carState', 'carControl', 'controlsState', 'gpsLocationExternal', 'selfdriveState', 'radarState', 'modelV2']
-LOOKUP_PERIOD_S = 2.0
-LOOKUP_MOVE_M = 20.0      # no new map lookup until the car has moved this far (parked, crawling)
+# Map lookups are the costly part (each rebuilds the road profile of every branch ahead). 11-13: lookups every 2 s
+# while turning at a junction pushed this process to ~25% of a core during a CPU-starved moment that ended in a
+# System Lagging alert; plans look 500 m+ ahead, so every 5 s / 50 m loses nothing.
+LOOKUP_PERIOD_S = 5.0
+LOOKUP_MOVE_M = 50.0      # no new map lookup until the car has moved this far (parked, crawling)
 GPS_MAX_AGE_S = 1.5
 GPS_MAX_ACCURACY_M = 15.0
 TILE_RADIUS_M = 1100.0
@@ -37,6 +40,7 @@ PREDICTION_MATCH_M = 60.0
 LIVE_TIGHTER = 1.15        # the curve measuring this much tighter than predicted would lower the rest of the plan now
 LIVE_TORQUE = 0.9          # ...and so would needing this share of the comma's full steering torque
 LIVE_WINDOW = 20           # samples (1 s at 20 Hz) in the rolling median of measured/predicted tightness
+SLOW_LOOKUP_S = 0.5        # a map lookup slower than this is written to the decision log
 
 
 def storage() -> Path:
@@ -206,10 +210,14 @@ class MapLookup:
       if job is None:
         continue
       t, latitude, longitude, bearing, speed, prefer = job
+      started = time.monotonic()
       try:
         branches = map_curves.branch_profiles(self._tiles(latitude, longitude), latitude, longitude, bearing)
       except Exception:  # a bad tile must never take the daemon down
         branches = {}
+      from openpilot.starpilot.diagnostics.features import log_if_slow
+      log_if_slow('curve_map_lookup', time.monotonic() - started, SLOW_LOOKUP_S, branches=len(branches),
+                  turning=prefer or '', speed=round(float(speed), 1))
       path = prefer if prefer in branches else 'straight'
       with self._lock:
         self._latest = (t, latitude, longitude, speed, branches.get(path), path, branches)

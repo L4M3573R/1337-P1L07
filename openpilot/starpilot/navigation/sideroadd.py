@@ -19,12 +19,19 @@ from openpilot.starpilot.navigation.blinker_turns import (
 POLL_S = 0.05
 
 
+SLOW_LOOKUP_S = 0.3  # a blinker-turn road search slower than this is written to the decision log
+
+
 def answer(finder: MapTurnFinder, request: dict) -> Lookup:
   t, side = float(request['t']), str(request['side'])
+  started = time.monotonic()
   try:
     return finder.lookup_now(t, float(request['latitude']), float(request['longitude']), float(request['bearing']), side)
   except Exception:  # a bad tile or store must never take this process down
     return Lookup(t, side, None, False)
+  finally:
+    from openpilot.starpilot.diagnostics.features import log_if_slow
+    log_if_slow('side_road_lookup', time.monotonic() - started, SLOW_LOOKUP_S, side=side)
 
 
 def step(finder: MapTurnFinder, last_seen: float, request_path=REQUEST_PATH, result_path=RESULT_PATH) -> float:

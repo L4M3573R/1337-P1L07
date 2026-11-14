@@ -425,8 +425,9 @@ def main() -> None:
               honda_bosch_a_radar=honda_bosch_a, use_voacc=voacc_selected(params, CP),
               tandem_fusion=tandem_supported(CP.carFingerprint, CP.radarUnavailable))
   pm = messaging.PubMaster(['radarState', 'starpilotRadarState'] if adjacent_enabled else ['radarState'])
-  from openpilot.starpilot.diagnostics.features import ChangeLog, radar_context, radar_decision
+  from openpilot.starpilot.diagnostics.features import ChangeLog, LeadLossLog, radar_context, radar_decision
   fusion_log = ChangeLog('tandem_fusion')  # decision log for remote route review
+  lead_loss_log = LeadLossLog()  # decision log: a near or closing lead disappearing, and its return
   set_core_affinity([3, 5])
 
   while 1:
@@ -436,6 +437,11 @@ def main() -> None:
     RD.publish(pm)
     if RD.tandem is not None and RD.radar_state is not None:
       fusion_log.observe(radar_decision(RD.tandem), radar_context(RD.tandem, RD.radar_state.leadOne))
+    if RD.radar_state is not None:
+      try:
+        lead_loss_log.observe(time.monotonic(), RD.radar_state.leadOne, float(sm['carState'].vEgo))
+      except Exception:
+        pass
 
 
 if __name__ == "__main__":

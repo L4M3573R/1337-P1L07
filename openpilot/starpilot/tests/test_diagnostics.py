@@ -28,7 +28,8 @@ def test_a_failing_logger_drops_the_record_instead_of_raising():
 
 def test_turn_decision_names_the_source_or_the_gate():
   sent = turn_decision(NS(source='blinker', blocked_by='', signal_stop_hold=False, stop_hold=False), 2)
-  assert sent == {'desire': 2, 'source': 'blinker', 'blocked_by': '', 'signal_stop_hold': False, 'nav_stop_hold': False}
+  assert sent == {'desire': 2, 'source': 'blinker', 'blocked_by': '', 'signal_stop_hold': False, 'nav_stop_hold': False,
+                  'timed': '', 'timed_turning': False, 'timed_start_m': None}  # timed-turn fields since 2792a5f492
   held = turn_decision(NS(source='', blocked_by='stop predicted', signal_stop_hold=True, stop_hold=False), 0)
   assert held['blocked_by'] == 'stop predicted' and held['signal_stop_hold']
   assert turn_decision(NS(), object())['desire'] == -1

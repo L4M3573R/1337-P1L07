@@ -7,7 +7,7 @@ Copies /data/starpilot/efficiency/drives/*.json from the first reachable host in
 ./fuel_data), then writes per-drive MPG for the driver and the comma (BlueDriver, battery-adjusted), the
 running averages, the matched comma-versus-driver comparison per comma mode, trip reports (per drive, MPG by
 drive mode, tire pressure, outside temperature and road type, fill-ups and a tank-level fuel check) and the
-latest BlueDriver health check, as JSON.
+latest BlueDriver health check, and the shadow efficiency learner's findings (learner.py), as JSON.
 """
 import argparse
 import json
@@ -15,7 +15,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from openpilot.starpilot.efficiency import compare, trend, trips
+from openpilot.starpilot.efficiency import compare, learner, trend, trips
 
 
 def pull(hosts: list[str], local: Path, key: str) -> str | None:
@@ -65,6 +65,7 @@ def summarize(local: Path, host: str | None, gas_price: float | None = None, tan
   out['drive_modes_vs_eco'] = trips.drive_mode_comparison(records)
   out['fill_ups'] = trips.fill_ups(drives, tank_gal)
   out['tank_check'] = trips.tank_check(drives, tank_gal)
+  out['learner'] = learner.learn_stored(local)
   try:
     out['health'] = json.loads((local / 'health.json').read_text())
   except (OSError, ValueError):
@@ -88,6 +89,7 @@ def main():
   print(f"pulled from {host or 'nowhere (using the last copy)'}: {n} drives with measured fuel")
   print('comparison:', out['comparison']['all'])
   print('current averages: you', out['you_avg'][-1] if n else None, '| comma', out['comma_avg'][-1] if n else None)
+  print('\n'.join(learner.report_lines(out['learner'])))
 
 
 if __name__ == '__main__':

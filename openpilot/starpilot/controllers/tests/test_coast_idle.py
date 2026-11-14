@@ -87,7 +87,7 @@ class TestCoastIdle(unittest.TestCase):
             second = sample(runtime, params, cp, sm, stop_context=stop)
           self.assertEqual(first, CoastPlan())
           self.assertIsNot(first, second)
-          self.assertFalse(any(vars(runtime.owner).values()))
+          self.assertFalse(any(v for k, v in vars(runtime.owner).items() if k != 'change_reason'))  # the reason is log text
           self.assertEqual(bookkeeping, {key: value for key, value in vars(runtime).items() if key not in ('owner', 'consumer')})
           self.assertEqual(vars(runtime.consumer), consumer)
           reads.assert_not_called()
@@ -203,7 +203,7 @@ class TestCoastIdle(unittest.TestCase):
             changed.canTimeout = True
           sm.data['carState'] = changed.as_reader()
         self.assertEqual(sample(runtime, params, cp, sm, **changes), CoastPlan())
-        self.assertFalse(any(vars(runtime.owner).values()))
+        self.assertFalse(any(v for k, v in vars(runtime.owner).items() if k != 'change_reason'))  # the reason is log text
 
 
 if __name__ == '__main__':

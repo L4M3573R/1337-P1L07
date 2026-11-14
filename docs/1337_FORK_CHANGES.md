@@ -55,7 +55,8 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
 ### Longitudinal
 - **Pulse and Glide** (`ba0c53b85a`, `7c751f99ca`, `4f1ebefe17`, `fe95dc1425`): `starpilot/controllers/coast.py`
   (steady pulse, zero-torque/EV feather glide below ~63 mph, dash-speed band, `PULSE_START_LAG_S`,
-  `ClusterRatioFilter`), `selfdrive/controls/lib/longitudinal_planner.py`.
+  `ClusterRatioFilter`), `selfdrive/controls/lib/longitudinal_planner.py`. Survives stops: the filtered vEgo dips a
+  hair below zero at standstill (`STANDSTILL_NOISE_MPS`), which used to wipe the driver's Pulse and Glide choice.
 - **CEM stops** (`dac4e3ce32`, `1102863c55`): `starpilot/conditional_mode/stop_release.py`, `stop.py`.
 
 ### Lateral
@@ -83,6 +84,11 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   battery in the ledger, tank level, read-only health check.
 - **Comma vs driver and PC reports** (`575dc06820`, `835eb17fa5`): `efficiency/compare.py`, `trend.py`, `trips.py`,
   `pc_summary.py`.
+- **Self-learning fuel efficiency (shadow)**: `efficiency/learner.py`, shown by `pc_summary.py` (`learner`). From
+  BlueDriver measured, battery-adjusted fuel only: learns the EV cut-off speed for feather glides (fixed 63 mph in
+  `coast.py`), where Pulse and Glide beats steady cruise per speed band and the deepest band the driver's time budget
+  allows (`TIME_BUDGET_MIN_PER_HR` 2.5, at most 5 mph under), and what running up to 2 mph over the set speed on open
+  downhills would keep. Reports only; nothing reads it for control. Tests in `efficiency/tests/test_learner.py`.
 
 ### Settings and UI
 - **L4 custom tile** (`c5e36c122d`, `e825ae80af`, `b91e0d2fa9`, `eb47adb2ca`, `575dc06820`):
@@ -97,6 +103,13 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   `runtime_bridge/runtime.py`, `modeld.py`.
 - **Decision logs** (`4f1ebefe17`, `2792a5f492`): `starpilot/diagnostics/features.py`, reserved
   `starpilotLongitudinalPlan` in `cereal/custom.capnp`.
+- **1337 tracing** (2026-11-13): `starpilot/diagnostics/traced.py` (traced, onroad ancillary, little cores, nice 19)
+  writes `<storage>/trace/YYYY-MM-DD.jsonl` on the comma: every `starpilot_feature` decision event, an `alert` CPU
+  snapshot (cores, temperature, busiest processes) on any disengaging or lag/fault warning, and a per-minute `load` line;
+  keeps 14 days. New decision logs: `lead_loss` (`features.LeadLossLog`, fed by `radard.py`), `pulse_glide` on/off with
+  the reason (`coast.py` `change_reason` / `admission_failure`), slow map lookups (`features.log_if_slow` in
+  `sideroadd.py` and `curvemapd.py`). PC timeline: `python -m openpilot.starpilot.diagnostics.trace_report <folder>
+  <route> [--from M:SS --to M:SS]`. Tests in `starpilot/tests/test_trace.py`.
 - **Tailscale on boot** (`eb47adb2ca`): `launch_chffrplus.sh` (`tailscale_init`).
 - **Partition links for AGNOS 20.5.1**: `launch_chffrplus.sh` (`partition_links`) recreates missing
   `/dev/disk/by-partlabel` links every boot; without `bluetooth_<slot>` the Bluetooth radio never starts (no

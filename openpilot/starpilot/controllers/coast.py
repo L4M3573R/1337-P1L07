@@ -48,6 +48,8 @@ CLUSTER_RATIO_MIN_SPEED = 5.0
 # The dash speed is whole mph, so one sample's ratio jumps about +/-2.5% at 40 mph (the band edges moved
 # +/-0.75 mph). A slow average settles on the true ratio while the speed sweeps the band.
 CLUSTER_RATIO_TAU_S = 30.0
+# A stopped car's filtered speed can dip just below zero; anything this close to zero is a standstill.
+STANDSTILL_NOISE_MPS = -0.5
 
 
 def glide_accel(speed_mps, pitch):
@@ -133,27 +135,38 @@ class CoastOwner:
     self.coasting = False
     self.hill_paused = False
     self.last_target = None
+    self.change_reason = 'start'  # decision log: why the modes last changed
 
-  def reset(self):
+  def reset(self, reason: str = 'reset'):
     self.__init__()
+    self.change_reason = reason
 
   def toggle(self, action, *, long_active):
     if action == 2:
       self.force_coast = not self.force_coast
+      self.change_reason = 'driver toggled force coast'
       return True
     if action == 14 and (long_active or self.pulse_glide):
       self.pulse_glide = not self.pulse_glide
+      self.change_reason = 'driver toggled pulse and glide'
       return True
     return False
 
   def sample(self, *, admitted, active, gas, brake, speed_mps, target_mps, delta_mps, pitch,
              lead_relevant, stop_context):
     values = (speed_mps, target_mps, delta_mps)
+    # At a stop the filtered vEgo undershoots a hair below zero (about -0.0001 m/s while vEgoRaw is 0): that is a
+    # standstill, not bad data, and must not wipe the driver's Pulse and Glide choice. Real reversing still resets.
+    if type(speed_mps) in (int, float) and STANDSTILL_NOISE_MPS <= speed_mps < 0:
+      speed_mps = 0.0
     if (not admitted or not all(type(value) in (int, float) and math.isfinite(value) for value in values) or
         speed_mps < 0 or delta_mps < 0 or type(active) is not bool or type(gas) is not bool or
         type(brake) is not bool or type(lead_relevant) is not bool or type(stop_context) is not bool):
-      self.reset()
+      self.reset('not admitted' if not admitted else
+                 f'bad input (speed {speed_mps!r}, target {target_mps!r}, delta {delta_mps!r})')
       return CoastPlan()
+    if self.force_coast and (gas or brake):
+      self.change_reason = 'force coast ended by the pedals'
     self.force_coast &= not (gas or brake)
     if not active:
       self.last_target = None
@@ -213,13 +226,15 @@ class CoastRuntime:
     self.conditional_stop = False
     self.cluster_ratio = 1.0  # logging: the dash/wheel ratio used by the last sample
     self.ratio_filter = ClusterRatioFilter()
+    self.admission_failure = ''  # decision log: the first admission check that failed, if any
+    self.decision_log = None
 
   def receive(self, event, params, cp, sm, *, now_ns):
     command = self.consumer.accept(event, params, cp, sm, now_ns=now_ns)
     if command is None:
       return False
     if command.session != self.session or command.drive_id != self.drive:
-      self.owner.reset()
+      self.owner.reset('new wheel session or drive')
       self.session, self.drive = command.session, command.drive_id
     from openpilot.starpilot.controllers.wheel_actions import cp_fingerprint
     self.cp_signature = cp_fingerprint(cp)
@@ -259,7 +274,7 @@ class CoastRuntime:
         if (type(device) is _DynamicStructReader and device.schema == log.DeviceState.schema and
             type(state) is _DynamicStructReader and state.schema == car.CarState.schema and
             type(control) is _DynamicStructReader and control.schema == car.CarControl.schema):
-          self.owner.reset()
+          self.owner.reset('no wheel heartbeat yet')
           return CoastPlan()
     drive = int(sm["deviceState"].startedMonoTime)
     raw, readable = read_saved(params, "PulseGlideSpeedDelta", 32)
@@ -268,25 +283,46 @@ class CoastRuntime:
       delta = 5.0 if raw is None else float(raw)
     except (ValueError, TypeError, OverflowError):
       delta = math.nan
-    admitted = bool(eligible(cp) and self.cp_signature == cp_fingerprint(cp) and cp.openpilotLongitudinalControl and sm["deviceState"].started and
-                    drive == self.drive and 0 < drive < self.consumer.last_heartbeat <= now_ns and
-                    now_ns - self.consumer.last_heartbeat <= LIFETIME_NS and
-                    all(fresh_service(sm, name, drive, now_ns) for name in ("carState", "carControl")) and
-                    sm["carState"].canValid and not sm["carState"].canTimeout and
-                    read_saved(params, "SafeMode", 8) in ((None, True), (b"0", True)) and
-                    readable and unit_readable and units in (None, b"0", b"1") and
-                    math.isfinite(delta) and 0.5 <= delta <= 30.0)
+    # The same admission checks as before, in the same order; the first that fails is kept for the decision log.
+    checks = (('car not eligible', lambda: eligible(cp)), ('car changed', lambda: self.cp_signature == cp_fingerprint(cp)),
+              ('no openpilot longitudinal', lambda: cp.openpilotLongitudinalControl),
+              ('not started', lambda: sm["deviceState"].started), ('drive changed', lambda: drive == self.drive),
+              ('wheel heartbeat out of order', lambda: 0 < drive < self.consumer.last_heartbeat <= now_ns),
+              ('wheel heartbeat late', lambda: now_ns - self.consumer.last_heartbeat <= LIFETIME_NS),
+              ('car state stale', lambda: all(fresh_service(sm, name, drive, now_ns) for name in ("carState", "carControl"))),
+              ('CAN invalid', lambda: sm["carState"].canValid and not sm["carState"].canTimeout),
+              ('safe mode', lambda: read_saved(params, "SafeMode", 8) in ((None, True), (b"0", True))),
+              ('settings unreadable', lambda: readable and unit_readable and units in (None, b"0", b"1")),
+              ('speed band setting invalid', lambda: math.isfinite(delta) and 0.5 <= delta <= 30.0))
+    self.admission_failure = next((name for name, ok in checks if not ok()), '')
+    admitted = not self.admission_failure
     state, control = sm["carState"], sm["carControl"]
     pitch = control.orientationNED[1] if len(control.orientationNED) == 3 else None
     # Express the dash-speed band in wheel speed: the set speed and delta the driver sees on the dash.
     ratio_filter = getattr(self, 'ratio_filter', None)
     ratio = ratio_filter.update(state) if ratio_filter is not None else cluster_ratio(state)
     self.cluster_ratio = ratio
-    return self.owner.sample(admitted=admitted, active=bool(control.enabled and control.longActive),
+    plan = self.owner.sample(admitted=admitted, active=bool(control.enabled and control.longActive),
                              gas=bool(state.gasPressed), brake=bool(state.brakePressed), speed_mps=float(state.vEgo),
                              target_mps=target_mps / ratio,
                              delta_mps=delta * (1 / 3.6 if units == b"1" else 0.44704) / ratio,
                              pitch=pitch, lead_relevant=lead_relevant, stop_context=bool(stop_context or self.conditional_stop))
+    self._log_decision(float(state.vEgo))
+    return plan
+
+  def _log_decision(self, v_ego: float) -> None:
+    """Decision log: one event whenever Pulse and Glide or Force Coast turns on or off, with the reason."""
+    try:
+      if self.decision_log is None:
+        from openpilot.starpilot.diagnostics.features import ChangeLog
+        self.decision_log = ChangeLog('pulse_glide')
+      reason = self.owner.change_reason
+      if reason == 'not admitted' and self.admission_failure:
+        reason = f'not admitted: {self.admission_failure}'
+      self.decision_log.observe({'pulse_glide': self.owner.pulse_glide, 'force_coast': self.owner.force_coast},
+                                {'reason': reason, 'v_ego': round(v_ego, 3)})
+    except Exception:
+      pass
 
 
 def plan_log_fields(plan: CoastPlan | None, runtime=None) -> dict:

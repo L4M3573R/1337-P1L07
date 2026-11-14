@@ -39,6 +39,21 @@ def test_pulse_glide_hysteresis_grade_pause_and_band():
   assert sample(owner, target_mps=15.0, speed_mps=15.0).speed_ceiling_mps is None
 
 
+def test_pulse_glide_survives_the_speed_dip_below_zero_at_a_stop():
+  # 11-13 drive: stopped at a light, vEgo filtered to -0.00014 m/s (vEgoRaw 0) and Pulse and Glide switched itself off.
+  owner = CoastOwner()
+  assert owner.toggle(14, long_active=True)
+  for speed in (0.0002, -2.8e-07, -0.00014, -0.00026, 0.0):
+    sample(owner, speed_mps=speed, brake=True)
+    assert owner.pulse_glide
+  assert sample(owner).pulse_coasting  # and it carries on once moving again
+  sample(owner, speed_mps=-2.0)  # real reversing is still not a speed Pulse and Glide accepts
+  assert not owner.pulse_glide
+  owner.toggle(14, long_active=True)
+  sample(owner, speed_mps=math.nan)
+  assert not owner.pulse_glide
+
+
 @pytest.mark.parametrize('speed', [12.0, 20.0, 27.0, 29.0, 35.0])
 def test_glide_feathers_in_ev_below_the_cutoff_and_keeps_the_regen_glide_above(speed):
   owner = CoastOwner()
