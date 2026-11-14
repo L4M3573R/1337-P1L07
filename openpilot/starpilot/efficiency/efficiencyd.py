@@ -29,6 +29,7 @@ CHECKPOINT_S = 60.0
 OBD_READ_S = 1.0
 SIGNAL_ADDRS = (MODE_ADDR, MDPS11_ADDR)
 METERS_PER_MILE = 1609.344
+ANNOUNCE_AFTER_S = 10.0   # the start event waits until the trace daemon (started alongside) is listening
 
 
 class Recorder:
@@ -161,7 +162,7 @@ def main() -> None:
   sources_log = ChangeLog('efficiency_sources', min_gap_s=5.0)
   started = time.monotonic()
   loop_errors = 0
-  cloudlog.event(EVENT, feature='efficiency', what='recording', drive=recorder.drive_id)
+  announced = False
 
   def stop(*_):
     raise SystemExit(0)
@@ -183,6 +184,9 @@ def main() -> None:
         except Exception as e:
           log_error('efficiency', e, where='BlueDriver live file')
         sources_log.observe(recorder.sources(), {'ledger_stretches': len(recorder.ledger.stretches)}, now=now)
+      if not announced and now - started >= ANNOUNCE_AFTER_S:
+        announced = True
+        cloudlog.event(EVENT, feature='efficiency', what='recording', drive=recorder.drive_id, **recorder.sources())
       recorder.maybe_checkpoint(now)
   finally:
     recorder.finish()

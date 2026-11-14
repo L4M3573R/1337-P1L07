@@ -14,6 +14,7 @@ from openpilot.starpilot.edgemap.recorder import DriveLog, sample_row
 
 SERVICES = ['modelV2', 'carState', 'carControl', 'deviceMotion', 'gpsLocationExternal']
 CHECKPOINT_S = 60.0
+ANNOUNCE_AFTER_S = 10.0   # the start event waits until the trace daemon (started alongside) is listening
 
 
 def drive_id() -> str:
@@ -31,7 +32,7 @@ def main() -> None:
   from openpilot.common.swaglog import cloudlog
   started = time.monotonic()
   stats = {'samples_failed': 0, 'saves_failed': 0, 'no_gps_samples': 0}
-  cloudlog.event(EVENT, feature='edge_map', what='recording', drive=log.drive_id)
+  announced = False
 
   def save() -> None:
     try:
@@ -62,6 +63,9 @@ def main() -> None:
           stats['samples_failed'] += 1
           log_error('edge_map', e, where='sample')
       now = time.monotonic()
+      if not announced and now - started >= ANNOUNCE_AFTER_S:
+        announced = True
+        cloudlog.event(EVENT, feature='edge_map', what='recording', drive=log.drive_id, rows=len(log.rows), **stats)
       if now - last_checkpoint >= CHECKPOINT_S:
         last_checkpoint = now
         save()
