@@ -53,3 +53,12 @@ def test_an_old_file_at_startup_is_not_shown_until_it_changes(tmp_path):
   path.write_text(json.dumps({'done': 4, 'total': 10, 'percent': 40.0, 'state': 'pulling', 'seq': 8}))
   now[0] += 2.5
   assert status.text() == 'DR4L Uploading: 40%'
+
+
+
+def test_newest_then_old_drives():
+  from openpilot.starpilot.ui.dr4l_upload import upload_text
+  assert upload_text({'done': 3, 'total': 9, 'percent': 35.2, 'state': 'pulling', 'phase': 'newest'}, 1.0) == 'Pulling newest drives: 35%'
+  assert upload_text({'done': 40, 'total': 600, 'percent': 11.4, 'state': 'pulling', 'phase': 'old'}, 1.0) == 'Pulling old drives: 11%'
+  assert upload_text({'done': 9, 'total': 9, 'percent': 100.0, 'state': 'done', 'phase': 'newest'}, 5.0) == 'Pulling newest drives: 100%'
+  assert upload_text({'done': 1, 'total': 2, 'percent': 50.0, 'state': 'pulling'}, 1.0) == 'DR4L Uploading: 50%'   # older puller

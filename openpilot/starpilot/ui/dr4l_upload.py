@@ -34,11 +34,13 @@ def upload_text(doc: dict | None, age: float) -> str:
     return ''
   if not math.isfinite(percent) or total <= 0 or not 0 <= done <= total or not math.isfinite(age):
     return ''
+  # DR4L's comma puller says which drives it is on: the newest ones first, then the backlog of old ones
+  label = {'newest': 'Pulling newest drives', 'old': 'Pulling old drives'}.get(doc.get('phase'), 'DR4L Uploading')
   if doc.get('state') == 'done':
-    return 'DR4L Uploading: 100%' if age <= DONE_SHOW_S else ''
+    return f'{label}: 100%' if age <= DONE_SHOW_S else ''
   if age > STALE_S:
     return ''
-  return f'DR4L Uploading: {max(0.0, min(percent, 99.0)):.0f}%'
+  return f'{label}: {max(0.0, min(percent, 99.0)):.0f}%'
 
 
 class UploadStatus:
