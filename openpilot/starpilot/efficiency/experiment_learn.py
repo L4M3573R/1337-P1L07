@@ -17,7 +17,8 @@ A variant qualifies when every variant has enough measurements (MIN_MILES / MIN_
 comma's normal driving) by MIN_GAIN and stays ahead of it in CONFIDENCE of bootstrap resamples. Which qualifying variant
 is used weighs fuel against time: time-free savings always, then the driver's budget (experiment.TIME_BUDGET_S_PER_H)
 is spent across all situations on the steps that save the most fuel per extra minute, so the minutes go where they
-pay most and a dearer step that adds little is left out (diminishing returns).
+pay most and a dearer step that adds little is left out (diminishing returns). A step must also save at least
+MIN_GAL_PER_MINUTE per extra minute, budget left or not: below that the time is not worth the fuel.
 The winners go to <efficiency>/experiments.json, which the planner's experimenter reads at the start of each drive.
 """
 from __future__ import annotations
@@ -49,6 +50,7 @@ MIN_FIT_STRETCHES = 300
 SEASON_BANDS = ((10.0, 'cold'), (22.0, 'mild'), (math.inf, 'warm'))   # outside temperature, C: upper bound, name
 STRATUM_MIN_MILES = 0.5   # a curve class counts only when every variant drove at least this much of it
 STRATUM_MIN_EPISODES = 2
+MIN_GAL_PER_MINUTE = 0.02  # a minute must save at least this much fuel (~6-7 cents at $3.20/gal, ~$4 per hour of time)
 
 
 class Run(NamedTuple):
@@ -298,7 +300,9 @@ def _spend_budget(results: dict, options: dict, miles_per_hour: dict[str, float]
         continue
       share = (miles_per_hour or {}).get(key)
       per_hr = (nxt[2] - cost) * share / 100.0 if share is not None else 0.0   # minutes per engaged hour
-      steps.append(((nxt[1] - saved) / (nxt[2] - cost), per_hr, key, nxt))
+      ratio = (nxt[1] - saved) / (nxt[2] - cost)   # gal/100 mi over min/100 mi: gallons per extra minute
+      if ratio >= MIN_GAL_PER_MINUTE:
+        steps.append((ratio, per_hr, key, nxt))
     affordable = [st for st in steps if st[1] <= left + 1e-9]
     if not affordable:
       break
@@ -315,6 +319,9 @@ def _spend_budget(results: dict, options: dict, miles_per_hour: dict[str, float]
       entry['status'] = f'{v} saves {100 * gain:.1f}% ({saved:.2f} gal/100 mi) for {value}'
       if best[0] != v:
         entry['status'] += f'; {best[0]} saves more but the extra minutes pay less'
+    elif best[2] > 0 and best[1] / best[2] < MIN_GAL_PER_MINUTE:
+      entry['status'] = (f'{best[0]} saves {100 * best[3]:.1f}% but only {best[1] / best[2]:.3f} gal per extra minute: '
+                         + 'not worth the time')
     else:
       entry['status'] = (f'{best[0]} saves {100 * best[3]:.1f}% but costs {best[2]:.1f} min/100 mi: '
                          + 'the time budget saves more fuel elsewhere')

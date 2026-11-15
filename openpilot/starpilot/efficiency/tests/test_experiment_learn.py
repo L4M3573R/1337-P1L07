@@ -160,3 +160,16 @@ def test_the_budget_goes_where_a_minute_saves_the_most_fuel():
   # with the full budget both get their step
   r = el.judge(el.samples([drive]), situation_miles_per_hour=share, budget_min_per_hr=4.0)
   assert r['cruise|30-45']['winner'] == 'under2'
+
+
+def test_a_step_below_the_minute_floor_is_skipped_even_with_budget_left():
+  rng = random.Random(15)
+  # 'under2' saves 0.15 gal/100 mi but costs 12 min/100 mi: 0.0125 gal per extra minute, under the floor
+  drive = (tagged('cruise|45-60|set', runs(rng, 20, 0.030, seconds_per_mile=70.0)) +
+           tagged('cruise|45-60|under2', runs(rng, 20, 0.0285, seconds_per_mile=77.2)) +
+           tagged('cruise|45-60|under4', runs(rng, 20, 0.0300, seconds_per_mile=85.0)))
+  r = el.judge(el.samples([drive]), situation_miles_per_hour={'cruise|45-60': 20.0}, budget_min_per_hr=40.0)
+  entry = r['cruise|45-60']
+  assert el.MIN_GAL_PER_MINUTE == 0.02
+  assert entry['winner'] == 'set' and 'not worth the time' in entry['status']
+  assert r['_budget']['left_min_per_hr'] == 40.0

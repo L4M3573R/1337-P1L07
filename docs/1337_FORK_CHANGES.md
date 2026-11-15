@@ -172,7 +172,7 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   summer never weighed against winter); fuel and time are compared per curve class (straight/gentle/curvy, from yaw)
   with equal weights; time-free savings are always taken, then `_spend_budget` spends the 4 min/hr on the steps with the
   most fuel per extra minute across situations, weighted by miles per engaged hour (`situation_miles`), so a dearer step
-  that adds little is left out; writes `<efficiency>/experiments.json` (winners, season, budget) at the end of each drive). Tests in
+  that adds little is left out, and no step under `MIN_GAL_PER_MINUTE` (0.02 gal per extra minute, ~$4/hr) is taken; writes `<efficiency>/experiments.json` (winners, season, budget) at the end of each drive). Tests in
   `starpilot/efficiency/tests/test_experiment*.py`.
 - **Turn speed for signalled turns** (2026-11-14): `starpilot/navigation/turn_speed.py`. modeld's blinker-turn logic
   (`intent._timed_turn`) publishes side / turning / distance to the side road / its map angle to
