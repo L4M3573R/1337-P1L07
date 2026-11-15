@@ -322,3 +322,18 @@ def test_cluster_ratio_filter_averages_out_whole_mph_dash_readings():
   assert max(raw) - min(raw) > 0.02                                 # single samples jump around
   assert value == pytest.approx(1.027, abs=0.004)                   # the average does not
   assert f.update(NS(vEgo=20.0, vEgoCluster=26.0)) == pytest.approx(value)  # implausible reading ignored
+
+
+def test_stored_band_over_5_mph_is_clamped_to_5(tmp_path, monkeypatch):
+  # The glide may drop at most 5 mph under the set speed (the driver's limit); an old 7 mph setting is clamped.
+  seen = []
+  real = CoastOwner.sample
+  monkeypatch.setattr(CoastOwner, 'sample', lambda self, **kw: (seen.append(kw['delta_mps']), real(self, **kw))[1])
+  params = Params(str(tmp_path))
+  params.put('IsMetric', False, block=True)
+  cp = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
+  for stored, expected_mph in ((7.0, 5.0), (3.0, 3.0)):
+    seen.clear()
+    params.put('PulseGlideSpeedDelta', stored, block=True)
+    run_planner(params, cp, action=14)
+    assert seen and max(seen) == pytest.approx(expected_mph * 0.44704, rel=1e-6)

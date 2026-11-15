@@ -13,8 +13,9 @@ import tempfile
 from pathlib import Path
 
 NNLC_MODES = ('auto', 'off', 'on')  # auto: the off-car trainer's trial decides; off/on: the driver's override
-PG_DELTAS_MPH = (3.0, 5.0, 7.0)
-PG_DELTAS_KPH = (5.0, 8.0, 11.0)
+# The glide may drop at most 5 mph (8 km/h) under the set speed: smaller is fine, larger never (the driver, 2026-11-15).
+PG_DELTAS_MPH = (3.0, 5.0)
+PG_DELTAS_KPH = (5.0, 8.0)
 MAX_JSON_BYTES = 4096
 
 
@@ -119,7 +120,8 @@ def pg_delta(params) -> float:
 
 
 def set_pg_delta(params, value: float) -> None:
-  if not math.isfinite(value) or not 0.5 <= value <= 30.0:
-    raise ValueError('band outside 0.5-30')
+  top = PG_DELTAS_KPH[-1] if is_metric(params) else PG_DELTAS_MPH[-1]
+  if not math.isfinite(value) or not 0.5 <= value <= top:
+    raise ValueError(f'band outside 0.5-{top:g}')
   params.put('PulseGlideSpeedDelta', float(value), block=True)
 

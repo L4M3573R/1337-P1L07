@@ -16,6 +16,8 @@ GLIDE_FLOOR_MARGIN = 0.05
 # (EV 97% at 60-62 mph); above ~64 mph the same light request starts the engine (EV 12% at 64-66 mph),
 # so the regen glide above is kept there. The cut-off is a starting point for the efficiency learner.
 FEATHER_ACCEL = -0.05
+# The glide never drops more than this under the set speed, whatever the stored band says (the driver's limit).
+MAX_BAND_MPS = 5.0 * 0.44704
 FEATHER_MAX_SPEED_MPS = 63.0 * 0.44704
 # Ease between pulse and glide instead of stepping: a hard step from +0.5 to -0.45 m/s^2 showed a
 # regen spike with the engine still on (mode 128, power meter pinned) at every glide start.
@@ -305,7 +307,7 @@ class CoastRuntime:
     plan = self.owner.sample(admitted=admitted, active=bool(control.enabled and control.longActive),
                              gas=bool(state.gasPressed), brake=bool(state.brakePressed), speed_mps=float(state.vEgo),
                              target_mps=target_mps / ratio,
-                             delta_mps=delta * (1 / 3.6 if units == b"1" else 0.44704) / ratio,
+                             delta_mps=min(delta * (1 / 3.6 if units == b"1" else 0.44704), MAX_BAND_MPS) / ratio,
                              pitch=pitch, lead_relevant=lead_relevant, stop_context=bool(stop_context or self.conditional_stop))
     self._log_decision(float(state.vEgo))
     return plan

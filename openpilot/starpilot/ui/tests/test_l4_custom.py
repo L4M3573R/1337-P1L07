@@ -34,8 +34,14 @@ def test_pulse_glide_band_and_units(tmp_path):
   assert s.pg_delta(p) == 3.0
   with pytest.raises(ValueError):
     s.set_pg_delta(p, 0.0)
+  with pytest.raises(ValueError):
+    s.set_pg_delta(p, 7.0)   # never more than 5 mph under the set speed
+  assert max(s.PG_DELTAS_MPH) == 5.0 and max(s.PG_DELTAS_KPH) == 8.0
   p.put_bool('IsMetric', True, block=True)
   assert s.pg_delta_options(p) == s.PG_DELTAS_KPH
+  s.set_pg_delta(p, 8.0)
+  with pytest.raises(ValueError):
+    s.set_pg_delta(p, 11.0)
 
 
 

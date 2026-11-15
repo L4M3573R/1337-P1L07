@@ -60,6 +60,8 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   (steady pulse, zero-torque/EV feather glide below ~63 mph, dash-speed band, `PULSE_START_LAG_S`,
   `ClusterRatioFilter`), `selfdrive/controls/lib/longitudinal_planner.py`. Survives stops: the filtered vEgo dips a
   hair below zero at standstill (`STANDSTILL_NOISE_MPS`), which used to wipe the driver's Pulse and Glide choice.
+  The glide never drops more than 5 mph under the set speed (2026-11-15): the L4 band is 3 or 5 mph (5 or 8 km/h,
+  `PG_DELTAS_*`, `set_pg_delta` rejects more) and `coast.py` clamps any stored band to `MAX_BAND_MPS`.
 - **CEM stops** (`dac4e3ce32`, `1102863c55`): `starpilot/conditional_mode/stop_release.py`, `stop.py`.
 
 ### Lateral
