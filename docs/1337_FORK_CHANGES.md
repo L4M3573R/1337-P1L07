@@ -167,8 +167,12 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   `<efficiency>/experiment.json` mode on/off), `longitudinal_planner.update(efficiency_plan=...)` (lower cruise target,
   the capped downhill carry over an unlimited set speed, a final positive-accel cap; leads/stops still win),
   `ledger` stretches tagged `exp` and split on a variant change, `experiment_learn.py` (battery-adjusted BlueDriver gal
-  per mile, or per fixed window for launches; winner needs enough miles/episodes, 3 % gain and 80 % bootstrap
-  confidence; writes `<efficiency>/experiments.json` at the end of each drive). Tests in
+  per mile, or per fixed window for launches; a variant qualifies with enough miles/episodes, 3 % gain and 80 % bootstrap
+  confidence over the baseline; only the newest drive's outside-temperature band counts (`SEASON_BANDS` cold/mild/warm:
+  summer never weighed against winter); fuel and time are compared per curve class (straight/gentle/curvy, from yaw)
+  with equal weights; time-free savings are always taken, then `_spend_budget` spends the 4 min/hr on the steps with the
+  most fuel per extra minute across situations, weighted by miles per engaged hour (`situation_miles`), so a dearer step
+  that adds little is left out; writes `<efficiency>/experiments.json` (winners, season, budget) at the end of each drive). Tests in
   `starpilot/efficiency/tests/test_experiment*.py`.
 - **Turn speed for signalled turns** (2026-11-14): `starpilot/navigation/turn_speed.py`. modeld's blinker-turn logic
   (`intent._timed_turn`) publishes side / turning / distance to the side road / its map angle to
