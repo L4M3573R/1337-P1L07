@@ -157,6 +157,20 @@ class MapTurnFinder:
   def lookup_now(self, t, latitude, longitude, bearing, side) -> Lookup:
     """One synchronous lookup (the worker's body; also used by tests and replays)."""
     from openpilot.starpilot.navigation import side_road
+    tiles = self._tiles(latitude, longitude)
+    road = side_road.find(tiles, latitude, longitude, bearing, side) if tiles else None
+    known = bool(tiles) and side_road.matches_road(tiles, latitude, longitude, bearing)
+    return Lookup(t, side, road, known)
+
+  def crossing_now(self, latitude, longitude, bearing):
+    """(map_known, side_road.Crossing | None): the nearest junction ahead and whether the car's road goes on straight."""
+    from openpilot.starpilot.navigation import side_road
+    tiles = self._tiles(latitude, longitude)
+    if not tiles or not side_road.matches_road(tiles, latitude, longitude, bearing):
+      return False, None
+    return True, side_road.crossing(tiles, latitude, longitude, bearing)
+
+  def _tiles(self, latitude, longitude) -> list:
     from openpilot.starpilot.navigation.road_tiles import TileFormatError, decode_road_tile, tiles_in_radius
     if self._store is None:
       from openpilot.starpilot.navigation.offline_roads import TileStore
@@ -178,9 +192,7 @@ class MapTurnFinder:
       else:
         self._cache.move_to_end(key)
       tiles.append(tile)
-    road = side_road.find(tiles, latitude, longitude, bearing, side) if tiles else None
-    known = bool(tiles) and side_road.matches_road(tiles, latitude, longitude, bearing)
-    return Lookup(t, side, road, known)
+    return tiles
 
   def _run(self) -> None:
     while True:

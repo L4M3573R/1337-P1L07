@@ -33,6 +33,9 @@ need native libraries) and pass when run directly with the venv:
 - `opendbc/car/hyundai/tests/test_*discovery*.py` (fingerprint discovery under the wrapper)
 - `starpilot/controllers/tests/test_wheel_media_audit.py` (reads stored button mappings)
 - the native font/UI render tests (about 24)
+- `selfdrive/ui/tests/test_camera_speed_gates.py::test_connection_retries_advance_when_recorded_clock_is_frozen_or_rewound`
+  (2), `starpilot/ui/tests/test_laboratory_home.py`, `test_settings_actions.py` compact targets, and
+  `starpilot/replay/tests/test_export.py` (needs `libmedia_mux.so`) under `./dev` (2026-11-15, failing on HEAD too)
 
 ## Features
 
@@ -72,6 +75,12 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   (shadow/map/speed; default shadow), `intent.py` (turn beats a queued lane change below 20 mph), `navtilesd.py`
   (nearby tiles), `modeld.py` (GPS subscriptions), green blinker on Turning in `alert_renderer.py` and
   `starpilot/ui/onroad_alerts.py`.
+- **No-blinker straight guard, shadow only** (2026-11-15): `navigation/straight_guard.py`, run in `sideroadd.py`
+  (`guard_step`), map side `side_road.crossing` (nearest junction, its branches, whether the car's road goes on straight)
+  through `MapTurnFinder.crossing_now`. Logs `starpilot_feature` / `straight_guard` events (`would_hold`, `outcome`,
+  `no_map`) when the model starts turning onto a mapped side road with no blinker, the wheel still near centre and the
+  driver not steering, while the road continues straight. Publishes no control; a later active mode would act on the
+  steering output, because the blinker-turn lever (desire) is already none without a blinker.
 
 ### Efficiency and fuel
 - **Energy ledger** (`246ace1369`, `9eafb2765a`, `eb7c0ce812`, `9355d3146c`, `575dc06820`, `835eb17fa5`):
@@ -96,6 +105,12 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   StarPilot's compact menu, so the card must also be in `starpilot/ui/settings_state.py` (`Destination.L4_CUSTOM`,
   first in `COMPACT_MENU`) and opened in `starpilot/ui/runtime_app.py` (`_open_compact_destination`).
 - **Compact driving controls redraw after AOL saves** (`92fdf51393`).
+- **Onroad screen paced to the camera, animations in real time** (2026-11-15): `system/ui/lib/application.py`
+  (`frame_dt`, `add_frame_pacer`, `expected_fps` for the FPS monitor), `system/ui/lib/frame_filter.py`
+  (`FrameFilter`, `FrameBounceFilter`), `selfdrive/ui/onroad/cameraview.py` (`_pace_to_camera`; EGL image re-attached
+  only when it changes, `egl.bind_egl_image_to_texture(attach=)`). The onroad filters in `selfdrive/ui/mici/onroad/`,
+  `selfdrive/ui/onroad/model_renderer.py`, `model_source.py`, `ui_state.py` (brightness) and `starpilot/ui/onroad_*.py`
+  use the frame filters; menus keep `FirstOrderFilter`. Measured on the comma 4: 52% -> 41% of a core, steady 20 FPS.
 
 ### Other
 - **Edge (curb) map recorder** (`fb1026580a`): `starpilot/edgemap/`, edgemapd ancillary.

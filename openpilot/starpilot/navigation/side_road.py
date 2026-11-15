@@ -315,6 +315,78 @@ def find(tiles: list[RoadTile], latitude: float, longitude: float, bearing_deg: 
   return best
 
 
+CROSSING_AHEAD_M = 60.0
+CONTINUE_PROBE_M = 25.0  # how far past a junction the car's own road is followed to judge whether it goes on straight
+CLUSTER_M = 10.0  # junction points this close behind the nearest one belong to the same intersection
+STRAIGHT_MIN_M = 20.0
+STRAIGHT_MAX_BEND_DEG = 20.0
+
+
+@dataclass(frozen=True)
+class Crossing:
+  distance_m: float  # along the car's road to the nearest junction ahead (negative: just passed)
+  left_deg: float | None  # a branch leaving to the left there (25-155 degrees, the one nearest square), if any
+  right_deg: float | None  # likewise to the right (negative)
+  continues_m: float  # how far the car's own road goes on past the junction, up to CONTINUE_PROBE_M
+  bend_deg: float  # the car's road's heading change from the junction to CONTINUE_PROBE_M past it, left positive
+
+  @property
+  def straight_through(self) -> bool:
+    """The car's own road carries on roughly straight through the junction (not a T or a road that turns there)."""
+    return self.continues_m >= STRAIGHT_MIN_M and abs(self.bend_deg) <= STRAIGHT_MAX_BEND_DEG
+
+  def branch(self, side: str) -> float | None:
+    return self.left_deg if side == 'left' else self.right_deg if side == 'right' else None
+
+
+def crossing(tiles: list[RoadTile], latitude: float, longitude: float, bearing_deg: float,
+             max_ahead_m: float = CROSSING_AHEAD_M) -> Crossing | None:
+  """The nearest junction ahead on the car's road: its side branches and whether the road itself goes on straight.
+
+  The road is followed by its straightest continuation (as find does without a blinker). None when the road is not
+  matched or no branch meets it within max_ahead_m."""
+  if not all(math.isfinite(v) for v in (latitude, longitude, bearing_deg)):
+    return None
+  heading = np.array([math.sin(math.radians(bearing_deg)), math.cos(math.radians(bearing_deg))])
+  lines = _polylines(tiles, latitude, longitude, max_ahead_m + CONTINUE_PROBE_M + 60.0)
+  start = _match(lines, heading)
+  if start is None:
+    return None
+  path, used = _path(lines, start, heading, max_ahead_m + CONTINUE_PROBE_M + BEHIND_M)
+  if len(path) < 2:
+    return None
+  seg_len = np.hypot(*np.diff(path, axis=0).T)
+  along = np.concatenate([[0.0], np.cumsum(seg_len)])
+  hits = []  # (distance along the road, branch angle, path segment)
+  for distance, q, s_idx, branches, _ in _junctions(path, seg_len, along, lines, used):
+    if not -BEHIND_M <= distance <= max_ahead_m:
+      continue
+    path_dir = (path[s_idx + 1] - path[s_idx]) / seg_len[s_idx]
+    for branch in branches:
+      angle = _branch_angle(path_dir, q, branch)
+      if angle is not None and ANGLE_RANGE[0] <= abs(angle) <= ANGLE_RANGE[1]:
+        hits.append((float(distance), angle, s_idx))
+  if not hits:
+    return None
+  first, _, first_seg = min(hits, key=lambda h: h[0])
+  cluster = [h for h in hits if h[0] <= first + CLUSTER_M]
+  left = min((a for _, a, _ in cluster if a > 0), key=lambda a: abs(a - 90.0), default=None)
+  right = min((a for _, a, _ in cluster if a < 0), key=lambda a: abs(a + 90.0), default=None)
+
+  def point_at(d: float) -> np.ndarray:
+    i = min(max(int(np.searchsorted(along, d)), 1), len(path) - 1)
+    frac = (d - along[i - 1]) / max(seg_len[i - 1], 1e-6)
+    return path[i - 1] + (path[i] - path[i - 1]) * min(max(frac, 0.0), 1.0)
+
+  at = max(first, 0.0)
+  continues = max(0.0, min(CONTINUE_PROBE_M, float(along[-1]) - at))
+  v = point_at(at + continues) - point_at(at)
+  road_dir = (path[first_seg + 1] - path[first_seg]) / max(seg_len[first_seg], 1e-6)
+  bend = math.degrees(math.atan2(road_dir[0] * v[1] - road_dir[1] * v[0], float(road_dir @ v))) if float(np.hypot(*v)) > 1.0 else 0.0
+  return Crossing(round(first, 1), None if left is None else round(left, 1), None if right is None else round(right, 1),
+                  round(continues, 1), round(bend, 1))
+
+
 def matches_road(tiles: list[RoadTile], latitude: float, longitude: float, bearing_deg: float) -> bool:
   """Whether the stored tiles know the road the car is on (so 'no side road' is an answer, not a gap)."""
   if not all(math.isfinite(v) for v in (latitude, longitude, bearing_deg)):

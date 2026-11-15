@@ -86,3 +86,33 @@ def test_unknown_without_a_matching_road():
   assert side_road.find([tile_with(ROADS)], *car_at(), 90.0, 'left') is None  # heading across the road
   assert side_road.find([], *car_at(), 0.0, 'left') is None
   assert side_road.find([tile_with(ROADS)], *car_at(), math.nan, 'left') is None
+
+
+def test_crossing_reports_a_four_way_junction_the_road_goes_straight_through():
+  tiles = [tile_with({MAJOR: [[(0, -300), (0, 300)]], STREET: [[(-150, 30), (150, 30)]]})]
+  found = side_road.crossing(tiles, *car_at(), 0.0)
+  assert found is not None and found.distance_m == pytest.approx(30, abs=2)
+  assert found.left_deg == pytest.approx(90, abs=5) and found.right_deg == pytest.approx(-90, abs=5)
+  assert found.continues_m == pytest.approx(side_road.CONTINUE_PROBE_M) and abs(found.bend_deg) < 2
+  assert found.straight_through and found.branch('right') == found.right_deg
+
+
+def test_crossing_at_a_t_junction_is_not_straight_through():
+  tiles = [tile_with({MAJOR: [[(0, -300), (0, 30)]], STREET: [[(-150, 30), (150, 30)]]})]
+  found = side_road.crossing(tiles, *car_at(), 0.0)
+  assert found is not None and found.left_deg is not None and found.right_deg is not None
+  assert found.continues_m < side_road.STRAIGHT_MIN_M and not found.straight_through
+
+
+def test_crossing_where_the_road_itself_turns_is_not_straight_through():
+  # the major road turns right at 30 m; a street carries on west (left) from the corner
+  tiles = [tile_with({MAJOR: [[(0, -300), (0, 30), (200, 30)]], STREET: [[(0, 30), (-150, 30)]]})]
+  found = side_road.crossing(tiles, *car_at(), 0.0)
+  assert found is not None and found.left_deg == pytest.approx(90, abs=5)
+  # the road's own corner also reads as a right branch; the bend is what rules out holding straight here
+  assert found.bend_deg == pytest.approx(-90, abs=10) and not found.straight_through
+
+
+def test_crossing_unknown_or_without_junctions_is_none():
+  assert side_road.crossing([tile_with({MAJOR: [[(0, -300), (0, 300)]]})], *car_at(), 0.0) is None
+  assert side_road.crossing([tile_with(ROADS)], *car_at(east=80), 0.0) is None  # no road within the match distance
