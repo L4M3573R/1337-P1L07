@@ -5,8 +5,10 @@ Each CATEGORY applies in one situation (a launch, a hill, cruising, following a 
 enters that situation (an episode) one variant is drawn: each variant until it has been tried, then the learned winner
 4 times in 5 and another one 1 time in 5, so a change (season, tires) is still noticed. A variant only shapes the plan
 through limits the planner already takes the minimum of: a lower cruise target, a lower acceleration cap, Pulse and
-Glide on or off. The one exception is the downhill carry, up to DOWNHILL_CARRY_MPH over the set speed (the driver's
-allowance). Variants that cost time are not drawn once the drive has used its time budget (TIME_BUDGET_S_PER_H).
+Glide on or off. Holding the pedal flat while cruising ('hold'/'flat') is such a cap too: no added throttle to win back
+a small speed loss, until the car is HOLD_BAND_MPH under the set speed (every cruising band, including 60+ mph where
+Pulse and Glide is off). The one exception is the downhill carry, up to DOWNHILL_CARRY_MPH over the set speed (the
+driver's allowance). Variants that cost time are not drawn once the drive has used its time budget (TIME_BUDGET_S_PER_H).
 Following a car, Force Stop, curve speed and the driver's pedals always come first: the planner applies these limits
 after its own, and every episode ends the moment the driver touches a pedal.
 
@@ -39,18 +41,19 @@ LAUNCH_MAX_S = 20.0
 FOLLOW_GAP_S = 3.0             # a car ahead within this time gap starts "following"...
 FOLLOW_EXIT_GAP_S = 4.5        # ...which lasts until the gap opens past this
 RAMP_MPS2 = 0.3                # how fast a speed offset is put on or taken off
-DOWNHILL_CARRY_MPH = 2.0
+DOWNHILL_CARRY_MPH = 3.0      # the driver's allowance over the set speed on downhills (was 2 until 2026-11-15)
 # Launches and speeding up: a share of the planner's own acceleration at that speed ('normal': the planner's). A fixed
 # 0.5 m/s2 (a third of normal at 11 mph) was far too slow on 2026-11-14 and the driver had to press on.
 ACCEL_VARIANTS = {'gentle': 0.75, 'moderate': 0.9}
 NORMAL_ACCEL_BP = (0.0, 10.0, 25.0, 40.0)   # m/s: the planner's A_CRUISE_MAX table
 NORMAL_ACCEL_V = (1.6, 1.2, 0.8, 0.6)
 VETO_LIMIT = 2                 # the driver pressed the gas during a slower variant this many times: never offer it there
-SLOWER_VARIANTS = {'gentle', 'moderate', 'smooth', 'sag3', 'under2', 'under4'}
+SLOWER_VARIANTS = {'gentle', 'moderate', 'smooth', 'sag3', 'under2', 'under4', 'flat'}
 ACCELERATE_GAP_MPS = 3 * MPH   # the set speed this far above the car's speed: an "accelerate" episode...
 ACCELERATE_MIN_ACCEL = 0.1     # ...once the car is actually speeding up (not still slowing behind a car or into a turn)
 FOLLOW_SMOOTH_ACCEL = 0.6
 EV_GENTLE_ACCEL = 0.3
+HOLD_BAND_MPH = 2.0            # 'flat': hold the throttle (no acceleration) until this far under the set speed (the driver's allowance)
 SPEED_BANDS = ((30 * MPH, '25-30'), (45 * MPH, '30-45'), (60 * MPH, '45-60'), (math.inf, '60+'))
 
 # category -> variants (the first is the baseline: the comma's normal driving)
@@ -59,13 +62,14 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
   'accelerate': ('normal', 'moderate', 'gentle'),
   'follow': ('normal', 'smooth'),
   'uphill': ('hold', 'sag3'),
-  'downhill': ('hold', 'carry2'),
+  'downhill': ('hold', 'carry3'),
   'ev': ('normal', 'gentle'),
   'pulse_glide': ('steady', 'pg'),
   'cruise': ('set', 'under2', 'under4'),
+  'hold': ('normal', 'flat'),   # level cruising: correct small speed losses (normal) or hold the pedal flat
 }
 COSTS_TIME = {('launch', 'gentle'), ('launch', 'moderate'), ('accelerate', 'gentle'), ('accelerate', 'moderate'),
-              ('uphill', 'sag3'), ('pulse_glide', 'pg'), ('cruise', 'under2'), ('cruise', 'under4')}
+              ('uphill', 'sag3'), ('pulse_glide', 'pg'), ('cruise', 'under2'), ('cruise', 'under4'), ('hold', 'flat')}
 UNDER_MPH = {'sag3': 3.0, 'under2': 2.0, 'under4': 4.0}
 
 
@@ -195,7 +199,7 @@ class Experimenter:
   episodes: int = 0
   last_t: float | None = None
   was_standstill: bool = False
-  cruise_turn: int = 0           # alternates the cruising experiments between Pulse and Glide and cruise speed
+  cruise_turn: int = 0           # rotates the cruising experiments: Pulse and Glide, cruise speed, holding flat
   vetoes: dict[str, int] = field(default_factory=dict)   # 'category|context|variant' -> driver gas presses (all drives)
   vetoed_episode: int = 0        # the episode a veto was already counted for
 
@@ -260,6 +264,7 @@ class Experimenter:
       if not f.pulse_glide_by_driver and f.v_ego < PULSE_GLIDE_MAX_MPS:
         options.append(('pulse_glide', band(f.v_ego)))
       options.append(('cruise', band(f.v_ego)))
+      options.append(('hold', band(f.v_ego)))
     if self._ev_ok(f):
       options.append(('ev', 'ev'))
     if not options:
@@ -307,8 +312,8 @@ class Experimenter:
     where = self.situation(f)
     ep = self.episode
     if where is None or ep is None or (where[0], where[1]) != (ep.category, ep.context) or \
-       (ep.category in ('follow', 'pulse_glide', 'cruise', 'ev') and self.distance_m - ep.start_m >= EPISODE_M):
-      if ep is not None and ep.category in ('pulse_glide', 'cruise', 'ev'):
+       (ep.category in ('follow', 'pulse_glide', 'cruise', 'hold', 'ev') and self.distance_m - ep.start_m >= EPISODE_M):
+      if ep is not None and ep.category in ('pulse_glide', 'cruise', 'hold', 'ev'):
         self.cruise_turn += 1
       self.episode = ep = None
       if where is not None:
@@ -333,7 +338,7 @@ class Experimenter:
       v = ep.variant
       if v in UNDER_MPH:
         target_offset = -UNDER_MPH[v] * MPH
-      elif ep.category == 'downhill' and v == 'carry2':
+      elif ep.category == 'downhill' and v == 'carry3':
         target_offset = DOWNHILL_CARRY_MPH * MPH
       elif ep.category in ('launch', 'accelerate') and v in ACCEL_VARIANTS:
         accel_max = ACCEL_VARIANTS[v] * normal_accel(f.v_ego)
@@ -341,6 +346,8 @@ class Experimenter:
         accel_max = FOLLOW_SMOOTH_ACCEL
       elif ep.category == 'ev' and v == 'gentle':
         accel_max = EV_GENTLE_ACCEL
+      elif ep.category == 'hold' and v == 'flat' and f.v_ego > f.v_set - HOLD_BAND_MPH * MPH:
+        accel_max = 0.0   # the pedal stays where it is: speed may sag, braking and slowing stay the planner's
       if ep.category == 'pulse_glide' and not f.pulse_glide_by_driver:
         pulse_glide = v == 'pg'
     step = RAMP_MPS2 * dt
@@ -353,6 +360,8 @@ class Experimenter:
       self.spent_s += dt * (f.v_set / lower - 1.0)
     if pulse_glide:
       self.spent_s += dt * 0.04  # Pulse and Glide averages about half its band under the set speed
+    if ep is not None and ep.category == 'hold' and ep.variant == 'flat' and f.v_set > 1.0:
+      self.spent_s += dt * (f.v_set / max(f.v_set - HOLD_BAND_MPH * MPH / 2.0, 1.0) - 1.0)  # about half the band under
     ceiling = f.v_set + self.offset_mps if self.offset_mps < 0 else None
     bonus = self.offset_mps if self.offset_mps > 0 else 0.0
     return Plan(ceiling, bonus, accel_max, pulse_glide, ep.tag() if ep is not None else None)

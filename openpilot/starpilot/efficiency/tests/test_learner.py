@@ -92,7 +92,7 @@ def test_downhill_carry_counts_each_hill_once_and_only_open_road():
            _stretch('driver', 0.2, 55, 0.0, ctx=hill, regen_j=big)]
   result = learn_downhill([drive], mass_kg=1450.0)
   assert result['hills'] == 1
-  headroom = 1450.0 * 55 * learner.MPH * 2 * learner.MPH  # limited by the 2 mph of speed it may carry
+  headroom = 1450.0 * 55 * learner.MPH * learner.DOWNHILL_OVER_MPH * learner.MPH  # limited by the speed it may carry
   assert result['est_gal_saved'] == pytest.approx(headroom / learner.WHEEL_J_PER_GAL, abs=1e-4)
   assert result['time_won_s'] > 0
   small = learn_downhill([[_stretch('chill', 0.2, 55, 0.0, ctx=hill, regen_j=1e4, fric_j=2e3)]])

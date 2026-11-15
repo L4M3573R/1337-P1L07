@@ -45,12 +45,13 @@ def test_uphill_sag_lowers_the_target_gently_and_counts_time():
   assert exp.spent_s > 0
 
 
-def test_downhill_carry_is_the_only_raise_and_stays_within_2_mph():
-  exp = Experimenter(winners={'downhill|30-45': 'carry2'})
+def test_downhill_carry_is_the_only_raise_and_stays_within_the_allowance():
+  assert ex.DOWNHILL_CARRY_MPH == 3.0   # the driver's allowance (2026-11-15)
+  exp = Experimenter(winners={'downhill|30-45': 'carry3'})
   exp.rng.random = lambda: 0.99
   plans = run(exp, [cruise(i * 0.05, grade=-0.04) for i in range(300)])
-  assert plans[-1].speed_bonus_mps == pytest.approx(2 * MPH) and plans[-1].speed_ceiling_mps is None
-  assert all(p.speed_bonus_mps <= 2 * MPH + 1e-9 for p in plans)
+  assert plans[-1].speed_bonus_mps == pytest.approx(3 * MPH) and plans[-1].speed_ceiling_mps is None
+  assert all(p.speed_bonus_mps <= 3 * MPH + 1e-9 for p in plans)
 
 
 def test_pedals_end_the_episode_at_once():
@@ -196,3 +197,49 @@ def test_no_experiment_with_a_turn_signal_on():
   assert exp.sample(cruise(0.0, grade=0.04)).tag
   p = exp.sample(cruise(0.05, grade=0.04, blinker=True))
   assert p.tag is None and p.speed_ceiling_mps is None
+
+
+def _hold_episode(variant):
+  """An experimenter whose next level-cruising episode is 'hold' with the given variant."""
+  for turn in range(6):
+    exp = Experimenter()
+    exp.cruise_turn = turn
+    exp.draw = lambda category, context: variant if category == 'hold' else ex.CATEGORIES[category][0]
+    p = exp.sample(cruise(0.0, grade=0.0))
+    if (p.tag or '').startswith('hold|'):
+      return exp, p
+  raise AssertionError('level cruising never rotated to the hold experiment')
+
+
+def test_hold_flat_holds_the_throttle_until_a_mile_an_hour_under():
+  exp, p = _hold_episode('flat')
+  assert p.tag == 'hold|30-45|flat' and p.accel_max == 0.0 and p.speed_ceiling_mps is None
+  spent = exp.spent_s
+  p = exp.sample(cruise(0.05, v=40 * MPH - 0.5 * MPH, grade=0.0))
+  assert p.accel_max == 0.0 and exp.spent_s > spent   # sagging inside the band: still flat, and it costs time
+  p = exp.sample(cruise(0.08, v=40 * MPH - 1.5 * MPH, grade=0.0))
+  assert p.accel_max == 0.0                           # still inside the 2 mph band
+  p = exp.sample(cruise(0.1, v=40 * MPH - 2.5 * MPH, grade=0.0))
+  assert p.accel_max is None                          # past the band: the planner wins the speed back
+  _, normal = _hold_episode('normal')
+  assert normal.tag == 'hold|30-45|normal' and normal.accel_max is None
+
+
+def test_hold_flat_is_a_slower_variant_inside_the_time_budget():
+  assert ('hold', 'flat') in ex.COSTS_TIME and 'flat' in ex.SLOWER_VARIANTS
+  exp = Experimenter(winners={'hold|30-45': 'flat'})
+  exp.spent_s = 1000.0
+  assert all(exp.draw('hold', '30-45') == 'normal' for _ in range(50))
+
+
+def test_hold_flat_runs_at_highway_speed_where_pulse_and_glide_is_off():
+  for turn in range(6):
+    exp = Experimenter()
+    exp.cruise_turn = turn
+    exp.draw = lambda category, context: 'flat' if category == 'hold' else ex.CATEGORIES[category][0]
+    p = exp.sample(cruise(0.0, v=65 * MPH, v_set=65 * MPH, grade=0.0))
+    assert not (p.tag or '').startswith('pulse_glide')   # above 60 mph Pulse and Glide is never offered
+    if p.tag == 'hold|60+|flat':
+      assert p.accel_max == 0.0
+      return
+  raise AssertionError('65 mph cruising never rotated to holding flat')

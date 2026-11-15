@@ -8,6 +8,7 @@ import numpy as np
 import openpilot.cereal.messaging as messaging
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.starpilot.longitudinal.lead_takeoff_preferences import MAX_ACCEL as TAKEOFF_ACCEL_MAX
+from openpilot.starpilot.efficiency.experiment import DOWNHILL_CARRY_MPH
 from openpilot.common.constants import CV
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
@@ -326,7 +327,7 @@ class LongitudinalPlanner:
       if coast_plan.speed_ceiling_mps is not None:
         v_cruise = min(v_cruise, coast_plan.speed_ceiling_mps)
     # 1337 fuel experiments (starpilot/efficiency/experiment.py): a lower cruise target, or the downhill carry (at most
-    # 2 mph) over a set speed nothing else is limiting; leads, stops and Force Stop still win in the plan below.
+    # DOWNHILL_CARRY_MPH) over a set speed nothing else is limiting; leads, stops and Force Stop still win in the plan below.
     # 1337 turn speed (starpilot/navigation/turn_speed.py): ease to the learned speed for a signalled turn
     if turn_ceiling_mps is not None and math.isfinite(turn_ceiling_mps) and turn_ceiling_mps > 0:
       v_cruise = min(v_cruise, turn_ceiling_mps)
@@ -334,7 +335,7 @@ class LongitudinalPlanner:
       if efficiency_plan.speed_ceiling_mps is not None:
         v_cruise = min(v_cruise, efficiency_plan.speed_ceiling_mps)
       elif efficiency_plan.speed_bonus_mps > 0 and v_cruise >= v_cruise_kph * CV.KPH_TO_MS - 0.05:
-        v_cruise += min(efficiency_plan.speed_bonus_mps, 2.0 * CV.MPH_TO_MS)
+        v_cruise += min(efficiency_plan.speed_bonus_mps, DOWNHILL_CARRY_MPH * CV.MPH_TO_MS)
     if sm['controlsState'].forceDecel or coast_plan is not None and coast_plan.force_decel:
       v_cruise = 0.0
 

@@ -28,13 +28,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from openpilot.starpilot.controllers.coast import FEATHER_MAX_SPEED_MPS
+from openpilot.starpilot.efficiency.experiment import DOWNHILL_CARRY_MPH
 from openpilot.starpilot.efficiency.ledger import BATTERY_KWH, FLOW_LEN, GAL_PER_BATTERY_KWH, MPH
 
 METERS_PER_MILE = 1609.344
 TIME_BUDGET_MIN_PER_HR = 2.5  # the driver's limit is 2-3 extra minutes an hour: plan to the middle of it
 MAX_UNDER_MPH = 5.0
 MIN_BAND_MPH = 1.0
-DOWNHILL_OVER_MPH = 2.0
+DOWNHILL_OVER_MPH = DOWNHILL_CARRY_MPH  # what the experiments may carry over the set speed
 STEADY_MODES = ('chill', 'experimental')
 PULSE_GLIDE_MODE = 'pulse-glide'
 

@@ -40,10 +40,11 @@ class ExperimentPlannerTests(unittest.TestCase):
     out = self.run_pair(Plan(speed_ceiling_mps=V_EGO + 5.0, accel_max=1.0), lead=True)
     self.assertTrue(all(b <= a + 1e-6 for a, b in out))   # the lead's braking is kept
 
-  def test_downhill_carry_is_at_most_2_mph(self):
+  def test_downhill_carry_is_at_most_the_allowance(self):
+    from openpilot.starpilot.efficiency.experiment import DOWNHILL_CARRY_MPH
     asked_too_much = self.run_pair(Plan(speed_bonus_mps=10.0))
-    allowed = self.run_pair(Plan(speed_bonus_mps=2 * 0.44704))
-    self.assertEqual([b for _, b in asked_too_much], [b for _, b in allowed])   # clipped to the 2 mph allowance
+    allowed = self.run_pair(Plan(speed_bonus_mps=DOWNHILL_CARRY_MPH * 0.44704))
+    self.assertEqual([b for _, b in asked_too_much], [b for _, b in allowed])   # clipped to the allowance (3 mph)
 
   def test_turn_speed_ceiling_only_lowers_and_the_car_ahead_still_wins(self):
     for lead in (False, True):   # fresh planners per case: their speed state must start equal

@@ -56,11 +56,11 @@ def test_launch_is_scored_over_a_fixed_distance():
 def test_update_writes_winners(tmp_path):
   rng = random.Random(6)
   (tmp_path / 'drives').mkdir()
-  drive = steady_drive(rng, 30, 'downhill|30-45|hold', 0.02) + steady_drive(rng, 30, 'downhill|30-45|carry2', 0.016)
+  drive = steady_drive(rng, 30, 'downhill|30-45|hold', 0.02) + steady_drive(rng, 30, 'downhill|30-45|carry3', 0.016)
   (tmp_path / 'drives' / 'd1.json').write_text(json.dumps({'stretches': drive}))
   doc = el.update(tmp_path)
-  assert doc['winners'] == {'downhill|30-45': 'carry2'}
-  assert json.loads((tmp_path / 'experiments.json').read_text())['winners'] == {'downhill|30-45': 'carry2'}
+  assert doc['winners'] == {'downhill|30-45': 'carry3'}
+  assert json.loads((tmp_path / 'experiments.json').read_text())['winners'] == {'downhill|30-45': 'carry3'}
   assert any('downhill' in line for line in el.report_lines(doc))
 
 
