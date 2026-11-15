@@ -95,7 +95,9 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   `pc_summary.py`.
 - **Self-learning fuel efficiency (shadow)**: `efficiency/learner.py`, shown by `pc_summary.py` (`learner`). From
   BlueDriver measured, battery-adjusted fuel only: learns the EV cut-off speed for feather glides (fixed 63 mph in
-  `coast.py`), where Pulse and Glide beats steady cruise per speed band and the deepest band the driver's time budget
+  `coast.py`), relearned every run from the last 14 days (`EV_WINDOW_DAYS`, it moves with the weather) by the BlueDriver's
+  engine rpm (ledger flow entries carry `FLOW_LEN` 7: BlueDriver readings and engine-off counts, from `efficiencyd`
+  `obd_engine`), falling back to 0x595 power flow; where Pulse and Glide beats steady cruise per speed band and the deepest band the driver's time budget
   allows (`TIME_BUDGET_MIN_PER_HR` 2.5, at most 5 mph under), and what running up to 2 mph over the set speed on open
   downhills would keep. Reports only; nothing reads it for control. Tests in `efficiency/tests/test_learner.py`.
 

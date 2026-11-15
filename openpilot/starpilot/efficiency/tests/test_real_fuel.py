@@ -53,9 +53,9 @@ def test_corrupt_tank_file_starts_unknown(tmp_path):
   assert tank.load(tmp_path / 't.json').miles_since_fill is None
 
 
-def sample(t, speed=20.0, fuel=None, flow=None, pg=None, accel=0.0, pitch=0.0, meter=None):
+def sample(t, speed=20.0, fuel=None, flow=None, pg=None, accel=0.0, pitch=0.0, meter=None, obd_engine=None):
   return Sample(t=t, speed=speed, accel=accel, pitch=pitch, mass=1450.0, long_active=True, fuel_gal=fuel, flow=flow,
-                power_meter=meter, pulse_glide=pg)
+                power_meter=meter, pulse_glide=pg, obd_engine=obd_engine)
 
 
 def test_stretch_fuel_is_bridged_between_stretches_so_no_fuel_is_lost():
@@ -88,8 +88,18 @@ def test_flow_histogram_records_where_the_hybrid_stays_electric():
   key = next(iter(ledger.flow_hist))
   speed, accel, phase = key.split('|')
   assert (speed, phase) == ('60', 'glide') and float(accel) == pytest.approx(-0.05)
-  n, ev, regen, engine, meter = ledger.flow_hist[key]
+  n, ev, regen, engine, meter, obd_n, obd_off = ledger.flow_hist[key]
   assert n >= 99 and ev == n and regen == engine == 0 and meter / n == pytest.approx(207)
+  assert obd_n == obd_off == 0  # no BlueDriver: no engine readings
+
+
+def test_flow_histogram_counts_the_bluedriver_engine_state():
+  ledger = Ledger()
+  for i in range(90):  # 30 readings each: engine off, engine running, link down
+    ledger.add(sample(i * 0.05, speed=45 * MPH, flow='engine', pg='glide', accel=-0.03, obd_engine=(False, True, None)[i // 30]))
+  n, ev, _, engine, _, obd_n, obd_off = next(iter(ledger.flow_hist.values()))
+  assert ev == 0 and engine == n  # the power flow says engine throughout; the BlueDriver says off for a third
+  assert obd_n == pytest.approx(60, abs=1) and obd_off == pytest.approx(30, abs=1)
 
 
 def car_state(speed=20.0):
@@ -155,3 +165,15 @@ def test_report_sections_show_real_mpg_by_mode_and_the_ev_cutoff():
           '64|-0.40|glide': [500, 0, 500, 0, 110000.0]}  # the strong regen glide is outside the feather zone
   cutoff = "\n".join(ev_cutoff_section(flow))
   assert "60-62 mph" in cutoff and "electric  97%" in cutoff and "64-66 mph" in cutoff and "electric  12%" in cutoff
+
+
+def test_recorder_reads_the_engine_state_from_the_bluedriver(tmp_path):
+  rec = Recorder(1450.0, 'drive', tmp_path)
+  live = {'connected': True, 'drive': 'a', 'fuel_g': 0.0}
+  rec.observe_obd(live | {'rpm': 0.0})
+  assert rec.obd_engine is False and rec.tags()['obd_engine'] is False
+  rec.observe_obd(live | {'rpm': 1450.0})
+  assert rec.obd_engine is True
+  for down in (None, live | {'connected': False, 'rpm': 0.0}, live):  # no logger, link down, no rpm reading yet
+    rec.observe_obd(down)
+    assert rec.obd_engine is None

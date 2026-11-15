@@ -28,6 +28,7 @@ SERVICES = ['radarState', 'carState', 'carControl', 'selfdriveState', 'deviceMot
 GPS_MAX_ACCURACY_M = 25.0
 CHECKPOINT_S = 60.0
 OBD_READ_S = 1.0
+ENGINE_ON_RPM = 50.0  # the BlueDriver's rpm at or above this is the engine running; 0 is electric
 SIGNAL_ADDRS = (MODE_ADDR, MDPS11_ADDR)
 METERS_PER_MILE = 1609.344
 ANNOUNCE_AFTER_S = 10.0   # the start event waits until the trace daemon (started alongside) is listening
@@ -47,6 +48,7 @@ class Recorder:
     self.last_t = None
     self.obd_fuel_gal: float | None = None
     self.soc: float | None = None
+    self.obd_engine: bool | None = None
     self.signals = CarSignals()
     self.ambient_c: float | None = None
     self.fuel_level: float | None = None
@@ -62,6 +64,8 @@ class Recorder:
       value = doc.get(name) if doc else None
       return float(value) if isinstance(value, (int, float)) and lo <= value <= hi else None
     self.soc = number('soc', 0.0, 100.0)
+    rpm = number('rpm', 0.0, 10000.0)
+    self.obd_engine = None if not doc or not doc.get('connected') or rpm is None else rpm >= ENGINE_ON_RPM
     self.ambient_c = number('ambient', -40.0, 60.0)
     self.fuel_level = number('fuel_level', 0.0, 100.0)
     grams = doc.get('fuel_g') if doc else None
@@ -94,7 +98,8 @@ class Recorder:
     lat, lon, bearing = self.position if self.position is not None else (None, None, None)
     return {'drive_mode': self.signals.drive_mode, 'tire_avg': self.signals.tire_avg, 'tire_min': self.signals.tire_min,
             'map_limit': self.signals.map_limit, 'road_code': self.signals.road_code, 'ambient_c': self.ambient_c,
-            'fuel_level': self.fuel_level, 'lat': lat, 'lon': lon, 'bearing': bearing, 'experiment': self.experiment}
+            'fuel_level': self.fuel_level, 'lat': lat, 'lon': lon, 'bearing': bearing, 'experiment': self.experiment,
+            'obd_engine': self.obd_engine}
 
   def observe(self, t: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, device_motion=None,
               pulse_glide: str | None = None) -> None:

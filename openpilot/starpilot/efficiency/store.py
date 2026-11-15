@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import asdict, fields
 from pathlib import Path
 
-from openpilot.starpilot.efficiency.ledger import Stretch, Totals, summarize
+from openpilot.starpilot.efficiency.ledger import FLOW_LEN, Stretch, Totals, summarize
 
 VERSION = 1
 MAX_DRIVES = 500
@@ -92,7 +92,8 @@ def _add(target: Totals, values: dict) -> None:
 
 
 def load_flow(root: Path | None = None) -> dict[str, list[float]]:
-  """Power-flow histogram merged across stored drives: 'speed|accel|phase' -> [samples, ev, regen, engine, meter sum]."""
+  """Power-flow histogram merged across stored drives: 'speed|accel|phase' -> ledger.FLOW_LEN numbers (older drives
+  stored the first five; the BlueDriver engine counts are zero there)."""
   root = default_root() if root is None else root
   merged: dict[str, list[float]] = {}
   for path in sorted((root / "drives").glob("*.json")):
@@ -101,9 +102,9 @@ def load_flow(root: Path | None = None) -> dict[str, list[float]]:
       if doc.get("version") != VERSION:
         continue
       for key, values in doc.get("flow", {}).items():
-        entry = merged.setdefault(key, [0.0] * 5)
-        for i in range(5):
-          entry[i] += float(values[i])
+        entry = merged.setdefault(key, [0.0] * FLOW_LEN)
+        for i, value in enumerate(values[:FLOW_LEN]):
+          entry[i] += float(value)
     except (OSError, ValueError, KeyError, TypeError, IndexError):
       continue
   return merged

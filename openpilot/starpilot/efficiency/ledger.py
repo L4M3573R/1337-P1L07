@@ -21,6 +21,9 @@ CURVE_TIGHT = 0.01  # 1/m (100 m radius)
 G = 9.81
 FLOW_SPEED_BIN_MPH = 2.0
 FLOW_ACCEL_BIN = 0.05  # m/s^2, acceleration with the road slope removed
+# Flow histogram entry: samples, ev, regen, engine (0x595 power flow), power-meter sum, then the samples with a
+# BlueDriver engine reading and how many of those had the engine off (rpm), which needs no power-flow decoding.
+FLOW_LEN = 7
 # The fuel counter dips slightly when the dash refreshes its average (a correction, kept so the sum
 # stays exact); a drop larger than this is a fill-up or a reseed, which is never bridged.
 FUEL_RESET_DROP_GAL = 0.05
@@ -52,6 +55,7 @@ class Sample:
   pulse_glide: str | None = None  # Pulse and Glide phase when the mode is enabled ('off', 'pulse', 'glide', ...)
   obd_fuel_gal: float | None = None  # measured fuel burned so far (BlueDriver), None while the link is down
   soc: float | None = None  # hybrid battery charge, % (BlueDriver)
+  obd_engine: bool | None = None  # engine running by the BlueDriver's rpm, None while the link is down
   # Context tags (car_signals.py, BlueDriver, GPS); recorded per stretch for the PC trip reports.
   drive_mode: str | None = None  # 'eco' / 'smart' / 'sport'
   tire_avg: float | None = None  # psi, the four tires
@@ -341,12 +345,14 @@ class Ledger:
     speed_bin = math.floor(sample.speed / MPH / FLOW_SPEED_BIN_MPH) * FLOW_SPEED_BIN_MPH
     accel_bin = round(math.floor(flat_accel / FLOW_ACCEL_BIN) * FLOW_ACCEL_BIN, 2)
     key = f"{speed_bin:g}|{accel_bin:+.2f}|{sample.pulse_glide or mode_of(sample)}"
-    entry = self.flow_hist.setdefault(key, [0, 0, 0, 0, 0.0])
+    entry = self.flow_hist.setdefault(key, [0, 0, 0, 0, 0.0, 0, 0])
     entry[0] += 1
     entry[1] += sample.flow == 'ev'
     entry[2] += sample.flow == 'regen'
     entry[3] += sample.flow == 'engine'
     entry[4] += sample.power_meter if sample.power_meter is not None else POWER_METER_NEUTRAL
+    entry[5] += sample.obd_engine is not None
+    entry[6] += sample.obd_engine is False
 
   def finish(self) -> list[Stretch]:
     if self._open is not None and self._last is not None:

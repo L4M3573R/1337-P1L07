@@ -114,3 +114,43 @@ def test_learn_stored_reads_drive_files_and_reports(tmp_path):
   text = '\n'.join(report_lines(result))
   assert 'EV cut-off: 64 mph learned' in text and 'saves 17%' in text
   assert '\n'.join(report_lines(learn([], {}))).count('collecting') == 1
+
+
+def _obd_flow(shares, samples=400, accel='-0.05', power_share=0.2):
+  """shares: {speed bin mph: BlueDriver engine-off share} -> 7-number histogram entries (power flow says power_share)."""
+  return {f'{mph:g}|{accel}|glide': [samples, samples * power_share, 0, samples * (1 - power_share), 0.0, samples, samples * share]
+          for mph, share in shares.items()}
+
+
+def test_ev_cutoff_prefers_recent_bluedriver_readings():
+  recent = _obd_flow({56: 0.97, 58: 0.96, 60: 0.95, 62: 0.5})
+  result = learn_ev_cutoff(_flow({60: 0.2, 62: 0.2}), recent, window_days=14, ambient_c=21.0)
+  assert result['source'] == 'bluedriver' and result['learned_mph'] == 62 and result['status'] == 'learned'
+  assert result['window_days'] == 14 and result['ambient_c'] == 21.0
+  # recent drives without BlueDriver readings fall back to their power flow, then to all drives
+  assert learn_ev_cutoff({}, _flow({56: 0.97, 58: 0.96, 60: 0.4}))['source'] == 'power_flow'
+  fallback = learn_ev_cutoff(_flow({56: 0.97, 58: 0.96, 60: 0.4}), {})
+  assert fallback['source'] == 'power_flow_all' and fallback['learned_mph'] == 60 and fallback['window_days'] is None
+
+
+def test_ev_cutoff_reports_when_the_engine_runs_in_every_light_glide():
+  result = learn_ev_cutoff({}, _obd_flow({40: 0.12, 44: 0.25, 48: 0.18}), window_days=14, ambient_c=9.0)
+  assert result['status'] == 'engine_on' and result['learned_mph'] is None
+  assert (result['best_mph'], result['best_share']) == (44, 0.25)
+  text = '\n'.join(report_lines(learn([], {}, recent_flow=_obd_flow({40: 0.12, 44: 0.25}), window_days=14, ambient_c=9.0)))
+  assert 'the engine runs in light glides from 40 mph (best 25% electric at 44 mph' in text
+  assert 'BlueDriver engine rpm, last 14 days, ~9 C outside' in text
+
+
+def test_learn_stored_relearns_the_cutoff_from_the_newest_drives(tmp_path):
+  drives = tmp_path / 'drives'
+  drives.mkdir()
+  warm = {'version': 1, 'drive': '20261015-120000-1', 'stretches': [_stretch('chill', 6.0, 55.0, 0.1) | {'ambient_c': 20.0}],
+          'flow': _obd_flow({56: 0.97, 58: 0.96, 60: 0.95, 62: 0.4})}
+  cold = {'version': 1, 'drive': '20261115-120000-2', 'stretches': [_stretch('chill', 6.0, 55.0, 0.1) | {'ambient_c': 9.0}],
+          'flow': _obd_flow({40: 0.1, 44: 0.2, 48: 0.15})}
+  (drives / 'warm.json').write_text(json.dumps(warm))
+  (drives / 'cold.json').write_text(json.dumps(cold))
+  ev = learn_stored(tmp_path)['ev_cutoff']
+  assert ev['source'] == 'bluedriver' and ev['status'] == 'engine_on' and ev['ambient_c'] == 9.0  # October is out of the window
+  assert learn_stored(tmp_path, window_days=60)['ev_cutoff']['ambient_c'] == 14.5  # both drives inside a longer window

@@ -6,8 +6,11 @@ stretches the BlueDriver did not fully cover are left out. Everything stays insi
 TIME_BUDGET_MIN_PER_HR extra minutes per hour of driving.
 
 It learns three things:
-1. EV cut-off: the highest speed at which a feather-light glide keeps the hybrid electric, from the power-flow
-   histogram (any comma-controlled driving at that light load counts), instead of the fixed FEATHER_MAX_SPEED_MPS.
+1. EV cut-off: the highest speed at which a feather-light glide keeps the hybrid electric (any comma-controlled
+   driving at that light load counts), instead of the fixed FEATHER_MAX_SPEED_MPS. It moves with the weather (a cold
+   engine runs for heat: 97% electric at 60-62 mph in October logs, ~20% in November), so it is relearned on every run
+   from the last EV_WINDOW_DAYS of drives, judged by the BlueDriver's engine rpm (0 = electric) where it covers enough
+   light glides, else by the car's 0x595 power flow.
 2. Where Pulse and Glide pays: per speed band, its fuel per mile against steady cruise on matching roads (grade,
    curves, traffic and drive mode), and the deepest glide band the time budget allows at that speed
    (never more than MAX_UNDER_MPH under the set speed).
@@ -19,11 +22,13 @@ from __future__ import annotations
 
 import json
 import math
+import statistics
+from datetime import date, datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from openpilot.starpilot.controllers.coast import FEATHER_MAX_SPEED_MPS
-from openpilot.starpilot.efficiency.ledger import BATTERY_KWH, GAL_PER_BATTERY_KWH, MPH
+from openpilot.starpilot.efficiency.ledger import BATTERY_KWH, FLOW_LEN, GAL_PER_BATTERY_KWH, MPH
 
 METERS_PER_MILE = 1609.344
 TIME_BUDGET_MIN_PER_HR = 2.5  # the driver's limit is 2-3 extra minutes an hour: plan to the middle of it
@@ -38,6 +43,10 @@ FEATHER_BINS = (-0.10, -0.05)
 EV_SHARE = 0.85  # electric at least this share of the time
 MIN_BIN_SAMPLES = 200  # 10 s at 20 Hz in one 2 mph bin
 EV_SCAN_FROM_MPH = 40.0
+EV_WINDOW_DAYS = 14
+# (source, histogram index of the electric count, index of the sample count) in the order they are tried
+EV_SOURCES = (('bluedriver', 6, 5), ('power_flow', 1, 0))
+EV_SOURCE_NAMES = {'bluedriver': 'BlueDriver engine rpm', 'power_flow': 'power flow', 'power_flow_all': 'power flow, all drives'}
 
 # Pulse and Glide against steady cruise.
 MIN_MILES_EACH = 1.0  # per side, per matched context
@@ -66,14 +75,14 @@ def band_time_cost(set_mph: float, depth_mph: float) -> float:
   return 60.0 * (set_mph / avg - 1.0) if avg > 0 else math.inf
 
 
-def learn_ev_cutoff(flow: dict[str, list[float]]) -> dict:
-  """flow: 'speed|accel|phase' -> [samples, ev, regen, engine, meter sum], as the ledger stores it."""
+def _feather_shares(flow: dict[str, list[float]], ev_index: int, n_index: int) -> tuple[dict[float, float], int]:
+  """Electric share per speed bin over the feather-glide accelerations, and the samples counted."""
   by_speed: dict[float, list[float]] = {}
   for key, values in flow.items():
     try:
       speed, accel, _ = key.split('|')
       speed_bin, accel_bin = float(speed), round(float(accel), 2)
-      samples, ev = float(values[0]), float(values[1])
+      samples, ev = float(values[n_index]), float(values[ev_index])
     except (ValueError, IndexError, TypeError):
       continue
     if accel_bin in FEATHER_BINS and samples > 0:
@@ -81,19 +90,41 @@ def learn_ev_cutoff(flow: dict[str, list[float]]) -> dict:
       entry[0] += samples
       entry[1] += ev
   shares = {b: v[1] / v[0] for b, v in sorted(by_speed.items()) if v[0] >= MIN_BIN_SAMPLES}
-  out = {'current_mph': round(FEATHER_MAX_SPEED_MPS / MPH, 1), 'learned_mph': None, 'at_least': False,
-         'samples': int(sum(v[0] for v in by_speed.values())), 'ev_share_by_mph': {f'{b:g}': round(s, 3) for b, s in shares.items()}}
-  scanned = [(b, s) for b, s in shares.items() if b >= EV_SCAN_FROM_MPH]
+  return shares, int(sum(v[0] for v in by_speed.values()))
+
+
+def learn_ev_cutoff(flow: dict[str, list[float]], recent: dict[str, list[float]] | None = None, *,
+                    window_days: float | None = None, ambient_c: float | None = None) -> dict:
+  """flow: 'speed|accel|phase' -> the ledger's FLOW_LEN numbers over all drives; recent: the same over the last
+  window_days. The recent drives' BlueDriver engine readings are tried first, then their power flow, then all drives'
+  power flow: the first that covers at least two speed bins from EV_SCAN_FROM_MPH decides."""
+  tries = [(name, recent, ev_i, n_i) for name, ev_i, n_i in EV_SOURCES] if recent is not None else []
+  tries.append(('power_flow_all', flow, 1, 0))
+  for attempt in tries:
+    source = attempt[0]
+    shares, samples = _feather_shares(*attempt[1:])
+    scanned = [(b, sh) for b, sh in shares.items() if b >= EV_SCAN_FROM_MPH]
+    if len(scanned) >= 2:
+      break
+  windowed = source != 'power_flow_all'
+  out = {'current_mph': round(FEATHER_MAX_SPEED_MPS / MPH, 1), 'learned_mph': None, 'at_least': False, 'status': 'collecting',
+         'samples': samples, 'ev_share_by_mph': {f'{b:g}': round(sh, 3) for b, sh in shares.items()}, 'source': source,
+         'window_days': window_days if windowed else None, 'ambient_c': ambient_c if windowed else None,
+         'best_mph': None, 'best_share': None}
   if len(scanned) < 2:
     return out
+  best = max(scanned, key=lambda x: x[1])
+  out['best_mph'], out['best_share'] = best[0], round(best[1], 3)
   good = 0
   for speed_bin, share in scanned:
     if share < EV_SHARE:
       if good >= 2:  # electric below this bin, the engine starts in it
-        out['learned_mph'] = speed_bin
+        out['learned_mph'], out['status'] = speed_bin, 'learned'
+      else:
+        out['status'] = 'engine_on'  # no electric light glide from EV_SCAN_FROM_MPH up
       return out
     good += 1
-  out['learned_mph'], out['at_least'] = scanned[-1][0] + 2.0, True  # electric all the way up the data so far
+  out['learned_mph'], out['at_least'], out['status'] = scanned[-1][0] + 2.0, True, 'learned'  # electric all the way up
   return out
 
 
@@ -209,17 +240,38 @@ def learn_downhill(drives: list[list[dict]], mass_kg: float = DEFAULT_MASS_KG) -
 
 
 def learn(drives: list[list[dict]], flow: dict[str, list[float]], mass_kg: float = DEFAULT_MASS_KG,
-          budget_min_per_hr: float = TIME_BUDGET_MIN_PER_HR) -> dict:
+          budget_min_per_hr: float = TIME_BUDGET_MIN_PER_HR, recent_flow: dict[str, list[float]] | None = None,
+          window_days: float | None = None, ambient_c: float | None = None) -> dict:
   records = [r for rs in drives for r in rs if isinstance(r, dict)]
   return {'mode': 'shadow', 'time_budget_min_per_hr': budget_min_per_hr, 'max_under_mph': MAX_UNDER_MPH,
-          'ev_cutoff': learn_ev_cutoff(flow), 'bands': learn_bands(records, budget_min_per_hr),
+          'ev_cutoff': learn_ev_cutoff(flow, recent_flow, window_days=window_days, ambient_c=ambient_c),
+          'bands': learn_bands(records, budget_min_per_hr),
           'downhill': learn_downhill([[r for r in rs if isinstance(r, dict)] for rs in drives], mass_kg)}
 
 
-def learn_stored(root: Path, mass_kg: float = DEFAULT_MASS_KG) -> dict:
-  """From a folder of drive files (the comma's efficiency/drives, or the PC copy of them), oldest first."""
+def _drive_date(doc: dict) -> date | None:
+  """The drive id starts with its local date, YYYYMMDD."""
+  try:
+    return datetime.strptime(str(doc.get('drive', ''))[:8], '%Y%m%d').date()
+  except ValueError:
+    return None
+
+
+def _add_flow(into: dict[str, list[float]], flow) -> None:
+  for key, values in (flow or {}).items():
+    try:
+      entry = into.setdefault(key, [0.0] * FLOW_LEN)
+      for i, value in enumerate(values[:FLOW_LEN]):
+        entry[i] += float(value)
+    except (ValueError, TypeError):
+      continue
+
+
+def learn_stored(root: Path, mass_kg: float = DEFAULT_MASS_KG, window_days: float = EV_WINDOW_DAYS) -> dict:
+  """From a folder of drive files (the comma's efficiency/drives, or the PC copy of them), oldest first. The EV
+  cut-off also gets the last window_days of drives (counted back from the newest drive, so a PC copy reads the same)."""
   from openpilot.starpilot.efficiency.store import VERSION
-  drives, flow = [], {}
+  drives, flow, dated = [], {}, []
   paths = sorted((root / 'drives').glob('*.json'), key=lambda p: p.stat().st_mtime)
   for path in paths:
     try:
@@ -228,25 +280,43 @@ def learn_stored(root: Path, mass_kg: float = DEFAULT_MASS_KG) -> dict:
       continue
     if not isinstance(doc, dict) or doc.get('version') != VERSION:
       continue
-    drives.append(list(doc.get('stretches') or []))
-    for key, values in (doc.get('flow') or {}).items():
-      try:
-        entry = flow.setdefault(key, [0.0] * 5)
-        for i in range(5):
-          entry[i] += float(values[i])
-      except (ValueError, IndexError, TypeError):
-        continue
-  return learn(drives, flow, mass_kg)
+    stretches = list(doc.get('stretches') or [])
+    drives.append(stretches)
+    _add_flow(flow, doc.get('flow'))
+    if (day := _drive_date(doc)) is not None:
+      dated.append((day, doc.get('flow'), stretches))
+  recent, ambient = None, None
+  if dated:
+    newest = max(day for day, _, _ in dated)
+    recent = {}
+    temps = []
+    for day, drive_flow, stretches in dated:
+      if (newest - day).days < window_days:
+        _add_flow(recent, drive_flow)
+        temps += [s['ambient_c'] for s in stretches if isinstance(s, dict) and isinstance(s.get('ambient_c'), (int, float))]
+    ambient = round(statistics.median(temps), 1) if temps else None
+  return learn(drives, flow, mass_kg, recent_flow=recent, window_days=window_days if recent is not None else None,
+               ambient_c=ambient)
 
 
 def report_lines(result: dict) -> list[str]:
   """Plain-language summary for the terminal."""
   lines = [f"Efficiency learner (shadow, budget {result['time_budget_min_per_hr']:g} min/hr):"]
   ev = result['ev_cutoff']
-  if ev['learned_mph'] is None:
+  where = EV_SOURCE_NAMES.get(ev.get('source'), 'power flow')
+  if ev.get('window_days'):
+    where += f", last {ev['window_days']:g} days"
+  if ev.get('ambient_c') is not None:
+    where += f", ~{ev['ambient_c']:g} C outside"
+  if ev.get('status') == 'engine_on':
+    best = f"best {ev['best_share']:.0%} electric at {ev['best_mph']:g} mph"
+    lines.append(f"  EV cut-off: the engine runs in light glides from {EV_SCAN_FROM_MPH:g} mph ({best}; "
+                 + f"fixed at {ev['current_mph']:g} mph; {where})")
+  elif ev['learned_mph'] is None:
     lines.append(f"  EV cut-off: collecting ({ev['samples']} light-glide samples; fixed at {ev['current_mph']:g} mph)")
   else:
-    lines.append(f"  EV cut-off: {'at least ' if ev['at_least'] else ''}{ev['learned_mph']:g} mph learned (fixed at {ev['current_mph']:g} mph)")
+    lines.append(f"  EV cut-off: {'at least ' if ev['at_least'] else ''}{ev['learned_mph']:g} mph learned "
+                 + f"(fixed at {ev['current_mph']:g} mph; {where})")
   if not result['bands']:
     lines.append('  Pulse and Glide vs steady cruise: no matched miles yet')
   for band, b in result['bands'].items():
