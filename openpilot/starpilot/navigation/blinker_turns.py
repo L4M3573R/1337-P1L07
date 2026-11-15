@@ -1,6 +1,7 @@
 """Blinker turns timed to the road: below the cutoff speed, a blinker waits for the actual turn instead of turning at once.
 
   map:    the stored road tiles show a road branching off to that side ahead -> go straight until it is close, then turn
+          (from a stop at the line, with no car ahead, within STOP_START_MAX_M of that road: once rolled STOP_ROLL_M)
   nudge:  no mapped road -> go straight until the driver pushes the wheel toward the blinker, then take the turn over
   turn:   once turning, the turn is held until the car has turned (heading) or the blinker goes off; it never gives up
           halfway. Above the cutoff (plus a margin) or with the blinker off it ends.
@@ -60,12 +61,19 @@ TRIGGER_S = 3.2   # seconds of travel before the side road's centreline...
 TRIGGER_M = 7.0   # ...plus this, so the turn starts ~1 s before the steering passes 45 degrees
 
 
+STOP_START_MAX_M = 35.0  # stopped this close to the mapped side road, with no car ahead: stopped at the line
+STOP_ROLL_M = 2.0        # pulling away from that stop: the turn starts after this much rolling
+STOPPED_MPS = 0.3
+
+
 def trigger_distance(v_ego: float) -> float:
   """How far before the junction (the side road's centreline) the turn starts.
 
   Fitted on 17 map-timed blinker turns (2026-11-14): at the old 1 s + 3 m the turn began a median 1.7 s after the
   driver's steering had passed 45 degrees (the driver starts turning well before the centreline, and GPS lags);
-  3.2 s + 7 m starts it a median 1.3 s before (10-90%: 1.7-0.4 s before)."""
+  3.2 s + 7 m starts it a median 1.3 s before (10-90%: 1.7-0.4 s before). That fit is for rolling turns: pulling away
+  from a stop at the line it gives ~17 m at 3 m/s, while the driver started steering 3-5 m after moving off, 20-26 m
+  before the side road (two turns from stop signs, 2026-11-15), so those start from the stop instead (STOP_START_MAX_M)."""
   return max(5.0, v_ego * TRIGGER_S + TRIGGER_M)
 
 
@@ -230,9 +238,12 @@ class BlinkerTurn:
     self.driven_m = 0.0  # since the lookup in use
     self.lookup_t: float | None = None
     self.last_t: float | None = None
+    self.odo_m = 0.0  # driven since the blinker came on
+    self.stop_odo_m: float | None = None  # odo_m at the last stop with no car ahead (None: none, or queued behind a car)
 
   def update(self, t: float, side: str | None, v_ego: float, heading: float | None, lookup: Lookup | None,
-             nudged: bool) -> Decision:
+             nudged: bool, lead: bool = False) -> Decision:
+    """lead: the planner is following a car ahead (a stop behind it is a queue, not the line)."""
     dt = 0.0 if self.last_t is None else max(0.0, min(t - self.last_t, 0.5))
     self.last_t = t
     if side is None or side != self.side:
@@ -241,6 +252,9 @@ class BlinkerTurn:
       self.side = side
       if side is None:
         return Decision(False, '')
+    self.odo_m += max(v_ego, 0.0) * dt
+    if v_ego < STOPPED_MPS:
+      self.stop_odo_m = None if lead else self.odo_m
     if self.turning:
       turned = (heading is not None and self.start_heading is not None and
                 abs((heading - self.start_heading + 180.0) % 360.0 - 180.0) >= TURN_DONE_DEG)
@@ -262,6 +276,9 @@ class BlinkerTurn:
       distance = lookup.road.distance_m - self.driven_m
       if distance <= trigger_distance(v_ego):
         return self._start(heading, 'map: at the road', distance)
+      rolled = self.odo_m - self.stop_odo_m if self.stop_odo_m is not None else None
+      if rolled is not None and not lead and rolled >= STOP_ROLL_M and distance + rolled <= STOP_START_MAX_M:
+        return self._start(heading, 'map: pulling away from the stop', distance)
       return Decision(False, 'map: waiting for the road', distance)
     if nudged:
       return self._start(heading, 'nudge', None)

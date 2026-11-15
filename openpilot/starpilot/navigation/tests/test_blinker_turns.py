@@ -157,3 +157,37 @@ def test_trigger_distance_starts_the_turn_before_the_driver_would():
   # calibrated on recorded turns: about 3.2 s of travel plus 7 m before the side road (at least 5 m)
   assert bt.trigger_distance(0.0) == pytest.approx(7.0)
   assert bt.trigger_distance(6.0) == pytest.approx(6.0 * 3.2 + 7.0)
+
+
+def pull_away(turn, stop_distance, *, lead=False, lookup_at=None):
+  """Stopped with the blinker on (no map heading at rest), then pulling away at 3 m/s with lookups arriving."""
+  t = 0.0
+  for _ in range(20):  # 1 s stopped
+    turn.update(t, 'left', 0.0, None, None, nudged=False, lead=lead)
+    t += 0.05
+  driven, d = 0.0, None
+  while driven < 15.0:
+    t += 0.05
+    driven += 3.0 * 0.05
+    found = lookup(t, stop_distance - driven) if lookup_at is None or driven >= lookup_at else None
+    d = turn.update(t, 'left', 3.0, 0.0, found, nudged=False, lead=lead)
+    if d.turning:
+      return d, driven
+  return d, driven
+
+
+def test_turn_from_a_stop_at_the_line_starts_when_pulling_away():
+  # 2026-11-15: stopped 25-29 m before the side road; the driver steered 3-5 m after moving off
+  d, rolled = pull_away(bt.BlinkerTurn(), 29.0)
+  assert d.turning and d.reason == 'map: pulling away from the stop'
+  assert rolled == pytest.approx(bt.STOP_ROLL_M, abs=0.2) and d.distance_m == pytest.approx(27.0, abs=0.3)
+  # the first lookup only arrives once moving (GPS heading): it still counts from the stop
+  d, rolled = pull_away(bt.BlinkerTurn(), 25.0, lookup_at=4.0)
+  assert d.turning and d.reason == 'map: pulling away from the stop' and rolled == pytest.approx(4.0, abs=0.2)
+
+
+def test_turn_from_a_queue_or_far_back_keeps_the_rolling_trigger():
+  d, rolled = pull_away(bt.BlinkerTurn(), 29.0, lead=True)  # stopped behind a car: a queue, not the line
+  assert not d.turning or d.reason == 'map: at the road'
+  d, rolled = pull_away(bt.BlinkerTurn(), 45.0)  # stopped well short of the road
+  assert not d.turning or d.reason == 'map: at the road'

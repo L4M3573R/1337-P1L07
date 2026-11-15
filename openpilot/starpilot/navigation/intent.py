@@ -37,6 +37,14 @@ def current_instruction(sm, now_ns: int):
     return None
 
 
+def _following(sm) -> bool:
+  """The planner is following a car ahead (longitudinalPlan.hasLead); unknown counts as not."""
+  try:
+    return bool(sm['longitudinalPlan'].hasLead)
+  except (KeyError, AttributeError, TypeError):
+    return False
+
+
 def turn_desire(sm, now_ns: int, current_desire, *, supported: bool):
   if not supported or current_desire != log.Desire.none:
     return current_desire
@@ -141,7 +149,7 @@ class TurnIntent:
       lookup = self.map_finder.latest(side)
     was_turning = self.blinker_turn.turning
     decision = self.blinker_turn.update(now_ns / 1e9, side, cs.vEgo, heading, lookup,
-                                        nudged_toward(side, cs.steeringPressed, cs.steeringTorque))
+                                        nudged_toward(side, cs.steeringPressed, cs.steeringTorque), lead=_following(sm))
     self.turn_distance = decision.distance_m
     self.shadow_turning, self.shadow_reason = decision.turning, decision.reason
     # for plannerd's turn speed (turn_speed.py): side, turn under way, distance to the side road and its angle
