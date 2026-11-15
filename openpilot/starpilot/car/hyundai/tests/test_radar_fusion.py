@@ -145,3 +145,57 @@ def test_decision_log_records_camera_hold_and_pickup():
   picker, mover = rf.TandemLeadPolicy(), track(7, 50.0, v_lead=15.0)
   run(picker, rf.PICKUP_MIN_FRAMES, NO_LEAD, {7: mover})
   assert picker.last_action == 'pickup' and picker.last_pickup_id == 7
+
+
+# A left turn: the predicted path is 3 m to the left (model y is right-positive) by 25 m.
+LEFT_TURN = SimpleNamespace(position=SimpleNamespace(x=[0.0, 10.0, 25.0, 50.0], y=[0.0, -0.5, -3.0, -10.0]))
+
+
+def override_lead(t):
+  """radard's low-speed override: the closest stationary return straight ahead, with no camera confirmation."""
+  return t.get_RadarState(0.0)
+
+
+def policy_with(turn=None):
+  return rf.TandemLeadPolicy(turn_status=lambda: turn)
+
+
+def test_stationary_override_lead_off_the_turning_path_is_dropped():
+  # 2026-11-15 bookmark: 23 m straight ahead across the intersection while the car turned left at 3 m/s
+  wall = track(1, 23.0, v_lead=0.0, v_ego=3.0)
+  policy = policy_with()
+  lead = policy.lead_one(override_lead(wall), {1: wall}, LEFT_TURN, 0.0, v_ego=3.0)
+  assert not lead['present'] and policy.last_action == 'veto_off_path'
+  # the same return on a straight path is in the car's way and stays
+  kept = policy_with().lead_one(override_lead(wall), {1: wall}, STRAIGHT, 0.0, v_ego=3.0)
+  assert kept['present'] and kept['radarTrackId'] == 1
+
+
+def test_stationary_override_lead_past_a_signalled_turn_is_dropped():
+  wall = track(1, 23.1, v_lead=0.0, v_ego=3.0)
+  pending = {'side': 'left', 'turning': False, 'distance_m': 22.5}
+  policy = policy_with(pending)
+  assert not policy.lead_one(override_lead(wall), {1: wall}, STRAIGHT, 0.0, v_ego=3.0)['present']
+  assert policy.last_action == 'veto_past_turn'
+  near = track(2, 15.0, v_lead=0.0, v_ego=3.0)  # before the side road: still in the way
+  assert policy_with(pending).lead_one(override_lead(near), {2: near}, STRAIGHT, 0.0, v_ego=3.0)['present']
+  # once turning the map distance is gone; only the path decides
+  turning = policy_with({'side': 'left', 'turning': True, 'distance_m': None})
+  assert turning.lead_one(override_lead(wall), {1: wall}, STRAIGHT, 0.0, v_ego=3.0)['present']
+
+
+def test_turn_veto_never_drops_camera_moving_held_or_faster_leads():
+  wall = track(1, 23.0, v_lead=0.0, v_ego=3.0)
+  pending = {'side': 'left', 'turning': False, 'distance_m': 10.0}
+  # the camera sees it: a stopped car in the intersection stays the lead
+  assert policy_with(pending).lead_one(camera_lead(wall), {1: wall}, LEFT_TURN, 0.9, v_ego=3.0)['present']
+  # moving, or the car above radard's low-speed range, or no speed given (old callers): untouched
+  mover = track(2, 23.0, v_lead=3.0, v_ego=3.0)
+  assert policy_with(pending).lead_one(override_lead(mover), {2: mover}, LEFT_TURN, 0.0, v_ego=3.0)['present']
+  assert policy_with(pending).lead_one(override_lead(wall), {1: wall}, LEFT_TURN, 0.0, v_ego=5.0)['present']
+  assert policy_with(pending).lead_one(override_lead(wall), {1: wall}, LEFT_TURN, 0.0)['present']
+  # a car the camera confirmed, then lost, is held through the turn
+  policy = policy_with(pending)
+  policy.lead_one(camera_lead(wall), {1: wall}, STRAIGHT, 0.9, v_ego=3.0)
+  held = policy.lead_one(NO_LEAD, {1: wall}, STRAIGHT, 0.2, v_ego=3.0)
+  assert held['present'] and policy.last_action == 'hold'

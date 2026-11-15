@@ -362,7 +362,7 @@ class RadarD:
       else:
         lead_one = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.lead_prob_filters[0].x, low_speed_override=True)
         if self.tandem is not None and self.ready:
-          lead_one = self.tandem.lead_one(lead_one, self.tracks, sm['modelV2'], self.lead_prob_filters[0].x)
+          lead_one = self.tandem.lead_one(lead_one, self.tracks, sm['modelV2'], self.lead_prob_filters[0].x, v_ego=self.v_ego)
         self.radar_state.leadOne = lead_one
         self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego,
                                           self.lead_prob_filters[1].x, low_speed_override=False)

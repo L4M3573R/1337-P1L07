@@ -15,9 +15,17 @@ information, so leadOne is fused in tandem instead:
 Stationary radar returns (signs, bridges, parked cars) never become a lead without the camera,
 except through radard's existing low-speed override. Radar-only leads carry the camera's real
 probability, so camera-gated consumers (FCW, model lead trajectory) keep ignoring them.
+* Turn veto: that low-speed override takes the closest stationary return straight ahead of the car's
+  heading, so at a turn it picks up whatever is across the intersection (2026-11-15: braked from
+  6.8 to 4.8 mph and dragged a left turn from a stop sign to ~1 mph, model probability 0). Such a lead
+  is dropped when the predicted path does not go through it, or when a signalled turn's mapped side road
+  (turn_speed status) is reached before it. Camera-confirmed and held leads are never vetoed.
 """
 from __future__ import annotations
 
+import math
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,6 +43,14 @@ PICKUP_MIN_SPEED = 3.0        # m/s ground speed; slower returns need the camera
 PICKUP_MAX_DISTANCE = 100.0   # m
 PICKUP_MIN_DISTANCE = 2.0     # m
 PICKUP_CLOSER_MARGIN = 5.0    # m, pickup must be this much closer than the camera's lead
+VETO_MAX_SPEED = 4.0          # m/s, radard's V_EGO_STATIONARY: below it stationary returns become leads without the camera
+STATIONARY_SPEED = 1.0        # m/s ground speed under which a return counts as stationary
+TURN_POINT_MARGIN = 2.0       # m, a return this close to the side road (or past it) is beyond where the car turns off
+
+
+def _turn_status() -> dict | None:
+  from openpilot.starpilot.navigation.turn_speed import read_status
+  return read_status(time.monotonic())
 
 
 def supported(car_fingerprint: str, radar_unavailable: bool) -> bool:
@@ -55,10 +71,11 @@ class _HeldLead:
 
 
 class TandemLeadPolicy:
-  def __init__(self) -> None:
+  def __init__(self, turn_status: Callable[[], dict | None] = _turn_status) -> None:
     self.in_path_frames: dict[int, int] = {}
     self.held = _HeldLead()
-    # Decision log for remote review: "camera", "hold", "pickup" or "none" for the last frame.
+    self.turn_status = turn_status
+    # Decision log for remote review: "camera", "hold", "pickup", "veto_off_path", "veto_past_turn" or "none".
     self.last_action = 'none'
     self.last_pickup_id = -1
     self.last_lead_prob = 0.0
@@ -79,8 +96,25 @@ class TandemLeadPolicy:
                   PICKUP_MIN_DISTANCE < track.dRel < PICKUP_MAX_DISTANCE]
     return min(candidates, key=lambda track: track.dRel) if candidates else None
 
-  def lead_one(self, base: dict[str, Any], tracks: dict, model, lead_prob: float) -> dict[str, Any]:
-    """Fuse radard's camera-gated leadOne (`base`) with the radar tracks."""
+  def _turn_veto(self, lead: dict[str, Any], tracks: dict, model, lead_prob: float, v_ego: float) -> str | None:
+    """Why radard's low-speed override lead is not in the car's way, or None to keep it."""
+    if (not lead.get('present', False) or not lead.get('radar', False) or lead_prob > CONFIRM_PROB or
+        not v_ego < VETO_MAX_SPEED or not abs(float(lead.get('vLead', 0.0))) < STATIONARY_SPEED):
+      return None
+    track = tracks.get(lead.get('radarTrackId'))
+    if track is None:
+      return None
+    if path_offset(track, model) >= PATH_HALF_WIDTH:
+      return 'veto_off_path'
+    turn = self.turn_status()
+    distance = turn.get('distance_m') if isinstance(turn, dict) and not turn.get('turning') else None
+    if isinstance(distance, (int, float)) and math.isfinite(distance) and track.dRel >= distance - TURN_POINT_MARGIN:
+      return 'veto_past_turn'
+    return None
+
+  def lead_one(self, base: dict[str, Any], tracks: dict, model, lead_prob: float, v_ego: float | None = None) -> dict[str, Any]:
+    """Fuse radard's camera-gated leadOne (`base`) with the radar tracks. With v_ego, a stationary low-speed
+    override lead the car will not reach (see the turn veto above) is dropped."""
     self._update_in_path(tracks, model)
     present = bool(base.get('present', False))
     camera_confirmed = present and base.get('radar', False) and base.get('modelProb', 0.0) > CONFIRM_PROB
@@ -114,4 +148,7 @@ class TandemLeadPolicy:
         lead = pickup.get_RadarState(lead_prob)
         self.last_action = 'pickup'
         self.last_pickup_id = int(getattr(pickup, 'identifier', -1))
+    if self.last_action == 'none' and v_ego is not None and (veto := self._turn_veto(lead, tracks, model, lead_prob, v_ego)):
+      self.last_action = veto
+      return {'present': False}
     return lead

@@ -125,7 +125,7 @@ def turn_decision(turn_intent, desire) -> dict:
 
 
 def radar_decision(tandem) -> dict:
-  """radard: what the camera+radar tandem policy did to leadOne ("camera", "hold", "pickup", "none")."""
+  """radard: what the camera+radar tandem policy did to leadOne ("camera", "hold", "pickup", "veto_off_path", "veto_past_turn", "none")."""
   held = getattr(tandem, 'held', None)
   return {'action': str(getattr(tandem, 'last_action', 'none')), 'held_track': int(getattr(held, 'track_id', -1)),
           'pickup_track': int(getattr(tandem, 'last_pickup_id', -1))}
