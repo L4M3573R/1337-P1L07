@@ -32,8 +32,8 @@ from openpilot.starpilot.efficiency.experiment import DOWNHILL_CARRY_MPH
 from openpilot.starpilot.efficiency.ledger import BATTERY_KWH, FLOW_LEN, GAL_PER_BATTERY_KWH, MPH
 
 METERS_PER_MILE = 1609.344
-TIME_BUDGET_MIN_PER_HR = 3.5  # the driver's limit is 3-4 extra minutes an hour (2026-11-15): plan to the middle of it
-TIME_LIMIT_MIN_PER_HR = 4.0
+TIME_BUDGET_MIN_PER_HR = 4.0  # the driver's budget: 4 extra minutes an hour, 2 per half hour (2026-11-15)
+TIME_LIMIT_MIN_PER_HR = TIME_BUDGET_MIN_PER_HR
 MAX_UNDER_MPH = 5.0
 MIN_BAND_MPH = 1.0
 DOWNHILL_OVER_MPH = DOWNHILL_CARRY_MPH  # what the experiments may carry over the set speed

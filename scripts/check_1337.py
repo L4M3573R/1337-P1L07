@@ -89,7 +89,7 @@ FEATURES = [
    [STARPILOT + 'efficiency/tests/test_compare.py', STARPILOT + 'efficiency/tests/test_trend.py',
     STARPILOT + 'efficiency/tests/test_tags_and_trips.py']),
   ('Self-learning fuel efficiency (shadow, PC summary): EV cut-off, Pulse and Glide bands in the time budget, downhill carry',
-   [(STARPILOT + 'efficiency/learner.py', r'TIME_BUDGET_MIN_PER_HR = 3\.5'), (STARPILOT + 'efficiency/pc_summary.py', r'learner\.learn_stored')],
+   [(STARPILOT + 'efficiency/learner.py', r'TIME_BUDGET_MIN_PER_HR = 4\.0'), (STARPILOT + 'efficiency/pc_summary.py', r'learner\.learn_stored')],
    [STARPILOT + 'efficiency/tests/test_learner.py']),
   ('1337 tracing: traced daily trace file, lead-loss / Pulse and Glide / slow-lookup decision logs, PC timeline',
    [(OP + 'system/manager/process_config.py', r'"traced"'), (OP + 'system/manager/process_health.py', r"'traced'"),

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 MPH = 0.44704
-TIME_BUDGET_S_PER_H = 210.0    # at most 3.5 extra minutes per engaged hour (the driver's limit: 3-4, 2026-11-15)
+TIME_BUDGET_S_PER_H = 240.0    # at most 4 extra minutes per engaged hour, 2 per half hour (the driver, 2026-11-15)
 BUDGET_GRACE_S = 30.0          # what a drive may spend before its first engaged minutes have earned it
 EXPLORE = 0.2                  # after learning, a non-winning variant is still tried this often
 EPISODE_M = 1000.0             # cruising and following episodes are redrawn every kilometre

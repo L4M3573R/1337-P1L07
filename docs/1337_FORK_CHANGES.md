@@ -100,7 +100,7 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   `coast.py`), relearned every run from the last 14 days (`EV_WINDOW_DAYS`, it moves with the weather) by the BlueDriver's
   engine rpm (ledger flow entries carry `FLOW_LEN` 7: BlueDriver readings and engine-off counts, from `efficiencyd`
   `obd_engine`), falling back to 0x595 power flow; where Pulse and Glide beats steady cruise per speed band and the deepest band the driver's time budget
-  allows (`TIME_BUDGET_MIN_PER_HR` 3.5, the driver's 3-4 min/hr, at most 5 mph under), and what running up to 3 mph over the set speed on open
+  allows (`TIME_BUDGET_MIN_PER_HR` 4, the driver's 4 min/hr, at most 5 mph under), and what running up to 3 mph over the set speed on open
   downhills would keep. Reports only; nothing reads it for control. Tests in `efficiency/tests/test_learner.py`.
 
 ### Settings and UI
@@ -159,7 +159,7 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
 - **Self-learning fuel experiments** (2026-11-14): `starpilot/efficiency/experiment.py` (the experimenter: situations
   launch / accelerate / follow / uphill / downhill / ev / pulse_glide / cruise / hold, each with variants; untried
   variants first, then the learned winner 4 in 5 and another 1 in 5; 15 s minimum episodes with entry/exit hysteresis; a
-  3.5 min/engaged-hour time budget (`TIME_BUDGET_S_PER_H` 210 s, the driver's 3-4) for variants that cost time; downhill carry at most `DOWNHILL_CARRY_MPH` 3 mph,
+  4 min/engaged-hour time budget (`TIME_BUDGET_S_PER_H` 240 s, 2 min per half hour) for variants that cost time; downhill carry at most `DOWNHILL_CARRY_MPH` 3 mph,
   variant `carry3`; `hold`/`flat` holds the throttle (accel cap 0) in every cruising band, 60+ mph included, until
   `HOLD_BAND_MPH` 2 mph under the set speed, 2026-11-15), `experiment_host.py`
   (plannerd: frame from sm, Pulse and Glide on/off through the coast owner with hand-back and the driver's choice
