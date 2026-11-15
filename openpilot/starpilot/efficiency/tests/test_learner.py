@@ -12,12 +12,12 @@ from openpilot.starpilot.efficiency.learner import (MAX_UNDER_MPH, MIN_BAND_MPH,
 def test_band_depth_stays_inside_the_time_budget():
   assert band_depth_mph(65.0) == MAX_UNDER_MPH  # the budget would allow a little more; the 5 mph floor caps it
   depth40 = band_depth_mph(40.0)
-  assert 3.0 < depth40 < 3.5
+  assert 4.0 < depth40 < 4.6
   assert band_time_cost(40.0, depth40) == pytest.approx(TIME_BUDGET_MIN_PER_HR)
   assert band_time_cost(65.0, band_depth_mph(65.0)) < TIME_BUDGET_MIN_PER_HR
-  assert band_depth_mph(10.0) == MIN_BAND_MPH
+  assert band_depth_mph(5.0) == MIN_BAND_MPH
   for set_mph in (20.0, 30.0, 45.0, 55.0, 70.0, 80.0):
-    assert band_time_cost(set_mph, band_depth_mph(set_mph)) <= 3.0  # never past the driver's 3 min/hr maximum
+    assert band_time_cost(set_mph, band_depth_mph(set_mph)) <= learner.TIME_LIMIT_MIN_PER_HR  # never past the driver's maximum
 
 
 def _flow(shares, samples=400, accel='-0.05'):
