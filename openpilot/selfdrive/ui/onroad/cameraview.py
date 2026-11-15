@@ -14,6 +14,7 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.starpilot.ui.camera_color import ROAD_COLOR_SHADER, road_color_strength
 
 CONNECTION_RETRY_INTERVAL = 0.2  # seconds between connection attempts
+PACE_TIMEOUT_MS = 60  # longest a frame waits for the camera (20 Hz, 50 ms apart) before drawing anyway
 ROAD_STREAMS = (VisionStreamType.VISION_STREAM_NARROW_ROAD, VisionStreamType.VISION_STREAM_WIDE_ROAD)
 
 VERSION = """
@@ -112,6 +113,7 @@ class CameraView(Widget):
     # EGL resources
     self.egl_images: dict[int, EGLImage] = {}
     self.egl_texture: rl.Texture | None = None
+    self._egl_attached: EGLImage | None = None  # image egl_texture currently holds
 
     self._placeholder_color: rl.Color | None = None
 
@@ -126,6 +128,8 @@ class CameraView(Widget):
       rl.unload_image(temp_image)
 
     ui_state.add_offroad_transition_callback(self._offroad_transition)
+    self._polled_frame = -2
+    gui_app.add_frame_pacer(self._pace_to_camera)
 
   def _init_clients(self, name: str, stream_type: VisionStreamType):
     # Reuse subscribers: destroying a VisionIpcClient doesn't reclaim its msgq reader slot.
@@ -209,7 +213,24 @@ class CameraView(Widget):
       [0.0, 0.0, 1.0]
     ])
 
+  def _pace_to_camera(self) -> bool:
+    """While this view was drawn last frame, start the next frame when its next camera frame lands.
+
+    The UI then draws each camera frame once, as soon as it arrives, instead of drawing
+    unsynchronized frames that repeat or skip camera frames.
+    """
+    client = getattr(self, "client", None)
+    if (getattr(self, "_polled_frame", -2) < gui_app.frame - 1 or self._switching or
+        client is None or not client.is_connected()):
+      return False
+    buffer = client.recv(timeout_ms=PACE_TIMEOUT_MS)
+    if buffer:
+      self._texture_needs_update = True
+      self.frame = buffer
+    return True
+
   def _poll_camera(self) -> bool:
+    self._polled_frame = gui_app.frame
     if self._switching:
       self._handle_switch()
 
@@ -279,8 +300,9 @@ class CameraView(Widget):
     self.egl_texture.width = self.frame.width
     self.egl_texture.height = self.frame.height
 
-    # Bind the EGL image to our texture
-    bind_egl_image_to_texture(self.egl_texture.id, egl_image)
+    # Bind the EGL image to our texture; the UI draws faster than the camera, so most frames reuse it
+    bind_egl_image_to_texture(self.egl_texture.id, egl_image, attach=egl_image is not getattr(self, '_egl_attached', None))
+    self._egl_attached = egl_image
 
     # Render with shader
     rl.begin_shader_mode(self.shader)
@@ -392,6 +414,7 @@ class CameraView(Widget):
       for data in self.egl_images.values():
         destroy_egl_image(data)
       self.egl_images = {}
+      self._egl_attached = None
 
 
 if __name__ == "__main__":

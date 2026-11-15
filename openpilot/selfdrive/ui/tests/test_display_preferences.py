@@ -25,7 +25,7 @@ class DisplayDeviceTests(unittest.TestCase):
     for guard in self.patches:
       guard.start()
       self.addCleanup(guard.stop)
-    filter_guard = patch.object(module.FirstOrderFilter, "update", autospec=True,
+    filter_guard = patch.object(module.FrameFilter, "update", autospec=True,
                                 side_effect=lambda _filter, value: value)
     self.filter_update = filter_guard.start()
     self.addCleanup(filter_guard.stop)

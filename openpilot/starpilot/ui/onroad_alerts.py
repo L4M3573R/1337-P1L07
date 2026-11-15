@@ -8,7 +8,7 @@ from openpilot.starpilot.ui.raylib import rl
 from openpilot.system.ui.lib.multilang import tr_display as tr
 from openpilot.system.ui.lib.display_translation import DisplayText
 
-from openpilot.common.filter_simple import BounceFilter, FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameBounceFilter, FrameFilter
 from openpilot.starpilot.ui.onroad_state import AlertSize, OnroadAlert
 from openpilot.selfdrive.ui.mici.onroad.alert_renderer import Alert as NativeAlert, AlertRenderer as NativeAlertRenderer
 from openpilot.starpilot.ui.presentation import BitmapFonts, FontRole, Profile
@@ -33,8 +33,8 @@ def _wrap_display(text, measure, width):
 class AlertRenderer:
   def __init__(self, fonts: BitmapFonts):
     self.fonts = fonts
-    self._position = BounceFilter(0, 0.1, 1 / 60, initialized=fonts.profile == Profile.COMPACT)
-    self._alpha = FirstOrderFilter(0, 0.05, 1 / 60)
+    self._position = FrameBounceFilter(0, 0.1, initialized=fonts.profile == Profile.COMPACT)
+    self._alpha = FrameFilter(0, 0.05)
     self._lane_renderer: NativeAlertRenderer | None = None
     self._lane_visible = False
     self._previous: OnroadAlert | None = None

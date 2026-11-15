@@ -9,7 +9,7 @@ from dataclasses import replace
 from openpilot.cereal import messaging, log
 from openpilot.cereal.services import SERVICE_LIST
 from opendbc.car.structs import car
-from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameFilter
 from openpilot.common.params import Params
 from openpilot.starpilot.schema_cache import get_cache, prewarm_cache_contracts
 from openpilot.starpilot.feature_runtime import enabled as feature_enabled
@@ -527,7 +527,7 @@ class Device:
 
     self._offroad_brightness: int = BACKLIGHT_OFFROAD
     self._last_brightness: int = 0
-    self._brightness_filter = FirstOrderFilter(BACKLIGHT_OFFROAD, 10.00, 1 / gui_app.target_fps)
+    self._brightness_filter = FrameFilter(BACKLIGHT_OFFROAD, 10.00)
     self._brightness_thread: threading.Thread | None = None
     self._brightness_event = threading.Event()
     self._brightness_target: int = 0

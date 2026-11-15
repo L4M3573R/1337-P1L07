@@ -8,10 +8,9 @@ from openpilot.starpilot.ui.raylib import rl
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY
 from openpilot.selfdrive.ui.mici.onroad import blend_colors
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
-from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
 from openpilot.system.ui.widgets import Widget
-from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameFilter
 
 # TODO: arc_bar_pts doesn't consider rounded end caps part of the angle span
 TORQUE_ANGLE_SPAN = 12.7  # degrees on the default 476 px camera view; narrower views beside the navigation panel scale down
@@ -151,8 +150,8 @@ class TorqueBar(Widget):
   def __init__(self, demo: bool = False):
     super().__init__()
     self._demo = demo
-    self._torque_filter = FirstOrderFilter(0, 0.1, 1 / gui_app.target_fps)
-    self._torque_line_alpha_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
+    self._torque_filter = FrameFilter(0, 0.1)
+    self._torque_line_alpha_filter = FrameFilter(0.0, 0.1)
 
   def update_filter(self, value: float):
     """Update the torque filter value (for demo mode)."""

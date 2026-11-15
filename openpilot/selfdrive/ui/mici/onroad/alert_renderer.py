@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from openpilot.cereal import messaging, log
 from opendbc.car.structs import car
 from openpilot.selfdrive.ui.ui_state import ui_state
-from openpilot.common.filter_simple import BounceFilter, FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameBounceFilter, FrameFilter
 from openpilot.common.hardware import COMMA_HARDWARE
 from openpilot.system.ui.lib.application import gui_app, FontWeight, TextAlignment
 from openpilot.system.ui.widgets import Widget
@@ -102,12 +102,12 @@ class AlertRenderer(Widget):
 
     # animation filters
     # TODO: use 0.1 but with proper alert height calculation
-    self._alert_y_filter = BounceFilter(0, 0.1, 1 / gui_app.target_fps)
-    self._alpha_filter = FirstOrderFilter(0, 0.05, 1 / gui_app.target_fps)
+    self._alert_y_filter = FrameBounceFilter(0, 0.1)
+    self._alpha_filter = FrameFilter(0, 0.05)
     self._fade_time: float | None = None
 
     self._turn_signal_timer = 0.0
-    self._turn_signal_alpha_filter = FirstOrderFilter(0.0, 0.3, 1 / gui_app.target_fps)
+    self._turn_signal_alpha_filter = FrameFilter(0.0, 0.3)
     self._last_icon_side: IconSide | None = None
 
     self._load_icons()

@@ -2,7 +2,7 @@
 
 from openpilot.starpilot.ui.raylib import rl
 
-from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameFilter
 from openpilot.starpilot.ui.onroad_state import OnroadState
 from openpilot.starpilot.ui.onroad_customization import offset as widget_offset, placement
 from openpilot.starpilot.ui.onroad_torque_draw import TorqueBarPainter
@@ -11,8 +11,8 @@ from openpilot.starpilot.ui.onroad_torque_geometry import CAP_RADIUS, LARGE_CAP_
 
 class TorqueBarWidget:
   def __init__(self):
-    self._torque_filter = FirstOrderFilter(0.0, 0.1, 1 / 60)
-    self._alpha_filter = FirstOrderFilter(0.0, 0.1, 1 / 60)
+    self._torque_filter = FrameFilter(0.0, 0.1)
+    self._alpha_filter = FrameFilter(0.0, 0.1)
     self._drive_frame = None
     self._demand_only = False
     self._painter = TorqueBarPainter()

@@ -1,7 +1,7 @@
 import math
 from openpilot.starpilot.ui.raylib import rl
 
-from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameFilter
 from openpilot.selfdrive.ui.ui_state import ui_state, ChestnutState
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets import Widget
@@ -15,7 +15,7 @@ class ModelSource(Widget):
     self._chestnut_drive_frame: int | None = None
     self._fade_time = 0.0
     self._icon: rl.Texture | None = None
-    self._alpha_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
+    self._alpha_filter = FrameFilter(0.0, 0.1)
     self._loading = gui_app.texture('icons_mici/chestnut.png', 60 * scale, 44 * scale)
     self._active = gui_app.texture('icons_mici/chestnut_green.png', 60 * scale, 44 * scale)
     self._failed = gui_app.texture('icons_mici/chestnut_orange.png', 75 * scale, 44 * scale)

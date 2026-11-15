@@ -4,7 +4,7 @@ from openpilot.starpilot.ui.raylib import rl
 from openpilot.cereal import messaging
 from opendbc.car.structs import car
 from dataclasses import dataclass, field
-from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameFilter
 from openpilot.common.params import Params
 from openpilot.starpilot.ui.appearance_preferences import format_lead_info
 from openpilot.starpilot.ui.rainbow_path import RainbowPath
@@ -111,7 +111,7 @@ class ModelRenderer(ModelGeometry, Widget):
     super().__init__()
     self._longitudinal_control = False
     self._experimental_mode = False
-    self._blend_filter = FirstOrderFilter(1.0, 0.25, 1 / gui_app.target_fps)
+    self._blend_filter = FrameFilter(1.0, 0.25)
     self._prev_allow_throttle = True
     self._default_path_gradient = None
     self._default_path_blend_factor = None

@@ -9,7 +9,7 @@ import math
 
 from openpilot.starpilot.ui.raylib import rl
 
-from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameFilter
 from openpilot.starpilot.ui.appearance_preferences import CameraViewChoice
 from openpilot.starpilot.ui.onroad_conditional import reason, status
 from openpilot.starpilot.ui.onroad_curve import controlling, glow_color, intensity
@@ -174,7 +174,7 @@ class AetherGauge:
     self.fonts = fonts
     self._chevron_accum = 0.0
     self._lead_chevron_accum = 0.0
-    self._road_h_filter = FirstOrderFilter(ROAD_HEIGHT, 0.06, 1 / 60)
+    self._road_h_filter = FrameFilter(ROAD_HEIGHT, 0.06)
     self._current_road_h = ROAD_HEIGHT
     self._speed_mps = 0.0
     self._lead_stopped = False

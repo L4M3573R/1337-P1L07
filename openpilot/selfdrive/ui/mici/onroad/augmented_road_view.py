@@ -19,7 +19,7 @@ from openpilot.system.ui.widgets.label import gui_label
 from openpilot.system.ui.lib.application import FontWeight, gui_app, MousePos, MouseEvent, TextAlignment, TextAlignmentVertical
 from openpilot.system.ui.widgets.label import UnifiedLabel
 from openpilot.system.ui.widgets import Widget
-from openpilot.common.filter_simple import BounceFilter, FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameBounceFilter, FrameFilter
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
 from enum import IntEnum
@@ -56,8 +56,8 @@ class BookmarkIcon(Widget):
     self._bookmark_callback = bookmark_callback
     self._icon = gui_app.texture("icons_mici/onroad/bookmark.png", 180, 180)
     self._filled_icon = gui_app.texture("icons_mici/onroad/bookmark_fill.png", 180, 180)
-    self._offset_filter = BounceFilter(0.0, 0.1, 1 / gui_app.target_fps)
-    self._active_alpha = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
+    self._offset_filter = FrameBounceFilter(0.0, 0.1)
+    self._active_alpha = FrameFilter(0.0, 0.1)
 
     # State
     self._interacting = False

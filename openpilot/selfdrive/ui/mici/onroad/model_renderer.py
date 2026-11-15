@@ -10,7 +10,7 @@ from openpilot.starpilot.ui.rainbow_path import RainbowPath
 from openpilot.starpilot.ui.road_colors import lane_color, path_mode, solid_gradient
 from openpilot.starpilot.ui.onroad_customization import ROAD_COLORS
 from openpilot.starpilot.lateral.lane_feedback import BLUE, direction as lane_centering_direction
-from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameFilter
 from openpilot.selfdrive.locationd.calibrationd import HEIGHT_INIT
 from openpilot.selfdrive.controls.radard import RADAR_TO_CAMERA
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
@@ -53,9 +53,9 @@ class LeadVehicle:
   def __init__(self):
     self.info = None
     self.bar = np.empty((0, 2), dtype=np.float32)
-    self.d_filter = FirstOrderFilter(0.0, 0.2, 1 / gui_app.target_fps, initialized=False)
-    self.y_filter = FirstOrderFilter(0.0, 0.2, 1 / gui_app.target_fps, initialized=False)
-    self.fade_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
+    self.d_filter = FrameFilter(0.0, 0.2, initialized=False)
+    self.y_filter = FrameFilter(0.0, 0.2, initialized=False)
+    self.fade_filter = FrameFilter(0.0, 0.1)
 
 
 
@@ -65,7 +65,7 @@ class ModelRenderer(ModelGeometry, Widget):
     super().__init__()
     self._longitudinal_control = False
     self._experimental_mode = False
-    self._blend_filter = FirstOrderFilter(1.0, 0.25, 1 / gui_app.target_fps)
+    self._blend_filter = FrameFilter(1.0, 0.25)
     self._prev_allow_throttle = True
     self._default_path_gradient = None
     self._default_path_blend_factor = None
@@ -86,11 +86,11 @@ class ModelRenderer(ModelGeometry, Widget):
     self._road_edges = [ModelPoints() for _ in range(2)]
     self._acceleration_x = np.empty((0,), dtype=np.float32)
 
-    self._acceleration_x_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
-    self._acceleration_x_filter2 = FirstOrderFilter(0.0, 1, 1 / gui_app.target_fps)
+    self._acceleration_x_filter = FrameFilter(0.0, 0.1)
+    self._acceleration_x_filter2 = FrameFilter(0.0, 1)
 
-    self._torque_filter = FirstOrderFilter(0, 0.1, 1 / gui_app.target_fps)
-    self._ll_color_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
+    self._torque_filter = FrameFilter(0, 0.1)
+    self._ll_color_filter = FrameFilter(0.0, 0.1)
 
     # 3x3 car space -> rect-origin space (draw methods add rect.x/y)
     self._car_space_transform = np.zeros((3, 3), dtype=np.float32)

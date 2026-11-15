@@ -7,6 +7,7 @@ import signal
 import sys
 from openpilot.starpilot.ui.raylib import rl
 import threading
+import weakref
 import platform
 import subprocess
 from contextlib import contextmanager
@@ -29,6 +30,8 @@ AUTO_TIMING_MAX_SAMPLES = 360
 FPS_DROP_THRESHOLD = 0.9  # FPS drop threshold for triggering a warning
 FPS_CRITICAL_THRESHOLD = 0.5  # Critical threshold for triggering strict actions
 MOUSE_THREAD_RATE = 140  # touch controller runs at 140Hz
+FRAME_DT_MIN, FRAME_DT_MAX = 1 / 240, 1 / 15  # bounds on frame_dt so a stall or resume cannot make animations jump
+PACED_FPS = 20  # camera rate; the frame rate to expect while a frame pacer holds frames to the camera
 MAX_TOUCH_SLOTS = 2
 TOUCH_HISTORY_TIMEOUT = 3.0  # Seconds before touch points fade out
 
@@ -264,6 +267,10 @@ class GuiApplication:
     self._ffmpeg_stop_event: threading.Event | None = None
     self._textures: dict[str, rl.Texture] = {}
     self._target_fps: int = _DEFAULT_FPS
+    self._frame_dt: float = 1 / _DEFAULT_FPS
+    self._last_frame_start: float | None = None
+    self._frame_pacers: list[weakref.WeakMethod] = []
+    self._paced = False
     self._last_fps_log_time: float = time.monotonic()
     self._frame = 0
     self._window_close_requested = False
@@ -326,6 +333,29 @@ class GuiApplication:
   @property
   def target_fps(self):
     return self._target_fps
+
+  def add_frame_pacer(self, pacer: Callable[[], bool]) -> None:
+    """Register a bound method run before each frame. It may block until it has something new to show and
+    returns True when it held the frame; it is dropped when its owner is collected."""
+    self._frame_pacers.append(weakref.WeakMethod(pacer))  # type: ignore[arg-type]
+
+  def _run_frame_pacers(self) -> bool:
+    paced = False
+    for ref in tuple(self._frame_pacers):
+      if (pacer := ref()) is None:
+        self._frame_pacers.remove(ref)
+      elif pacer():
+        paced = True
+    return paced
+
+  @property
+  def expected_fps(self) -> int:
+    return PACED_FPS if self._paced else self._target_fps
+
+  @property
+  def frame_dt(self) -> float:
+    """Seconds between the starts of the last two frames, bounded; the real step for per-frame animation."""
+    return self._frame_dt
 
   def add_render_prepare(self, callback, cleanup):
     self._render_prepare[callback] = cleanup
@@ -396,6 +426,7 @@ class GuiApplication:
       rl.set_target_fps(0 if OFFSCREEN or vblank_control else fps)
 
       self._target_fps = fps
+      self._frame_dt = 1 / fps
       self._load_fonts()
       self._patch_text_functions()
       self._patch_scissor_mode()
@@ -669,7 +700,12 @@ class GuiApplication:
       while not (self._window_close_requested or rl.window_should_close()):
         if self._frame % self._target_fps == 0:
           multilang.refresh_language()
+        # On the device, a visible camera view starts each frame when its next camera frame lands
+        self._paced = not PC and self._run_frame_pacers()
         frame_start = time.monotonic()
+        if self._last_frame_start is not None:
+          self._frame_dt = min(max(frame_start - self._last_frame_start, FRAME_DT_MIN), FRAME_DT_MAX)
+        self._last_frame_start = frame_start
         collect_timing = self._frame_timing_enabled or frame_start < self._auto_timing_end
         self._collect_frame_timing = collect_timing
         if not collect_timing:
@@ -889,8 +925,9 @@ class GuiApplication:
 
   def _monitor_fps(self):
     fps = rl.get_fps()
+    expected = self.expected_fps
     current_time = time.monotonic()
-    slow = fps < self._target_fps * FPS_DROP_THRESHOLD
+    slow = fps < expected * FPS_DROP_THRESHOLD
     if self._auto_timing_end:
       if slow and self.frame_timing is not None:
         timing = self.frame_timing
@@ -917,7 +954,7 @@ class GuiApplication:
         self._auto_timing_samples.clear()
 
     # Log FPS drop below threshold at regular intervals
-    if fps < self._target_fps * FPS_DROP_THRESHOLD:
+    if fps < expected * FPS_DROP_THRESHOLD:
       current_time = time.monotonic()
       if current_time - self._last_fps_log_time >= FPS_LOG_INTERVAL:
         detail = ""
@@ -929,7 +966,7 @@ class GuiApplication:
           for name in FRAME_PHASES:
             if phase := self._frame_phases.get(name):
               detail += f", {name} wall/cpu {phase[0]:.1f}/{phase[1]:.1f}ms"
-        cloudlog.warning(f"FPS dropped below {self._target_fps}: {fps}{detail}")
+        cloudlog.warning(f"FPS dropped below {expected}: {fps}{detail}")
         self._last_fps_log_time = current_time
         if not self._auto_timing_end and current_time >= self._auto_timing_next:
           self._auto_timing_end = current_time + AUTO_TIMING_DURATION
@@ -937,7 +974,7 @@ class GuiApplication:
           self._auto_timing_samples.clear()
 
     # Strict mode: terminate UI if FPS drops too much
-    if STRICT_MODE and fps < self._target_fps * FPS_CRITICAL_THRESHOLD:
+    if STRICT_MODE and fps < expected * FPS_CRITICAL_THRESHOLD:
       cloudlog.error(f"FPS dropped critically below {fps}. Shutting down UI.")
       self.close_ffmpeg()
       os._exit(1)

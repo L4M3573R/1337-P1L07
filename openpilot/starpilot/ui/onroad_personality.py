@@ -2,7 +2,7 @@
 
 from openpilot.starpilot.ui.raylib import rl
 
-from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameFilter
 from openpilot.starpilot.ui.onroad_state import AlertSize, OnroadState, is_lane_change_notice, personality_bounds
 from openpilot.starpilot.ui.onroad_widget_style import draw_widget_frame
 from openpilot.starpilot.ui.presentation import BitmapFonts, Profile
@@ -16,10 +16,10 @@ class PersonalityWidget:
     self.fonts = fonts
     self._lead_car = None
     self._distance = []
-    self._alpha_filter = FirstOrderFilter(0.0, 0.05, 1 / gui_app.target_fps)
-    self._lead_car_filters = tuple(FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps) for _ in range(2))
-    self._distance_filters = [(FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps),
-                               FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)) for _ in range(3)]
+    self._alpha_filter = FrameFilter(0.0, 0.05)
+    self._lead_car_filters = tuple(FrameFilter(0.0, 0.1) for _ in range(2))
+    self._distance_filters = [(FrameFilter(0.0, 0.1),
+                               FrameFilter(0.0, 0.1)) for _ in range(3)]
     self.reset()
 
   def reset(self) -> None:

@@ -173,9 +173,11 @@ def destroy_egl_image(egl_image: EGLImage) -> None:
     pass
 
 
-def bind_egl_image_to_texture(texture_id: int, egl_image: EGLImage) -> None:
+def bind_egl_image_to_texture(texture_id: int, egl_image: EGLImage, *, attach: bool = True) -> None:
+  """Bind the texture for drawing. attach=False skips re-attaching an image the texture already holds."""
   assert _egl.initialized, "EGL not initialized"
 
   _egl.active_texture(GL_TEXTURE0)
   _egl.bind_texture(GL_TEXTURE_EXTERNAL_OES, texture_id)
-  _egl.image_target_texture(GL_TEXTURE_EXTERNAL_OES, egl_image.egl_image)
+  if attach:
+    _egl.image_target_texture(GL_TEXTURE_EXTERNAL_OES, egl_image.egl_image)

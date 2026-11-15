@@ -3,8 +3,7 @@ from openpilot.starpilot.ui.raylib import rl
 from openpilot.selfdrive.ui.mici.onroad import SIDE_PANEL_WIDTH
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.widgets import Widget
-from openpilot.system.ui.lib.application import gui_app
-from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameFilter
 
 
 def draw_circle_gradient(center_x: float, center_y: float, radius: int,
@@ -25,7 +24,7 @@ class ConfidenceBall(Widget):
   def __init__(self, demo: bool = False):
     super().__init__()
     self._demo = demo
-    self._confidence_filter = FirstOrderFilter(-0.5, 0.5, 1 / gui_app.target_fps)
+    self._confidence_filter = FrameFilter(-0.5, 0.5)
     self._render_lateral_active = False
 
   def update_filter(self, value: float):

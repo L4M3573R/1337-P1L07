@@ -9,7 +9,7 @@ from pathlib import Path
 
 from openpilot.starpilot.ui.raylib import rl
 
-from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameFilter
 from openpilot.starpilot.conditional_mode.policy import ModeChoice
 from openpilot.starpilot.ui.onroad_customization import offset as widget_offset, placement, rgba, widget_size
 from openpilot.starpilot.ui.onroad_state import AlertSize, ObservationKind, OnroadState, is_lane_change_notice, manual_slc_confirmation
@@ -98,9 +98,9 @@ class CompactHudRenderer:
     self._wheel: rl.Texture | None = None
     self._feedback = WheelFeedbackFade()
     self._speed_limit_widget = SpeedLimitWidget(fonts, Profile.COMPACT)
-    self._set_speed_alpha = FirstOrderFilter(0.0, 0.1, 1 / 60)
-    self._wheel_alpha = FirstOrderFilter(0.0, 0.05, 1 / 60)
-    self._wheel_y = FirstOrderFilter(0.0, 0.1, 1 / 60)
+    self._set_speed_alpha = FrameFilter(0.0, 0.1)
+    self._wheel_alpha = FrameFilter(0.0, 0.05)
+    self._wheel_y = FrameFilter(0.0, 0.1)
     self._was_cruise_active = False
     self._last_cruise_display: int | None = None
     self._last_cruise_ns: int | None = None
@@ -214,7 +214,7 @@ class MiciSidebarWidgets:
   def __init__(self, fonts: BitmapFonts | None = None):
     self.fonts = fonts
     self.personality = PersonalityWidget(fonts)
-    self._confidence_filter = FirstOrderFilter(-0.5, 0.5, 1 / 60)
+    self._confidence_filter = FrameFilter(-0.5, 0.5)
     self._confidence_drive_frame: int | None = None
     self._confidence_stamp_ns: int | None = None
 

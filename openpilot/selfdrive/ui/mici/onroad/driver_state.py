@@ -3,6 +3,7 @@ import numpy as np
 import math
 from openpilot.cereal import log
 from openpilot.common.filter_simple import FirstOrderFilter
+from openpilot.system.ui.lib.frame_filter import FrameFilter
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets import Widget
 from openpilot.selfdrive.ui.ui_state import ui_state
@@ -33,7 +34,7 @@ class DriverStateRenderer(Widget):
 
     # In line mode, track smoothed angles
     assert 360 % self.LINES_ANGLE_INCREMENT == 0
-    self._head_angles = {i * self.LINES_ANGLE_INCREMENT: FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps) for i in range(360 // self.LINES_ANGLE_INCREMENT)}
+    self._head_angles = {i * self.LINES_ANGLE_INCREMENT: FrameFilter(0.0, 0.1) for i in range(360 // self.LINES_ANGLE_INCREMENT)}
 
     self._is_active = False
     self._is_rhd = False
@@ -45,12 +46,12 @@ class DriverStateRenderer(Widget):
     self._looking_center = False
     self._awareness_unfull = False
 
-    self._fade_filter = FirstOrderFilter(0.0, 0.05, 1 / gui_app.target_fps)
-    self._color_fade_filter = FirstOrderFilter(1.0, 0.05, 1 / gui_app.target_fps) # 1.0 = full green, 0.0 = full orange
-    self._pitch_filter = FirstOrderFilter(0.0, 0.05, 1 / gui_app.target_fps, initialized=False)
-    self._yaw_filter = FirstOrderFilter(0.0, 0.05, 1 / gui_app.target_fps, initialized=False)
-    self._rotation_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps, initialized=False)
-    self._looking_center_filter = FirstOrderFilter(0.0, 0.1, 1 / gui_app.target_fps)
+    self._fade_filter = FrameFilter(0.0, 0.05)
+    self._color_fade_filter = FrameFilter(1.0, 0.05) # 1.0 = full green, 0.0 = full orange
+    self._pitch_filter = FrameFilter(0.0, 0.05, initialized=False)
+    self._yaw_filter = FrameFilter(0.0, 0.05, initialized=False)
+    self._rotation_filter = FrameFilter(0.0, 0.1, initialized=False)
+    self._looking_center_filter = FrameFilter(0.0, 0.1)
 
     # Load the driver face icons
     self.load_icons()

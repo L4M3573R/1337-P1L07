@@ -318,3 +318,65 @@ def test_following_unmeasured_frame_clears_prior_payload(frame, monkeypatch):
   with pytest.raises(StopIteration):
     next(loop)
   assert app.frame_timing is None
+
+
+def test_frame_dt_tracks_the_real_frame_period_within_bounds(frame, monkeypatch):
+  app, advance, _, _ = frame
+  monkeypatch.setattr(application.rl, "window_should_close", Mock(side_effect=[False, False, False, True]))
+  monkeypatch.setattr(application.rl, "end_drawing", lambda: advance(0.030, 0.001))
+  loop = app.render()
+  next(loop)
+  assert app.frame_dt == pytest.approx(1 / application._DEFAULT_FPS)  # nothing measured before the second frame
+  next(loop)
+  assert app.frame_dt == pytest.approx(0.044)  # 4 ms begin + 10 ms widget + 30 ms present
+  advance(1.0, 0.0)  # a stall must not make animations jump
+  next(loop)
+  assert app.frame_dt == application.FRAME_DT_MAX
+
+
+class _Pacer:
+  def __init__(self, result, calls):
+    self.result, self.calls = result, calls
+
+  def pace(self):
+    self.calls.append(self)
+    return self.result
+
+
+def test_frame_pacers_run_before_each_frame_and_set_the_expected_rate(frame, monkeypatch):
+  app, _, _, warning = frame
+  calls: list = []
+  holding, idle = _Pacer(True, calls), _Pacer(False, calls)
+  app.add_frame_pacer(holding.pace)
+  app.add_frame_pacer(idle.pace)
+  monkeypatch.setattr(application.rl, "get_fps", lambda: 19)
+  loop = app.render()
+  next(loop)
+  assert calls == [holding, idle]
+  assert app.expected_fps == application.PACED_FPS
+  with pytest.raises(StopIteration):
+    next(loop)
+  warning.assert_not_called()  # 19 FPS is on pace while frames follow the camera
+
+  holding.result = False
+  monkeypatch.setattr(application.rl, "window_should_close", Mock(side_effect=[False, True]))
+  loop = app.render()
+  next(loop)
+  assert app.expected_fps == 60
+
+
+def test_frame_pacers_are_dropped_with_their_owner_and_skipped_on_pc(frame, monkeypatch):
+  app, _, _, _ = frame
+  calls: list = []
+  pacer = _Pacer(True, calls)
+  app.add_frame_pacer(pacer.pace)
+  del pacer
+  assert app._run_frame_pacers() is False
+  assert app._frame_pacers == []
+
+  kept = _Pacer(True, calls)
+  app.add_frame_pacer(kept.pace)
+  monkeypatch.setattr(application, "PC", True)
+  loop = app.render()
+  next(loop)
+  assert calls == [] and app.expected_fps == 60
