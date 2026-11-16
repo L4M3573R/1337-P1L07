@@ -48,11 +48,16 @@ ACCEL_VARIANTS = {'gentle': 0.75, 'moderate': 0.9}
 NORMAL_ACCEL_BP = (0.0, 10.0, 25.0, 40.0)   # m/s: the planner's A_CRUISE_MAX table
 NORMAL_ACCEL_V = (1.6, 1.2, 0.8, 0.6)
 VETO_LIMIT = 2                 # the driver pressed the gas during a slower variant this many times: never offer it there
-SLOWER_VARIANTS = {'gentle', 'moderate', 'smooth', 'sag3', 'under2', 'under4', 'flat'}
+SLOWER_VARIANTS = {'gentle', 'moderate', 'smooth', 'sag3', 'under2', 'under4', 'flat', 'regen'}
 ACCELERATE_GAP_MPS = 3 * MPH   # the set speed this far above the car's speed: an "accelerate" episode...
 ACCELERATE_MIN_ACCEL = 0.1     # ...once the car is actually speeding up (not still slowing behind a car or into a turn)
 FOLLOW_SMOOTH_ACCEL = 0.6
 EV_GENTLE_ACCEL = 0.3
+STOP_REGEN_DECEL = 1.0         # m/s2 of braking the hybrid can still put back into the battery at speed (~30 kW, energy.py)
+STOP_ENTER_DECEL = 0.5         # a stop episode starts once stopping needs this much (the regen rate is getting close)
+STOP_MAX_DECEL = 1.6           # a stop first seen needing more than this is no experiment: it brakes as it must
+STOP_MIN_MPS = 6.0
+STOP_GAP_M = 6.0               # a stopped car ahead: the stop is this far behind it (the planner's standstill gap)
 HOLD_BAND_MPH = 2.0            # 'flat': hold the throttle (no acceleration) until this far under the set speed (the driver's allowance)
 SPEED_BANDS = ((30 * MPH, '25-30'), (45 * MPH, '30-45'), (60 * MPH, '45-60'), (math.inf, '60+'))
 
@@ -67,9 +72,11 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
   'pulse_glide': ('steady', 'pg'),
   'cruise': ('set', 'under2', 'under4'),
   'hold': ('normal', 'flat'),   # level cruising: correct small speed losses (normal) or hold the pedal flat
+  'stop': ('normal', 'regen'),  # a stop ahead: the planner's own stop, or one steady regen-rate slowdown from first sight
 }
 COSTS_TIME = {('launch', 'gentle'), ('launch', 'moderate'), ('accelerate', 'gentle'), ('accelerate', 'moderate'),
-              ('uphill', 'sag3'), ('pulse_glide', 'pg'), ('cruise', 'under2'), ('cruise', 'under4'), ('hold', 'flat')}
+              ('uphill', 'sag3'), ('pulse_glide', 'pg'), ('cruise', 'under2'), ('cruise', 'under4'), ('hold', 'flat'),
+              ('stop', 'regen')}
 UNDER_MPH = {'sag3': 3.0, 'under2': 2.0, 'under4': 4.0}
 
 
@@ -104,6 +111,7 @@ class Frame:
   pulse_glide_by_driver: bool = False  # the driver chose Pulse and Glide on or off this drive: leave it alone
   a_ego: float = 0.0            # m/s^2: a speed-up episode only starts while the car is actually speeding up
   blinker: bool = False         # a turn signal is on: a turn or lane change is coming, no experiment
+  stop_distance_m: float | None = None  # metres to a stop ahead (Force Stop's line, or behind a stopped car)
 
 
 @dataclass(frozen=True)
@@ -201,6 +209,7 @@ class Experimenter:
   engaged_s: float = 0.0
   spent_s: float = 0.0           # estimated extra trip time from experiments this drive
   offset_mps: float = 0.0        # applied speed offset (negative: under the set speed), ramped
+  stop_decel: float = STOP_REGEN_DECEL  # the steady slowdown a 'regen' stop holds (the gentlest that still makes it)
   episodes: int = 0
   last_t: float | None = None
   was_standstill: bool = False
@@ -215,12 +224,31 @@ class Experimenter:
   # ---------- situations ----------
   def situation(self, f: Frame) -> tuple[str, str] | None:
     """(category, context) the car is in now, or None (no experiment applies)."""
-    if not f.long_active or f.gas or f.brake or f.stop_ahead or f.blinker:
+    if not f.long_active or f.gas or f.brake or f.blinker:
       return None
     ep = self.episode
+    if ep is not None and ep.category == 'stop':
+      return (ep.category, ep.context) if f.stop_distance_m is not None and not f.standstill else None
+    if (stop := self._stop_entry(f)) is not None:
+      return stop
+    if f.stop_ahead:
+      return None
     if ep is not None and self._continues(ep, f):
       return ep.category, ep.context
     return self._enter(f)
+
+  @staticmethod
+  def _stop_decel_needed(f: Frame) -> float | None:
+    d = f.stop_distance_m
+    if d is None or not math.isfinite(d) or d <= 0.5 or not math.isfinite(f.v_ego):
+      return None
+    return f.v_ego * f.v_ego / (2.0 * d)
+
+  def _stop_entry(self, f: Frame) -> tuple[str, str] | None:
+    need = self._stop_decel_needed(f)
+    if need is None or f.v_ego < STOP_MIN_MPS or not STOP_ENTER_DECEL <= need <= STOP_MAX_DECEL:
+      return None
+    return 'stop', band(f.v_ego)
 
   def _own_target(self, f: Frame) -> float:
     """The speed the car is actually being asked for: the set speed less what an experiment is still taking off it
@@ -325,6 +353,8 @@ class Experimenter:
         variant = self.draw(*where)
         self.episodes += 1
         self.episode = ep = Episode(where[0], where[1], variant, f.t, self.distance_m, self.episodes)
+        if ep.category == 'stop':
+          self.stop_decel = max(STOP_REGEN_DECEL, self._stop_decel_needed(f) or STOP_REGEN_DECEL)
         key = ep.tag()
         self.tried[key] = self.tried.get(key, 0) + 1
         if ep.category in ('launch', 'accelerate') and variant in ACCEL_VARIANTS:
@@ -368,6 +398,12 @@ class Experimenter:
     if ep is not None and ep.category == 'hold' and ep.variant == 'flat' and f.v_set > 1.0:
       self.spent_s += dt * (f.v_set / max(f.v_set - HOLD_BAND_MPH * MPH / 2.0, 1.0) - 1.0)  # about half the band under
     ceiling = f.v_set + self.offset_mps if self.offset_mps < 0 else None
+    if ep is not None and ep.category == 'stop' and ep.variant == 'regen' and f.stop_distance_m is not None:
+      # one steady slowdown to the stop: the speed from which stop_decel stops the car in the distance left
+      stop_ceiling = math.sqrt(2.0 * self.stop_decel * max(f.stop_distance_m, 0.0))
+      ceiling = stop_ceiling if ceiling is None else min(ceiling, stop_ceiling)
+      if stop_ceiling < f.v_ego:
+        self.spent_s += dt * min(1.0, f.v_ego / max(stop_ceiling, 1.0) - 1.0)   # slowing earlier than the planner would
     bonus = self.offset_mps if self.offset_mps > 0 else 0.0
     return Plan(ceiling, bonus, accel_max, pulse_glide, ep.tag() if ep is not None else None)
 

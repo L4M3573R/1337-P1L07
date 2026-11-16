@@ -249,3 +249,44 @@ def test_hold_flat_runs_at_highway_speed_where_pulse_and_glide_is_off():
       assert p.accel_max == 0.0
       return
   raise AssertionError('65 mph cruising never rotated to holding flat')
+
+
+def _stopping(variant, v=15.0, distance=150.0, **kw):
+  exp = Experimenter()
+  exp.draw = lambda category, context: variant if category == 'stop' else ex.CATEGORIES[category][0]
+  p = exp.sample(cruise(0.0, v=v, v_set=v, grade=0.0, stop_distance_m=distance, **kw))
+  return exp, p
+
+
+def test_regen_stop_slows_at_one_steady_regen_rate_once_it_is_needed():
+  exp, p = _stopping('regen', v=15.0, distance=150.0)   # needs 0.75 m/s2: inside the regen rate, not braking yet
+  assert p.tag == 'stop|30-45|regen' and exp.stop_decel == ex.STOP_REGEN_DECEL
+  assert p.speed_ceiling_mps == pytest.approx(math.sqrt(2 * 1.0 * 150.0)) and p.speed_ceiling_mps > 15.0
+  p = exp.sample(cruise(0.05, v=15.0, v_set=15.0, grade=0.0, stop_distance_m=80.0))
+  assert p.speed_ceiling_mps == pytest.approx(math.sqrt(2 * 1.0 * 80.0)) and p.speed_ceiling_mps < 15.0   # now slowing at 1 m/s2
+  assert exp.spent_s > 0
+
+
+def test_a_late_stop_holds_the_gentlest_rate_that_still_makes_it_and_a_hard_one_is_no_experiment():
+  exp, p = _stopping('regen', v=13.9, distance=87.0)   # 2026-11-15 stop sign: first seen needing 1.11 m/s2
+  assert exp.stop_decel == pytest.approx(13.9 ** 2 / (2 * 87.0)) and p.speed_ceiling_mps == pytest.approx(13.9, abs=0.01)
+  _, hard = _stopping('regen', v=20.0, distance=100.0)   # needs 2 m/s2: brakes as it must
+  assert hard.tag is None or not hard.tag.startswith('stop|')
+  _, far = _stopping('regen', v=15.0, distance=400.0)    # needs 0.28: not yet a stop episode
+  assert far.tag is None or not far.tag.startswith('stop|')
+
+
+def test_normal_stop_leaves_the_planner_alone_and_the_episode_ends_with_the_stop():
+  exp, p = _stopping('normal')
+  assert p.tag == 'stop|30-45|normal' and p.speed_ceiling_mps is None
+  assert exp.sample(cruise(0.05, v=0.0, v_set=15.0, standstill=True, stop_distance_m=1.0)).tag != 'stop|30-45|normal'
+  exp, _ = _stopping('regen')
+  assert exp.sample(cruise(0.05, v=15.0, v_set=15.0, stop_distance_m=None, grade=0.0)).tag != 'stop|30-45|regen'   # stop gone
+  exp, _ = _stopping('regen')
+  assert exp.sample(cruise(0.05, v=15.0, v_set=15.0, stop_distance_m=140.0, gas=True)).tag is None   # a pedal ends it
+  assert ('stop', 'regen') in ex.COSTS_TIME and 'regen' in ex.SLOWER_VARIANTS
+
+
+def test_a_stop_without_a_distance_still_blocks_the_other_experiments():
+  exp = Experimenter()
+  assert exp.sample(cruise(0.0, grade=0.0, stop_ahead=True)).tag is None

@@ -543,8 +543,11 @@ def starpilot_main():
               return force_stop_owner.sample(sm, CP, now_ns=clock_pair[0], now_boot_ns=clock_pair[1],
                                               drive_id=current_start_ns, follow_seconds=follow_seconds,
                                               traffic_mode=traffic_mode, takeoff_enabled=faster_lead_takeoff)
+        stop_plan = longitudinal_planner.force_stop_plan
         efficiency_plan = (efficiency_host.sample(sm, wheel_coast, drive=current_start_ns,
-                                                  force_stop_forcing=bool(longitudinal_planner.force_stop_plan.forcing))
+                                                  force_stop_forcing=bool(stop_plan.forcing),
+                                                  stop_distance_m=(stop_plan.tracked_distance_m if stop_plan.forcing else
+                                                                   stop_plan.approach_distance_m if stop_plan.approach_distance_m > 0 else None))
                            if efficiency_host is not None and ('REPLAY' not in os.environ or
                                                                os.environ.get('EFFICIENCY_EXPERIMENT_REPLAY') == '1') else None)
         turn_ceiling_mps = turn_speed_host.sample(sm) if turn_speed_host is not None else None

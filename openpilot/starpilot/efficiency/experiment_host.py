@@ -12,7 +12,7 @@ import math
 import time
 from pathlib import Path
 
-from openpilot.starpilot.efficiency.experiment import (STATUS_PATH, Experimenter, Frame, Plan, load_vetoes, load_winners,
+from openpilot.starpilot.efficiency.experiment import (STATUS_PATH, STOP_GAP_M, Experimenter, Frame, Plan, load_vetoes, load_winners,
                                                        save_vetoes, write_status)
 
 KPH_TO_MS = 1 / 3.6
@@ -32,6 +32,14 @@ def mode(root: Path) -> str:
   except (OSError, ValueError, TypeError, AttributeError):
     return 'on'
   return value if value in ('on', 'off') else 'on'
+
+
+def stop_distance(force_stop_m: float | None, lead) -> float | None:
+  """Metres to the nearer stop: Force Stop's line, or STOP_GAP_M behind a stopped car ahead; None when neither."""
+  options = [force_stop_m] if isinstance(force_stop_m, (int, float)) and math.isfinite(force_stop_m) and force_stop_m > 0 else []
+  if lead.present and lead.vLead < 1.0 and math.isfinite(lead.dRel):
+    options.append(max(0.0, float(lead.dRel) - STOP_GAP_M))
+  return min(options) if options else None
 
 
 class ExperimentHost:
@@ -74,7 +82,7 @@ class ExperimentHost:
     except Exception:
       self.soc = None
 
-  def sample(self, sm, wheel_coast, *, drive, force_stop_forcing: bool) -> Plan | None:
+  def sample(self, sm, wheel_coast, *, drive, force_stop_forcing: bool, stop_distance_m: float | None = None) -> Plan | None:
     """The plan for this cycle, or None when experiments are off or cannot run."""
     try:
       if drive != self.drive:
@@ -96,7 +104,8 @@ class ExperimentHost:
                         (lead.present and lead.vLead < 1.0 and lead.dRel < 60.0))
       frame = Frame(now, v_ego, float(cs.vCruise) * KPH_TO_MS, bool(cc.longActive and cc.enabled), bool(cs.gasPressed),
                     bool(cs.brakePressed), bool(cs.standstill), grade, gap, stop_ahead, self.soc, self.driver_pulse_glide,
-                    float(cs.aEgo), bool(cs.leftBlinker or cs.rightBlinker))
+                    float(cs.aEgo), bool(cs.leftBlinker or cs.rightBlinker),
+                    stop_distance_m=stop_distance(stop_distance_m, lead))
       plan = self.exp.sample(frame)
       if self.exp.vetoes != self.saved_vetoes:   # the driver pressed on during a slower variant: remember it
         # merge with the file (it may have gained entries since the drive began), keeping the higher count

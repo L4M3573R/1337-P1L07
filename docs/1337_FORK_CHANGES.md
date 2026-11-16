@@ -165,11 +165,14 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   `edge_map` / `efficiency` recording start and stop summaries, `steer_learner` status/reason. edgemapd and efficiencyd
   now keep recording through a bad frame or failed save. Tests in `starpilot/tests/test_trace_coverage.py`.
 - **Self-learning fuel experiments** (2026-11-14): `starpilot/efficiency/experiment.py` (the experimenter: situations
-  launch / accelerate / follow / uphill / downhill / ev / pulse_glide / cruise / hold, each with variants; untried
+  launch / accelerate / follow / uphill / downhill / ev / pulse_glide / cruise / hold / stop, each with variants; untried
   variants first, then the learned winner 4 in 5 and another 1 in 5; 15 s minimum episodes with entry/exit hysteresis; a
   4 min/engaged-hour time budget (`TIME_BUDGET_S_PER_H` 240 s, 2 min per half hour) for variants that cost time; downhill carry at most `DOWNHILL_CARRY_MPH` 3 mph,
   variant `carry3`; `hold`/`flat` holds the throttle (accel cap 0) in every cruising band, 60+ mph included, until
-  `HOLD_BAND_MPH` 2 mph under the set speed, 2026-11-15), `experiment_host.py`
+  `HOLD_BAND_MPH` 2 mph under the set speed; `stop`/`regen` lowers the cruise ceiling to sqrt(2 a d) for one steady
+  slowdown at `STOP_REGEN_DECEL` 1 m/s2 (or the gentlest rate that still makes a late stop, up to `STOP_MAX_DECEL`)
+  from Force Stop's line or `STOP_GAP_M` behind a stopped car (plannerd passes `stop_distance_m`), so braking stays
+  inside regen and the battery counts as fuel, 2026-11-15), `experiment_host.py`
   (plannerd: frame from sm, Pulse and Glide on/off through the coast owner with hand-back and the driver's choice
   respected, status in /dev/shm for the ledger, `efficiency_experiment` decision log; config
   `<efficiency>/experiment.json` mode on/off), `longitudinal_planner.update(efficiency_plan=...)` (lower cruise target,

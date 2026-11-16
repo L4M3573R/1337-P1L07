@@ -94,3 +94,15 @@ def test_a_new_veto_is_merged_with_the_file_not_written_over_it(tmp_path):
   h.sample(sm(), NS(owner=Owner()), drive=1, force_stop_forcing=False)
   saved = json.loads((tmp_path / 'vetoes.json').read_text())['vetoes']
   assert saved == {'accelerate|30-45|gentle': 1, 'follow|30-45|smooth': 1}
+
+
+def test_stop_distance_is_the_nearer_of_force_stop_and_a_stopped_car():
+  from types import SimpleNamespace as N
+  from openpilot.starpilot.efficiency.experiment_host import stop_distance
+  stopped = N(present=True, vLead=0.2, dRel=40.0)
+  moving = N(present=True, vLead=12.0, dRel=40.0)
+  none = N(present=False, vLead=0.0, dRel=0.0)
+  assert stop_distance(None, stopped) == 40.0 - ex.STOP_GAP_M
+  assert stop_distance(25.0, stopped) == 25.0 and stop_distance(80.0, stopped) == 40.0 - ex.STOP_GAP_M
+  assert stop_distance(None, moving) is None and stop_distance(None, none) is None and stop_distance(60.0, moving) == 60.0
+  assert stop_distance(0.0, none) is None and stop_distance(float('nan'), none) is None
