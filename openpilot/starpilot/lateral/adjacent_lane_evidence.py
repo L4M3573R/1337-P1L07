@@ -55,3 +55,33 @@ def adjacent_lane_available(model, direction: int, minimum_width_m: float) -> bo
     return width >= minimum_width_m
   except (AttributeError, IndexError, TypeError, ValueError, OverflowError):
     return False
+
+
+# Clearly no lane (2026-11-16): an on-ramp curve with the blinker on for the merge, the driver's hands steering right, and a
+# lane change started into a 1.7 m strip between the lane line and a confidently seen road edge (far line at 0%). Unlike
+# adjacent_lane_available (which must be sure there IS a lane before an automatic change), this must be sure there is NOT
+# one, so a faded or uncertain scene never blocks a lane change the driver asks for.
+NO_LANE_OUTER_PROB = 0.15
+NO_LANE_EDGE_STD_M = 1.0
+NO_LANE_EDGE_M = 2.5      # a lane is 3-3.7 m: an edge this close to the lane line leaves at most a shoulder
+NO_LANE_RANGE_M = 30.0
+
+
+def lane_clearly_absent(model, direction: int) -> bool:
+  """The model sees the road edge on that side closer to the lane line than a lane is wide, with no line beyond."""
+  try:
+    if direction not in (-1, 1):
+      return False
+    inner, outer, edge = ((1, 0, 0) if direction == -1 else (2, 3, 1))
+    probs, edge_stds = list(model.laneLineProbs), list(model.roadEdgeStds)
+    if len(probs) != 4 or len(edge_stds) != 2 or not all(math.isfinite(v) for v in probs + edge_stds):
+      return False
+    if probs[outer] >= NO_LANE_OUTER_PROB or edge_stds[edge] >= NO_LANE_EDGE_STD_M:
+      return False
+    inner_points, edge_points = _points(model.laneLines[inner]), _points(model.roadEdges[edge])
+    if inner_points is None or edge_points is None:
+      return False
+    gaps = [abs(_at(edge_points, x) - y) for x, y in zip(*inner_points, strict=True) if x <= NO_LANE_RANGE_M]
+    return bool(gaps) and all(math.isfinite(g) for g in gaps) and median(gaps) < NO_LANE_EDGE_M
+  except (AttributeError, IndexError, TypeError, ValueError, OverflowError):
+    return False

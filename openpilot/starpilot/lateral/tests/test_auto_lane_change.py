@@ -331,3 +331,25 @@ def replace_status_phase(status, phase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+def ramp_model(edge_y, outer_prob=0.0, edge_std=0.52):
+  # 2026-11-15 on-ramp: right line at 1.8 m, no line beyond it, the road edge confidently seen just past it
+  return SimpleNamespace(laneLines=[line(-5.5), line(-1.8), line(1.8), line(5.5)],
+                         laneLineProbs=[0.5, 0.6, 0.23, outer_prob], laneLineStds=[0.1] * 4,
+                         roadEdges=[line(-6.2), line(edge_y)], roadEdgeStds=[2.0, edge_std])
+
+
+class LaneClearlyAbsentTests(unittest.TestCase):
+  def test_the_on_ramp_strip_is_not_a_lane(self):
+    from openpilot.starpilot.lateral.adjacent_lane_evidence import lane_clearly_absent
+    self.assertTrue(lane_clearly_absent(ramp_model(1.8 + 1.7), 1))     # edge 1.7 m past the line, as logged
+    self.assertFalse(lane_clearly_absent(ramp_model(1.8 + 1.7), -1))   # the left side is another matter
+
+  def test_anything_that_could_be_a_lane_is_left_to_the_driver(self):
+    from openpilot.starpilot.lateral.adjacent_lane_evidence import lane_clearly_absent
+    self.assertFalse(lane_clearly_absent(ramp_model(1.8 + 3.4), 1))                 # a lane's width of road
+    self.assertFalse(lane_clearly_absent(ramp_model(1.8 + 1.7, outer_prob=0.6), 1))  # a line beyond: a lane
+    self.assertFalse(lane_clearly_absent(ramp_model(1.8 + 1.7, edge_std=1.4), 1))    # an unsure edge
+    self.assertFalse(lane_clearly_absent(model(), 1) or lane_clearly_absent(model(), -1))
+    self.assertFalse(lane_clearly_absent(SimpleNamespace(), 1))

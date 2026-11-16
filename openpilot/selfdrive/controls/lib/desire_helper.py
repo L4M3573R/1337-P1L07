@@ -28,7 +28,8 @@ class DesireHelper:
   def get_lane_change_direction(CS):
     return LaneChangeDirection.left if CS.leftBlinker else LaneChangeDirection.right
 
-  def update(self, carstate, lateral_active, lane_change_prob, *, auto_evidence=False, engaged=False, navigation_turn=False):
+  def update(self, carstate, lateral_active, lane_change_prob, *, auto_evidence=False, engaged=False, navigation_turn=False,
+             no_lane=False):
     v_ego = carstate.vEgo
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     if not carstate.leftBlinker and not carstate.rightBlinker:
@@ -79,7 +80,9 @@ class DesireHelper:
           self.pre_lane_change_timer += DT_MDL
         auto_ready = (self.policy.auto_lane_change and engaged and auto_evidence and not self.auto_signal_blocked and
                       self.pre_lane_change_timer >= self.policy.auto_delay_s)
-        if blindspot_detected:
+        if no_lane:
+          self.auto_status = "laneUnavailable"
+        elif blindspot_detected:
           self.auto_status = "blindspotBlocked"
         elif self.policy.auto_lane_change and engaged:
           self.auto_status = "waitingForDelay" if auto_evidence and not self.auto_signal_blocked else "laneUnavailable"
@@ -89,7 +92,10 @@ class DesireHelper:
           self.lane_change_direction = LaneChangeDirection.none
           self.lane_change_timer = 0.0
           self.pre_lane_change_timer = 0.0
-        elif (torque_applied or auto_ready) and not blindspot_detected and not (self.policy.one_per_signal and self.lane_change_performed):
+        # no_lane: the model clearly sees no lane on that side (adjacent_lane_evidence.lane_clearly_absent), so steering
+        # that way is a merge, an exit or a curve, not a lane change
+        elif ((torque_applied or auto_ready) and not blindspot_detected and not no_lane and
+              not (self.policy.one_per_signal and self.lane_change_performed)):
           self.lane_change_state = LaneChangeState.laneChangeStarting
           self.lane_change_timer = 0.0
           self.pre_lane_change_timer = 0.0

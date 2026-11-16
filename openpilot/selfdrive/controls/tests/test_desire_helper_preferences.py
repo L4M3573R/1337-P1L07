@@ -149,3 +149,18 @@ class DesireHelperPreferencesTests(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class NoLaneTests(unittest.TestCase):
+  def test_steering_toward_a_side_with_no_lane_starts_no_lane_change(self):
+    # 2026-11-15: blinker on for a merge, hands steering through a right-hand ramp curve, no lane on the right
+    helper = DesireHelper()
+    helper.update(car(rightBlinker=True), True, 1.0, no_lane=True)
+    self.assertEqual(helper.lane_change_state, log.LaneChangeState.preLaneChange)
+    for _ in range(20):
+      helper.update(car(rightBlinker=True, steeringPressed=True, steeringTorque=-200), True, 1.0, no_lane=True)
+    self.assertEqual(helper.lane_change_state, log.LaneChangeState.preLaneChange)
+    self.assertEqual(helper.desire, log.Desire.none)
+    # once a lane is there, the same nudge changes lanes as always
+    helper.update(car(rightBlinker=True, steeringPressed=True, steeringTorque=-200), True, 1.0, no_lane=False)
+    self.assertEqual(helper.lane_change_state, log.LaneChangeState.laneChangeStarting)
