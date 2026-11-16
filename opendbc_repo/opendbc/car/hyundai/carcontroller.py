@@ -53,6 +53,19 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 MAX_ANGLE = 85
 MAX_ANGLE_FRAMES = 89
 MAX_ANGLE_CONSECUTIVE_FRAMES = 2
+# Parking-lot EPS test (2026-11-16): /data/starpilot/eps_test.json {"max_angle": degrees} moves that cut-out angle for
+# the drive (read once when the car starts) to find where this car's EPS really faults. No file: the stock 85.
+EPS_TEST_PATH = '/data/starpilot/eps_test.json'
+
+
+def eps_test_max_angle(path: str = EPS_TEST_PATH) -> float:
+  try:
+    import json
+    with open(path) as f:
+      value = json.load(f).get('max_angle')
+    return float(value) if isinstance(value, (int, float)) and MAX_ANGLE <= value <= 720 else MAX_ANGLE
+  except (OSError, ValueError, AttributeError):
+    return MAX_ANGLE
 
 # On some HKG CAN and CAN FD non-CANFD_ALT_BUTTONS, the cancel button (CF_Clu_CruiseSwState / CRUISE_BUTTONS = 4) is
 # a pause/resume toggle, not a dedicated cancel. Firing it mid-brake inadvertently can cause a re-enable attempt
@@ -115,6 +128,7 @@ class CarController(CarControllerBase):
     self.CAN = CanBus(CP)
     self.params = CarControllerParams(CP)
     self.packer = CANPacker(dbc_names[Bus.pt])
+    self.max_angle = eps_test_max_angle()
     self.angle_limit_counter = 0
     self.angle_vm = VehicleModel(CP) if CP.flags & HyundaiFlags.CANFD_ANGLE_STEERING else None
     self.apply_angle_last = 0.0
@@ -215,7 +229,7 @@ class CarController(CarControllerBase):
                     apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, self.params))
 
     # >90 degree steering fault prevention
-    self.angle_limit_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringAngleDeg) >= MAX_ANGLE, CC.latActive,
+    self.angle_limit_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringAngleDeg) >= self.max_angle, CC.latActive,
                                                                        self.angle_limit_counter, MAX_ANGLE_FRAMES,
                                                                        MAX_ANGLE_CONSECUTIVE_FRAMES)
 
