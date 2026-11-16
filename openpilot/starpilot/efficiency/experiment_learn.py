@@ -50,6 +50,7 @@ MIN_FIT_STRETCHES = 300
 SEASON_BANDS = ((10.0, 'cold'), (22.0, 'mild'), (math.inf, 'warm'))   # outside temperature, C: upper bound, name
 STRATUM_MIN_MILES = 0.5   # a curve class counts only when every variant drove at least this much of it
 STRATUM_MIN_EPISODES = 2
+JUDGE_FROM = '20261115'  # road tests count from this drive date: the first with every current variant and rule
 MIN_GAL_PER_MINUTE = 0.02  # a minute must save at least this much fuel (~6-7 cents at $3.20/gal, ~$4 per hour of time)
 
 
@@ -344,11 +345,16 @@ def situation_miles(drives: list[list[dict]], season: str | None = None) -> dict
   return {k: m / hours for k, m in miles.items()} if hours > 0 else {}
 
 
-def load_drives(root: Path) -> list[list[dict]]:
+def load_drives(root: Path, since: str | None = None) -> list[list[dict]]:
+  """Stored drives, oldest first; with since (YYYYMMDD), only drives from that date on (undated ones are kept)."""
   drives = []
   for path in sorted((root / 'drives').glob('*.json'), key=lambda p: p.stat().st_mtime):
     try:
-      drives.append(list(json.loads(path.read_text()).get('stretches', [])))
+      doc = json.loads(path.read_text())
+      day = str(doc.get('drive', ''))[:8]
+      if since is not None and day.isdigit() and len(day) == 8 and day < since:
+        continue
+      drives.append(list(doc.get('stretches', [])))
     except (OSError, ValueError, TypeError, AttributeError):
       continue
   return drives
@@ -356,8 +362,8 @@ def load_drives(root: Path) -> list[list[dict]]:
 
 def update(root: Path) -> dict:
   """Judge every stored drive and write <root>/experiments.json (the winners the experimenter reads)."""
-  drives = load_drives(root)
-  corrections = fit_corrections(drives)
+  corrections = fit_corrections(load_drives(root))   # the road and speed costs: every drive is physics
+  drives = load_drives(root, since=JUDGE_FROM)        # the road tests: only drives under the current variants
   season = current_season(drives)
   results = judge(samples(drives, corrections, season), situation_miles_per_hour=situation_miles(drives, season))
   budget = results.pop('_budget', None)

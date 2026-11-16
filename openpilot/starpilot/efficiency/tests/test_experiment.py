@@ -1,4 +1,5 @@
 """Self-learning fuel efficiency: the experimenter's situations, variants, limits and time budget."""
+import json
 import math
 import random
 
@@ -180,6 +181,11 @@ def test_vetoes_file(tmp_path):
   assert ex.load_vetoes(path) == {}
   ex.save_vetoes(path, {'accelerate|30-45|gentle': 2})
   assert ex.load_vetoes(path) == {'accelerate|30-45|gentle': 2}
+  # vetoes from before the variants were redefined (no epoch, or an older one) are dropped once
+  path.write_text(json.dumps({'version': 1, 'vetoes': {'accelerate|30-45|gentle': 2}}))
+  assert ex.load_vetoes(path) == {}
+  path.write_text(json.dumps({'version': 1, 'epoch': ex.VETO_EPOCH - 1, 'vetoes': {'launch|launch|gentle': 3}}))
+  assert ex.load_vetoes(path) == {}
 
 
 

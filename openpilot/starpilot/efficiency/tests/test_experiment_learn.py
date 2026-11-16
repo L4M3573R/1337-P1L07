@@ -173,3 +173,20 @@ def test_a_step_below_the_minute_floor_is_skipped_even_with_budget_left():
   assert el.MIN_GAL_PER_MINUTE == 0.02
   assert entry['winner'] == 'set' and 'not worth the time' in entry['status']
   assert r['_budget']['left_min_per_hr'] == 40.0
+
+
+
+def test_road_tests_count_from_the_judge_date_but_corrections_use_every_drive(tmp_path, monkeypatch):
+  rng = random.Random(16)
+  (tmp_path / 'drives').mkdir()
+  old = tagged('uphill|30-45|hold', runs(rng, 20, 0.030)) + tagged('uphill|30-45|sag3', runs(rng, 20, 0.020))
+  new = tagged('uphill|30-45|hold', runs(rng, 20, 0.030)) + tagged('uphill|30-45|sag3', runs(rng, 20, 0.031))
+  (tmp_path / 'drives' / 'old.json').write_text(json.dumps({'drive': '20261114-120000-1', 'stretches': old}))
+  (tmp_path / 'drives' / 'new.json').write_text(json.dumps({'drive': '20261115-120000-2', 'stretches': new}))
+  fitted = []
+  monkeypatch.setattr(el, 'fit_corrections', lambda drives: fitted.append(len(drives)) or {'climb': 0.0, 'speed': 0.0})
+  doc = el.update(tmp_path)
+  assert fitted == [2]                                    # corrections: both drives
+  assert doc['results']['uphill|30-45']['measured']['sag3'] == round(20 * 400 / 1609.344, 2)   # judging: Nov 15 only
+  assert doc['winners'].get('uphill|30-45') != 'sag3'     # the old, redefined runs do not make it win
+  assert len(el.load_drives(tmp_path, since='20261115')) == 1 and len(el.load_drives(tmp_path)) == 2

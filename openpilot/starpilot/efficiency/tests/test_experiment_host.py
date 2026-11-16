@@ -89,7 +89,7 @@ def test_a_new_veto_is_merged_with_the_file_not_written_over_it(tmp_path):
   h = host(tmp_path)
   h._new_drive(1)
   # something else recorded a veto after the drive began
-  (tmp_path / 'vetoes.json').write_text(json.dumps({'vetoes': {'accelerate|30-45|gentle': 1}}))
+  (tmp_path / 'vetoes.json').write_text(json.dumps({'epoch': ex.VETO_EPOCH, 'vetoes': {'accelerate|30-45|gentle': 1}}))
   h.exp.vetoes['follow|30-45|smooth'] = 1
   h.sample(sm(), NS(owner=Owner()), drive=1, force_stop_forcing=False)
   saved = json.loads((tmp_path / 'vetoes.json').read_text())['vetoes']

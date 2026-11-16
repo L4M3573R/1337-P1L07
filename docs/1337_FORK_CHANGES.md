@@ -63,6 +63,14 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   The glide never drops more than 5 mph under the set speed (2026-11-15): the L4 band is 3 or 5 mph (5 or 8 km/h,
   `PG_DELTAS_*`, `set_pg_delta` rejects more) and `coast.py` clamps any stored band to `MAX_BAND_MPS`.
 - **CEM stops** (`dac4e3ce32`, `1102863c55`): `starpilot/conditional_mode/stop_release.py`, `stop.py`.
+- **Stop-line finder, shadow only** (2026-11-15): `starpilot/stop_line/`. A small model of our own (MobileNetV3-small,
+  one narrow-road frame in; stop-ahead probability, distance up to 120 m and its uncertainty out) that says where to
+  stop at a light or sign even when the line is worn away, next to the driving model. `stop_lined` (onroad,
+  ancillary, little cores, nice 15) runs `<storage>/stop_line/stop_line.onnx` through cv2.dnn about 4 Hz (never over
+  40% of a core) if that file is there, fuses frames into one stop point along the odometer (`fusion.py`) and picks
+  ours when sure, else chestnut's planned stop (where modelV2's planned speed reaches zero, `labels.model_stop_distance`).
+  Nothing reads it yet: it logs `starpilot_feature` / `stop_line` choices and a `what=rest` event per stop scoring ours
+  and chestnut at 60/30/15 m against where the car stopped. Trained on the PC (see "Outside the repo").
 
 ### Lateral
 - **Personal NNLC with automatic trial** (`6c339a40be`, `c5e36c122d`): `starpilot/lateral/nnlc/`,
@@ -172,7 +180,9 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   summer never weighed against winter); fuel and time are compared per curve class (straight/gentle/curvy, from yaw)
   with equal weights; time-free savings are always taken, then `_spend_budget` spends the 4 min/hr on the steps with the
   most fuel per extra minute across situations, weighted by miles per engaged hour (`situation_miles`), so a dearer step
-  that adds little is left out, and no step under `MIN_GAL_PER_MINUTE` (0.02 gal per extra minute, ~$4/hr) is taken; writes `<efficiency>/experiments.json` (winners, season, budget) at the end of each drive). Tests in
+  that adds little is left out, and no step under `MIN_GAL_PER_MINUTE` (0.02 gal per extra minute, ~$4/hr) is taken;
+  road tests count drives from `JUDGE_FROM` 2026-11-15 on (the corrections still fit every drive), and vetoes saved
+  before `VETO_EPOCH` 2 are ignored once (the accelerate/launch variants were redefined on 2026-11-14); writes `<efficiency>/experiments.json` (winners, season, budget) at the end of each drive). Tests in
   `starpilot/efficiency/tests/test_experiment*.py`.
 - **Turn speed for signalled turns** (2026-11-14): `starpilot/navigation/turn_speed.py`. modeld's blinker-turn logic
   (`intent._timed_turn`) publishes side / turning / distance to the side road / its map angle to
@@ -251,3 +261,22 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   `/data/starpilot/bluedriver/config.json`, `/data/starpilot/curve_guard.json`, `/data/starpilot/blinker_turns.json`,
   the BlueDriver bond under `/data/bluetooth`, `BluetoothEnabled` param.
 - **DR4L SSH key** in the comma's `GithubSshKeys` param: re-fetching keys from GitHub on the comma removes it.
+- **Stop-line finder training** (PC, 2026-11-15): drives come from DR4L `/mnt/user/comma` (comma-puller), data in
+  `/mnt/Projects/stopline-data`, torch venv in `/mnt/Projects/stopline-train/.venv` (cu128, RTX 5070 Ti). Steps, all
+  from the repo root with the repo venv and `PYTHONPATH=.:openpilot:opendbc_repo:msgq_repo` except training:
+  1. `python -m openpilot.starpilot.stop_line.extract /mnt/Projects/stopline-data` (rlogs → per-drive tables: full
+     stops as first in line, queue stops and parking left out; rolling stops (slowed under 3 m/s without stopping);
+     camera calibration per frame; new drives only).
+  2. Tag new front stops light / sign / other in `stopline-data/review.json` (by looking at them; lot exits and
+     driveways are `other`).
+  3. `stopline-train/.venv/bin/python openpilot/starpilot/stop_line/lines.py /mnt/Projects/stopline-data` finds the
+     painted line at each full and rolling stop (top-down view from the camera calibration, a band across the lane
+     seen from many frames 4-16 m out). Check each in `lines_review.json` (`line_ok`; rolling stops tagged sign / light /
+     other; rolling stops at lights are `light` and not used: the light turned green). A checked line places the stop
+     3.15 m (camera) before it, the median of where drivers rest; otherwise the rest point is used (worn line).
+  4. `python -m openpilot.starpilot.stop_line.frames /mnt/Projects/stopline-data`.
+  5. `stopline-train/.venv/bin/python openpilot/starpilot/stop_line/train.py /mnt/Projects/stopline-data <run>`
+     (cross-validation by place, ours vs chestnut; `--workers` low while the PC is used for games), then the same
+     with `--final` to write `stop_line.onnx`.
+  6. Copy it to the comma's `/data/starpilot/stop_line/stop_line.onnx`; `stop_lined` reloads it within 10 s.
+  The video-frame index in each segment is `narrowRoadEncodeIdx.segmentId` (this fork leaves `segmentIdEncode` 0).

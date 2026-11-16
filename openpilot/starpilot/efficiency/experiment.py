@@ -154,10 +154,15 @@ def read_tag(now: float, path: Path = STATUS_PATH) -> str | None:
   return None
 
 
+VETO_EPOCH = 2  # vetoes saved under an older epoch are ignored once: 2 (2026-11-15) after the variants were redefined
+
+
 def load_vetoes(path: Path | None) -> dict[str, int]:
-  """{'category|context|variant': times the driver pressed on during it} across drives."""
+  """{'category|context|variant': times the driver pressed on during it} across drives (this VETO_EPOCH only)."""
   try:
     doc = json.loads(path.read_text()) if path is not None else {}
+    if doc.get('epoch') != VETO_EPOCH:
+      return {}
     return {k: int(v) for k, v in doc.get('vetoes', {}).items() if isinstance(k, str) and k.count('|') == 2}
   except (OSError, ValueError, TypeError, AttributeError):
     return {}
@@ -167,7 +172,7 @@ def save_vetoes(path: Path, vetoes: dict[str, int]) -> None:
   try:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps({'version': 1, 'vetoes': vetoes}, indent=1))
+    tmp.write_text(json.dumps({'version': 1, 'epoch': VETO_EPOCH, 'vetoes': vetoes}, indent=1))
     tmp.replace(path)
   except OSError:
     pass
