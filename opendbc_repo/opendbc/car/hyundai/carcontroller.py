@@ -58,14 +58,35 @@ MAX_ANGLE_CONSECUTIVE_FRAMES = 2
 EPS_TEST_PATH = '/data/starpilot/eps_test.json'
 
 
-def eps_test_max_angle(path: str = EPS_TEST_PATH) -> float:
+# The same file may raise the default-limit torque and ramp up to the firmware ceiling (safety/modes/hyundai.h:
+# HYUNDAI_STEERING_LIMITS, 409 / 5): {"steer_max": 384-409, "delta_up": 3-5}. Normal drives keep 384 / 3.
+EPS_TEST_CEILING = {'steer_max': (384, 409), 'delta_up': (3, 5)}
+
+
+def _eps_test_doc(path: str) -> dict:
   try:
     import json
     with open(path) as f:
-      value = json.load(f).get('max_angle')
-    return float(value) if isinstance(value, (int, float)) and MAX_ANGLE <= value <= 720 else MAX_ANGLE
-  except (OSError, ValueError, AttributeError):
-    return MAX_ANGLE
+      doc = json.load(f)
+    return doc if isinstance(doc, dict) else {}
+  except (OSError, ValueError):
+    return {}
+
+
+def eps_test_max_angle(path: str = EPS_TEST_PATH) -> float:
+  value = _eps_test_doc(path).get('max_angle')
+  return float(value) if isinstance(value, (int, float)) and MAX_ANGLE <= value <= 720 else MAX_ANGLE
+
+
+def eps_test_limits(params, path: str = EPS_TEST_PATH) -> None:
+  """Raise STEER_MAX / STEER_DELTA_UP from the test file, only for cars on the default limits (384 / 3)."""
+  if params.STEER_MAX != EPS_TEST_CEILING['steer_max'][0] or params.STEER_DELTA_UP != EPS_TEST_CEILING['delta_up'][0]:
+    return
+  doc = _eps_test_doc(path)
+  for key, attr in (('steer_max', 'STEER_MAX'), ('delta_up', 'STEER_DELTA_UP')):
+    value, (low, high) = doc.get(key), EPS_TEST_CEILING[key]
+    if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high:
+      setattr(params, attr, value)
 
 # On some HKG CAN and CAN FD non-CANFD_ALT_BUTTONS, the cancel button (CF_Clu_CruiseSwState / CRUISE_BUTTONS = 4) is
 # a pause/resume toggle, not a dedicated cancel. Firing it mid-brake inadvertently can cause a re-enable attempt
@@ -129,6 +150,7 @@ class CarController(CarControllerBase):
     self.params = CarControllerParams(CP)
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.max_angle = eps_test_max_angle()
+    eps_test_limits(self.params)
     self.angle_limit_counter = 0
     self.angle_vm = VehicleModel(CP) if CP.flags & HyundaiFlags.CANFD_ANGLE_STEERING else None
     self.apply_angle_last = 0.0

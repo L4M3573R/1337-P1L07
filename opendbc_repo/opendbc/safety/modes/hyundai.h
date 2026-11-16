@@ -6,11 +6,11 @@
 #include "opendbc/safety/modes/hyundai_classic_non_scc_aol.h"
 #include "opendbc/safety/modes/hyundai_blended_stock_aol.h"
 
-#define HYUNDAI_LIMITS(steer, rate_up, rate_down) { \
+#define HYUNDAI_LIMITS_RT(steer, rate_up, rate_down, rt_delta) { \
   .max_torque = (steer), \
   .max_rate_up = (rate_up), \
   .max_rate_down = (rate_down), \
-  .max_rt_delta = 112, \
+  .max_rt_delta = (rt_delta), \
   .driver_torque_allowance = 50, \
   .driver_torque_multiplier = 2, \
   .type = TorqueDriverLimited, \
@@ -21,6 +21,7 @@
   .min_valid_request_rt_interval = 810000,  /* 810ms; a ~10% buffer on cutting every 90 frames */ \
   .has_steer_req_tolerance = true, \
 }
+#define HYUNDAI_LIMITS(steer, rate_up, rate_down) HYUNDAI_LIMITS_RT(steer, rate_up, rate_down, 112)
 
 extern const LongitudinalLimits HYUNDAI_LONG_LIMITS;
 const LongitudinalLimits HYUNDAI_LONG_LIMITS = {
@@ -346,7 +347,9 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
   static bool hyundai_blended_mirror_request = false;
   static uint32_t hyundai_blended_mirror_ts = 0U;
   hyundai_blended_cancel_check();
-  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS = HYUNDAI_LIMITS(384, 3, 7);
+  // 1337 (2026-11-16): ceiling raised from 384 / 3 / rt 112 for the parking-lot EPS test and what it proves; openpilot still
+  // requests 384 / 3 unless /data/starpilot/eps_test.json raises it (opendbc/car/hyundai/carcontroller.py).
+  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS = HYUNDAI_LIMITS_RT(409, 5, 7, 140);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_BLENDED = HYUNDAI_LIMITS(404, 2, 3);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT = HYUNDAI_LIMITS(270, 2, 3);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT_2 = HYUNDAI_LIMITS(170, 2, 3);
