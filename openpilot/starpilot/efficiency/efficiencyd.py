@@ -19,7 +19,7 @@ from pathlib import Path
 from openpilot.starpilot.diagnostics.features import EVENT, ChangeLog, log_error
 from openpilot.starpilot.efficiency import store, tank as tank_store
 from openpilot.starpilot.efficiency.experiment import read_tag
-from openpilot.starpilot.efficiency.car_signals import MDPS11_ADDR, MODE_ADDR, CarSignals
+from openpilot.starpilot.efficiency.car_signals import CABIN_ADDR, CLIMATE_ADDR, MDPS11_ADDR, MODE_ADDR, CarSignals
 from openpilot.starpilot.efficiency.hybrid import Cluster, PowerFlow, scan
 from openpilot.starpilot.efficiency.ledger import Ledger, make_sample
 from openpilot.starpilot.obd.bluedriver import GRAMS_PER_GALLON
@@ -29,7 +29,7 @@ GPS_MAX_ACCURACY_M = 25.0
 CHECKPOINT_S = 60.0
 OBD_READ_S = 1.0
 ENGINE_ON_RPM = 50.0  # the BlueDriver's rpm at or above this is the engine running; 0 is electric
-SIGNAL_ADDRS = (MODE_ADDR, MDPS11_ADDR)
+SIGNAL_ADDRS = (MODE_ADDR, MDPS11_ADDR, CLIMATE_ADDR, CABIN_ADDR)  # short announcements and 1 Hz frames a single batch can miss
 METERS_PER_MILE = 1609.344
 ANNOUNCE_AFTER_S = 10.0   # the start event waits until the trace daemon (started alongside) is listening
 
@@ -99,7 +99,7 @@ class Recorder:
     return {'drive_mode': self.signals.drive_mode, 'tire_avg': self.signals.tire_avg, 'tire_min': self.signals.tire_min,
             'map_limit': self.signals.map_limit, 'road_code': self.signals.road_code, 'ambient_c': self.ambient_c,
             'fuel_level': self.fuel_level, 'lat': lat, 'lon': lon, 'bearing': bearing, 'experiment': self.experiment,
-            'obd_engine': self.obd_engine}
+            'obd_engine': self.obd_engine, 'climate_set_f': self.signals.climate_set_f, 'cabin_f': self.signals.cabin_f}
 
   def observe(self, t: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, device_motion=None,
               pulse_glide: str | None = None) -> None:

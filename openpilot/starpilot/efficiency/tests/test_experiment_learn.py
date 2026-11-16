@@ -190,3 +190,22 @@ def test_road_tests_count_from_the_judge_date_but_corrections_use_every_drive(tm
   assert doc['results']['uphill|30-45']['measured']['sag3'] == round(20 * 400 / 1609.344, 2)   # judging: Nov 15 only
   assert doc['winners'].get('uphill|30-45') != 'sag3'     # the old, redefined runs do not make it win
   assert len(el.load_drives(tmp_path, since='20261115')) == 1 and len(el.load_drives(tmp_path)) == 2
+
+
+def test_a_variant_driven_with_the_heat_off_is_not_flattered():
+  rng = random.Random(21)
+  # the heat costs the same for both; 'under2' just happened to run mostly with it off
+  def climate(band, rs):
+    return [r | {'climate': band} for r in rs]
+  set_runs = climate('off', runs(rng, 6, 0.025)) + climate('heat', runs(rng, 30, 0.035))
+  under_runs = climate('off', runs(rng, 30, 0.025)) + climate('heat', runs(rng, 6, 0.035))
+  data = el.samples([tagged('cruise|45-60|set', set_runs) + tagged('cruise|45-60|under2', under_runs) +
+                     tagged('cruise|45-60|under4', set_runs)])
+  assert el.gal_per_100mi(data[('cruise', '45-60', 'under2')]) < 0.9 * el.gal_per_100mi(data[('cruise', '45-60', 'set')])  # pooled
+  r = el.judge(data)['cruise|45-60']
+  assert r['winner'] in (None, 'set') and set(r['curves']) == {'straight/off', 'straight/heat'}
+
+
+def test_stretches_from_before_the_climate_band_keep_their_curve_class():
+  assert el._run_curve(el.Run(0.1, 400.0, 30.0, 'curvy')) == 'curvy'
+  assert el._run_curve(el.Run(0.1, 400.0, 30.0, 'curvy', 'cold', 'heat')) == 'curvy/heat'

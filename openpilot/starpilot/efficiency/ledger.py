@@ -7,6 +7,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from openpilot.starpilot.efficiency.car_signals import climate_band
 from openpilot.starpilot.efficiency.energy import step
 from openpilot.starpilot.efficiency.hybrid import POWER_METER_NEUTRAL
 
@@ -68,6 +69,8 @@ class Sample:
   lon: float | None = None
   bearing: float | None = None  # degrees from north
   experiment: str | None = None  # 'category|context|variant' of the fuel experiment in force (experiment.py)
+  climate_set_f: int | None = None  # climate setpoint, F; 0 = off (car_signals)
+  cabin_f: int | None = None
 
 
 def make_sample(t: float, mass: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, device_motion=None,
@@ -126,6 +129,11 @@ class Stretch:
   mode_s: dict = field(default_factory=dict)  # drive mode -> seconds
   limit_s: dict = field(default_factory=dict)  # map speed limit -> seconds
   road_s: dict = field(default_factory=dict)  # map road code -> seconds
+  climate_s: dict = field(default_factory=dict)  # climate band (car_signals.climate_band) -> seconds
+  set_sum: float = 0.0
+  set_n: int = 0
+  cabin_sum: float = 0.0
+  cabin_n: int = 0
   tire_sum: float = 0.0
   tire_n: int = 0
   tire_low: float | None = None
@@ -142,7 +150,9 @@ class Stretch:
 
   def tag(self, sample: Sample, dt: float) -> None:
     """Accumulate the context tags of one sample interval."""
-    for bucket, key in ((self.mode_s, sample.drive_mode), (self.limit_s, sample.map_limit), (self.road_s, sample.road_code)):
+    climate = climate_band(sample.climate_set_f, sample.ambient_c)
+    for bucket, key in ((self.mode_s, sample.drive_mode), (self.limit_s, sample.map_limit), (self.road_s, sample.road_code),
+                        (self.climate_s, climate)):
       if key is not None:
         bucket[key] = bucket.get(key, 0.0) + dt
     if sample.tire_avg is not None and math.isfinite(sample.tire_avg):
@@ -153,6 +163,12 @@ class Stretch:
     if sample.ambient_c is not None and math.isfinite(sample.ambient_c):
       self.ambient_sum += sample.ambient_c
       self.ambient_n += 1
+    if sample.climate_set_f:
+      self.set_sum += sample.climate_set_f
+      self.set_n += 1
+    if sample.cabin_f is not None:
+      self.cabin_sum += sample.cabin_f
+      self.cabin_n += 1
     if sample.fuel_level is not None and math.isfinite(sample.fuel_level):
       if self.level_first is None:
         self.level_first = sample.fuel_level
@@ -177,6 +193,8 @@ class Stretch:
       'tire': r(self.tire_sum / self.tire_n if self.tire_n else None, 1), 'tire_low': self.tire_low,
       'ambient_c': r(self.ambient_sum / self.ambient_n if self.ambient_n else None, 1),
       'level0': r(self.level_first, 1), 'level1': r(self.level_last, 1),
+      'climate': top(self.climate_s), 'set_f': r(self.set_sum / self.set_n if self.set_n else None, 1),
+      'cabin_f': r(self.cabin_sum / self.cabin_n if self.cabin_n else None, 1),
       'lat': r(self.lat, 5), 'lon': r(self.lon, 5), 'bearing': r(self.bearing, 0),
       'exp': self.experiment, 'v0': r(self.v_start), 'v1': r(self.v_end),
     }

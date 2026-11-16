@@ -116,3 +116,36 @@ def test_a_drive_mode_switch_starts_a_new_stretch():
     t += 0.05
   stretches = ledger.finish()
   assert [s.context()[5] for s in stretches] == ['eco', 'sport']
+
+
+def test_climate_setpoint_off_and_cabin_from_the_bus():
+  from openpilot.starpilot.efficiency.car_signals import CABIN_ADDR, CLIMATE_ADDR
+  s = CarSignals()
+  assert s.climate_set_f is None and s.cabin_f is None
+  s.update([(CLIMATE_ADDR, bytes([0x10, 0x10, 0x10, 0x10, 0x02, 0x88, 0x21, 0x00]), 0),
+            (CABIN_ADDR, bytes([0x00, 0x00, 0xFF, 0x4B, 0, 0, 0, 0]), 0)])
+  assert s.climate_set_f == 72 and s.cabin_f == 75   # 2026-11-16: 0x10 at 72 F, 0x13 at 75 F, 0x0D at 69 F
+  s.update([(CLIMATE_ADDR, bytes([0x0D] * 4 + [0x02, 0x88, 0x21, 0x00]), 0)])
+  assert s.climate_set_f == 69
+  s.update([(CLIMATE_ADDR, bytes(4) + bytes([0x02, 0x88, 0x21, 0x00]), 0)])
+  assert s.climate_set_f == 0
+  s.update([(CLIMATE_ADDR, bytes([0x13] * 8), 2)])   # another bus is ignored
+  assert s.climate_set_f == 0
+
+
+def test_climate_band_from_setpoint_and_outside():
+  from openpilot.starpilot.efficiency.car_signals import climate_band
+  assert climate_band(None, 5.0) is None and climate_band(0, 5.0) == 'off' and climate_band(72, None) == 'on'
+  assert climate_band(72, 4.0) == 'heat'      # 22.2 C set, 18 C of heating
+  assert climate_band(72, 20.0) == 'mild'
+  assert climate_band(68, 32.0) == 'cool'     # 20 C set on a 32 C day
+
+
+def test_stretch_records_the_climate():
+  stretches = drive(ambient_c=4.0, climate_set_f=72, cabin_f=70)
+  r = drive_document('d', stretches)['stretches'][0]
+  assert r['climate'] == 'heat' and r['set_f'] == 72 and r['cabin_f'] == 70
+  r = drive_document('d', drive(ambient_c=4.0, climate_set_f=0))['stretches'][0]
+  assert r['climate'] == 'off' and r['set_f'] is None
+  r = drive_document('d', drive(ambient_c=4.0))['stretches'][0]
+  assert r['climate'] is None and r['cabin_f'] is None

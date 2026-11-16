@@ -10,11 +10,16 @@
   map          Navi_HU (0x544) byte 0 is the head unit map's speed limit (mph here; 0 or 255 unknown) and the low
                nibble of byte 2 looks like a road-type code (1 on highways and major roads, 5 on local streets,
                2 on slow streets); the code is recorded, not yet trusted for decisions.
+  climate      0x5C4 bytes 0-3 are the four zone setpoints as degrees F - 56 (16 = 72 F), all 0 with the climate off;
+               1 Hz. Confirmed live 2026-11-16 at 72, 75, 69, 72 F and off. 0x4BC byte 3 looks like the cabin
+               temperature in F (75 -> 71 in the minutes after the heat went off); recorded, not yet trusted. The fan
+               level and the A/C request were not found on bus 0 (an auto fan step changed nothing here).
 
 Observe only. Each value persists until a newer frame replaces it; the conflated CAN batch can skip slow frames.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 MDPS11_ADDR = 0x381
@@ -23,6 +28,12 @@ ANNOUNCED = {0x40: 'eco', 0x60: 'sport', 0xA0: 'smart'}
 TPMS_ADDR = 0x593
 NAVI_ADDR = 0x544
 MIN_PSI, MAX_PSI = 10, 80
+CLIMATE_ADDR = 0x5C4
+CABIN_ADDR = 0x4BC
+SETPOINT_F_OFFSET = 56
+CABIN_F_RANGE = (-30, 130)
+# setpoint minus outside temperature, C: past HEAT_C the climate is heating hard, below COOL_C it is cooling
+HEAT_C, COOL_C = 8.0, -3.0
 
 
 @dataclass
@@ -32,6 +43,8 @@ class CarSignals:
   tires_psi: tuple[int, int, int, int] | None = None
   map_limit: int | None = None  # posted limit from the car's map, in the cluster's units
   road_code: int | None = None
+  climate_set_f: int | None = None  # driver's setpoint, F; 0 with the climate off, None until heard
+  cabin_f: int | None = None
 
   @property
   def drive_mode(self) -> str | None:
@@ -71,3 +84,20 @@ class CarSignals:
       elif address == NAVI_ADDR and len(dat) >= 3:
         self.map_limit = dat[0] if 0 < dat[0] < 255 else None
         self.road_code = dat[2] & 0x0F if dat[2] != 0xFF else None
+      elif address == CLIMATE_ADDR and len(dat) >= 1:
+        self.climate_set_f = dat[0] + SETPOINT_F_OFFSET if dat[0] else 0
+      elif address == CABIN_ADDR and len(dat) >= 4:
+        self.cabin_f = dat[3] if CABIN_F_RANGE[0] <= dat[3] <= CABIN_F_RANGE[1] else None
+
+
+def climate_band(set_f: int | None, ambient_c: float | None) -> str | None:
+  """'off', 'heat', 'cool' or 'mild' from the setpoint and the outside temperature; 'on' without an outside reading;
+  None while the climate state is unknown."""
+  if set_f is None:
+    return None
+  if set_f == 0:
+    return 'off'
+  if ambient_c is None or not math.isfinite(ambient_c):
+    return 'on'
+  delta = (set_f - 32) * 5 / 9 - ambient_c
+  return 'heat' if delta >= HEAT_C else 'cool' if delta <= COOL_C else 'mild'

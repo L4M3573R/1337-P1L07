@@ -12,7 +12,11 @@ Fair comparisons (2026-11-15):
   - season: only runs from the same outside-temperature band as the newest drive count (SEASON_BANDS, the BlueDriver's
     ambient reading), so summer runs are never weighed against winter ones;
   - curves: each variant's fuel and time are taken per curve class (straight / gentle curves / curvy, from the yaw
-    rate) and weighted alike for every variant, over the classes every variant has driven.
+    rate) and weighted alike for every variant, over the classes every variant has driven;
+  - climate (2026-11-16): the same for the climate band (off / heat / cool / mild, from the car's setpoint against the
+    outside temperature, car_signals.climate_band), crossed with the curve class, so a variant that happened to run
+    with the heat on is not weighed against one that ran with it off. Stretches recorded before the band are 'unknown'
+    climate and keep their curve class alone.
 A variant qualifies when every variant has enough measurements (MIN_MILES / MIN_EPISODES), it beats the baseline (the
 comma's normal driving) by MIN_GAIN and stays ahead of it in CONFIDENCE of bootstrap resamples. Which qualifying variant
 is used weighs fuel against time: time-free savings always, then the driver's budget (experiment.TIME_BUDGET_S_PER_H)
@@ -60,6 +64,7 @@ class Run(NamedTuple):
   seconds: float = 0.0
   curve: str = 'straight'
   season: str | None = None
+  climate: str | None = None
 
 
 def season_of(ambient_c) -> str | None:
@@ -165,11 +170,13 @@ def samples(drives: list[list[dict]], corrections: dict | None = None,
           if metres >= WINDOW_M[category]:
             break
         if gal is not None and metres >= WINDOW_M[category]:
-          out.setdefault((category, context, variant), []).append(Run(gal, metres, seconds, _curve(s), run_season))
+          out.setdefault((category, context, variant), []).append(
+            Run(gal, metres, seconds, _curve(s), run_season, s.get('climate')))
       else:
         g, m = corrected_gal(s, corrections), s.get('m') or 0.0
         if g is not None and m > 0:
-          out.setdefault((category, context, variant), []).append(Run(g, m, s.get('dur') or 0.0, _curve(s), run_season))
+          out.setdefault((category, context, variant), []).append(
+            Run(g, m, s.get('dur') or 0.0, _curve(s), run_season, s.get('climate')))
   return out
 
 
@@ -185,7 +192,8 @@ def enough(category: str, rows) -> bool:
 
 
 def _common_strata(category: str, rows: dict[str, list]) -> dict[str, float]:
-  """Curve class -> weight, over the classes every variant has driven enough of (weights: all variants' metres)."""
+  """Stratum (curve class, with the climate band) -> weight, over the strata every variant has driven enough of
+  (weights: all variants' metres)."""
   classes = set.intersection(*[{_run_curve(r) for r in rs} for rs in rows.values()]) if rows else set()
   keep = {}
   for c in classes:
@@ -199,7 +207,10 @@ def _common_strata(category: str, rows: dict[str, list]) -> dict[str, float]:
 
 
 def _run_curve(r) -> str:
-  return r[3] if len(r) > 3 else 'straight'
+  """The run's stratum: its curve class, and its climate band when one was recorded ('straight/heat')."""
+  curve = r[3] if len(r) > 3 else 'straight'
+  climate = r[5] if len(r) > 5 else None
+  return f'{curve}/{climate}' if climate else curve
 
 
 def _rates(rows: list, strata: dict[str, float]) -> tuple[float, float]:
