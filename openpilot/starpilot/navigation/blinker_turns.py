@@ -5,6 +5,10 @@
   nudge:  no mapped road -> go straight until the driver pushes the wheel toward the blinker, then take the turn over
   turn:   once turning, the turn is held until the car has turned (heading) or the blinker goes off; it never gives up
           halfway. Above the cutoff (plus a margin) or with the blinker off it ends.
+  one:    a blinker is for one turn (2026-11-16): after a turn is done, or the car has turned without the comma, it looks
+          for no more mapped roads until the blinker goes off, and a mapped road further than SIGNAL_AHEAD_M from where
+          the blinker came on (queue creep behind a car not counted) is not the one signalled for. Both still take a
+          nudge. Unmapped driveways made it wait for, and could have turned at, the next mapped road on that side.
 
 The map lookup never runs inside modeld: modeld writes a small request to shared memory and the sideroadd process does
 the tile reads, decoding and road search, writing the result back (MapTurnFinder(remote=True)). Decisions here are pure
@@ -64,6 +68,7 @@ TRIGGER_M = 7.0   # ...plus this, so the turn starts ~1 s before the steering pa
 STOP_START_MAX_M = 35.0  # stopped this close to the mapped side road, with no car ahead: stopped at the line
 STOP_ROLL_M = 2.0        # pulling away from that stop: the turn starts after this much rolling
 STOPPED_MPS = 0.3
+SIGNAL_AHEAD_M = 150.0  # a mapped road further than this from where the blinker came on was not signalled for
 
 
 def trigger_distance(v_ego: float) -> float:
@@ -240,6 +245,9 @@ class BlinkerTurn:
     self.last_t: float | None = None
     self.odo_m = 0.0  # driven since the blinker came on
     self.stop_odo_m: float | None = None  # odo_m at the last stop with no car ahead (None: none, or queued behind a car)
+    self.signal_m = 0.0  # driven since the blinker came on, not counting creep in a queue behind a car
+    self.blink_heading: float | None = None  # heading when the blinker came on
+    self.map_done: str | None = None  # why this blinker takes no more mapped roads (it waits for a nudge)
 
   def update(self, t: float, side: str | None, v_ego: float, heading: float | None, lookup: Lookup | None,
              nudged: bool, lead: bool = False) -> Decision:
@@ -253,6 +261,10 @@ class BlinkerTurn:
       if side is None:
         return Decision(False, '')
     self.odo_m += max(v_ego, 0.0) * dt
+    if not lead:
+      self.signal_m += max(v_ego, 0.0) * dt
+    if self.blink_heading is None:
+      self.blink_heading = heading
     if v_ego < STOPPED_MPS:
       self.stop_odo_m = None if lead else self.odo_m
     if self.turning:
@@ -260,7 +272,7 @@ class BlinkerTurn:
                 abs((heading - self.start_heading + 180.0) % 360.0 - 180.0) >= TURN_DONE_DEG)
       if turned:
         self.reset()
-        self.last_t, self.side = t, side
+        self.last_t, self.side, self.map_done = t, side, 'turn done'
         return Decision(False, 'turn done')
       if v_ego > CUTOFF_MPS + ABORT_MARGIN_MPS:
         self.turning = False
@@ -268,24 +280,36 @@ class BlinkerTurn:
       return Decision(True, 'turning')
     if v_ego >= CUTOFF_MPS:
       return Decision(False, 'above turn speed')
-    if lookup is not None and lookup.road is not None:
+    if (self.map_done is None and heading is not None and self.blink_heading is not None and
+        abs((heading - self.blink_heading + 180.0) % 360.0 - 180.0) >= TURN_DONE_DEG):
+      self.map_done = 'turned without the comma'
+    if self.map_done is None and lookup is not None and lookup.road is not None:
       if lookup.t != self.lookup_t:
         self.lookup_t, self.driven_m = lookup.t, max(0.0, v_ego * (t - lookup.t))
       else:
         self.driven_m += max(v_ego, 0.0) * dt
       distance = lookup.road.distance_m - self.driven_m
+      if self.signal_m + distance > SIGNAL_AHEAD_M:
+        return self._nudge_or_wait(heading, nudged, 'map: road too far for this blinker, waiting for a nudge')
+      if nudged and distance > trigger_distance(v_ego):
+        return self._start(heading, 'nudge', None)  # the driver's turn comes first: a road the map does not have
       if distance <= trigger_distance(v_ego):
         return self._start(heading, 'map: at the road', distance)
       rolled = self.odo_m - self.stop_odo_m if self.stop_odo_m is not None else None
       if rolled is not None and not lead and rolled >= STOP_ROLL_M and distance + rolled <= STOP_START_MAX_M:
         return self._start(heading, 'map: pulling away from the stop', distance)
       return Decision(False, 'map: waiting for the road', distance)
+    if self.map_done is not None:
+      return self._nudge_or_wait(heading, nudged, f'{self.map_done}, waiting for the blinker to go off or a nudge')
     if nudged:
       return self._start(heading, 'nudge', None)
     if lookup is None:  # the first moments of a blinker, before sideroadd answers: not yet a missing map
       return Decision(False, 'map: looking up the road, waiting for a nudge')
     return Decision(False, 'map: no road there, waiting for a nudge' if lookup.map_known
                     else 'no map here, waiting for a nudge')
+
+  def _nudge_or_wait(self, heading, nudged, reason) -> Decision:
+    return self._start(heading, 'nudge', None) if nudged else Decision(False, reason)
 
   def _start(self, heading, reason, distance) -> Decision:
     self.turning, self.start_heading = True, heading

@@ -193,3 +193,48 @@ def test_turn_from_a_queue_or_far_back_keeps_the_rolling_trigger():
   assert not d.turning or d.reason == 'map: at the road'
   d, rolled = pull_away(bt.BlinkerTurn(), 45.0)  # stopped well short of the road
   assert not d.turning or d.reason == 'map: at the road'
+
+
+def test_one_blinker_takes_one_turn():
+  # 2026-11-16: an unmapped driveway 50 m on, taken with a nudge; the next mapped road on that side must not be taken too
+  turn = bt.BlinkerTurn()
+  assert turn.update(0.0, 'left', V, 0.0, lookup(0.0, 100.0), nudged=True).turning
+  d = turn.update(1.0, 'left', V, -80.0, lookup(1.0, 100.0), nudged=False)   # heading swung 80 degrees left
+  assert d.reason == 'turn done'
+  for i in range(1, 60):
+    t = 1.0 + i * 0.1
+    d = turn.update(t, 'left', V, -80.0, lookup(t, 20.0), nudged=False)
+    assert not d.turning, d.reason
+  assert d.reason == 'turn done, waiting for the blinker to go off or a nudge'
+  assert turn.update(7.0, 'left', V, -80.0, lookup(7.0, 20.0), nudged=True).turning   # a nudge still turns
+  turn.update(7.1, None, V, -80.0, None, nudged=False)                               # blinker off: a new blinker
+  assert turn.update(7.2, 'left', V, -80.0, lookup(7.2, 5.0), nudged=False).turning
+
+
+def test_turning_without_the_comma_ends_the_map_search():
+  turn = bt.BlinkerTurn()
+  assert not turn.update(0.0, 'left', V, 0.0, lookup(0.0, 120.0), nudged=False).turning
+  d = turn.update(0.5, 'left', V, -75.0, lookup(0.5, 5.0), nudged=False)   # the driver turned with no nudge seen
+  assert not d.turning and d.reason.startswith('turned without the comma')
+
+
+def test_a_mapped_road_far_past_the_signal_is_not_the_one():
+  turn = bt.BlinkerTurn()
+  d = turn.update(0.0, 'left', V, 0.0, lookup(0.0, 200.0), nudged=False)
+  assert not d.turning and d.reason == 'map: road too far for this blinker, waiting for a nudge'
+  # the blinker left on: 180 m later the same road is close, still not taken
+  t = 0.0
+  while t < 26.0:
+    t += 0.1
+    d = turn.update(t, 'left', V, 0.0, lookup(t, max(0.0, 200.0 - V * t)), nudged=False)
+    assert not d.turning
+  assert turn.update(t + 0.1, 'left', V, 0.0, lookup(t + 0.1, 10.0), nudged=True).turning
+
+
+def test_queue_creep_behind_a_car_does_not_count_against_the_signal():
+  turn = bt.BlinkerTurn()
+  t = 0.0
+  while t < 40.0:   # 40 s creeping at 4 m/s behind a car: 160 m, the road 30 m ahead at the end
+    t += 0.1
+    d = turn.update(t, 'left', 4.0, 0.0, lookup(t, 190.0 - 4.0 * t), nudged=False, lead=True)
+  assert d.reason == 'map: waiting for the road'   # too far at first, in range once the queue has crept up
