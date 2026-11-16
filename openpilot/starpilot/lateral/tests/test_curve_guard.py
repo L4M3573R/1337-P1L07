@@ -29,7 +29,7 @@ def model(curvature, inside_gap, outside_gap=1.0, inside_prob=0.95, outside_prob
 
 
 def settle(guard, m, curvature, v=13.0, n=300, **kw):
-  args = {'lat_active': True, 'blinker': False, 'lane_change': False, **kw}
+  args = {'lat_active': True, 'lane_change': False, **kw}
   r = None
   for _ in range(n):
     r = guard.update(m, curvature, v, **args)
@@ -57,7 +57,7 @@ def test_cutting_the_inside_takes_out_a_bounded_amount_of_turn(curvature):
 def test_eases_in_rather_than_stepping():
   g = CurveGuard(1.83, OFFSET)
   m = model(0.012, inside_gap=-0.5)
-  first = g.update(m, 0.012, 13.0, lat_active=True, blinker=False, lane_change=False)
+  first = g.update(m, 0.012, 13.0, lat_active=True, lane_change=False)
   assert 0.012 - first.curvature < 0.1 * MAX_REDUCTION_FRACTION * 0.012
   later = settle(g, m, 0.012, n=100)
   assert later.curvature < first.curvature
@@ -70,8 +70,8 @@ def test_small_intrusion_asks_for_less():
   assert 0.004 > slight.curvature > deep.curvature
 
 
-@pytest.mark.parametrize('kw', [{'blinker': True}, {'lane_change': True}, {'lat_active': False}, {'v': MIN_SPEED_MPS - 0.5}])
-def test_off_for_turn_signal_lane_change_disengaged_and_low_speed(kw):
+@pytest.mark.parametrize('kw', [{'lane_change': True}, {'lat_active': False}, {'v': MIN_SPEED_MPS - 0.5}])
+def test_off_for_lane_change_disengaged_and_low_speed(kw):
   g = CurveGuard(1.83, OFFSET)
   v = kw.pop('v', 13.0)
   r = settle(g, model(0.012, inside_gap=-0.5), 0.012, v=v, **kw)
@@ -109,3 +109,10 @@ def test_camera_offset_moves_the_body():
   m = model(0.012, inside_gap=-0.1)
   assert settle(CurveGuard(1.83, OFFSET), m, 0.012).active
   assert not settle(CurveGuard(1.83, 0.0), m, 0.012).active
+
+
+def test_a_blinker_without_a_lane_change_keeps_it_guarding():
+  # 2026-11-15, an on-ramp before the highway: blinker on for the merge, 33 mph, the model cutting the inside
+  g = CurveGuard(1.83, OFFSET)
+  r = settle(g, model(0.012, inside_gap=-0.5), 0.012, v=14.8)
+  assert r.active and r.reason == 'guarding'

@@ -235,7 +235,6 @@ class Controls:
       return curvature
     try:
       result = guard.update(model_v2, curvature, CS.vEgo, lat_active=bool(CC.latActive),
-                            blinker=bool(CS.leftBlinker or CS.rightBlinker),
                             lane_change=model_v2.meta.laneChangeState != log.LaneChangeState.off)
       self.curve_guard_log.observe({'active': result.active, 'inside': result.inside if result.active else ''},
                                    {'gap_m': result.gap_m, 'shift_m': result.shift_m, 'reason': result.reason,

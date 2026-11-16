@@ -117,8 +117,10 @@ class CurveGuard:
     delta = min(2.0 * shift / lever ** 2, MAX_REDUCTION_FRACTION * abs(curvature))
     return GuardResult(curvature - math.copysign(delta, curvature), True, inside, float(gap), float(at), shift, 'guarding')
 
-  def update(self, model, curvature: float, v_ego: float, *, lat_active: bool, blinker: bool, lane_change: bool) -> GuardResult:
-    if (not self.enabled or not lat_active or blinker or lane_change or not math.isfinite(curvature) or
+  def update(self, model, curvature: float, v_ego: float, *, lat_active: bool, lane_change: bool) -> GuardResult:
+    # A blinker alone does not stand it down (2026-11-16): signalling for a merge kept it off around an on-ramp curve the
+    # model cut. Only a lane change under way does; intersection turns are below MIN_SPEED_MPS.
+    if (not self.enabled or not lat_active or lane_change or not math.isfinite(curvature) or
         not math.isfinite(v_ego) or v_ego < MIN_SPEED_MPS or abs(curvature) < MIN_CURVATURE or model is None):
       target = GuardResult(curvature, reason='inactive')
     else:
