@@ -68,6 +68,16 @@ ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 NNLC_RELOG_S = 55.0  # just under a log segment
 
 
+
+def _eps_test_steer(path: str = '/data/starpilot/eps_test.json') -> bool:
+  try:
+    import json
+    with open(path) as f:
+      doc = json.load(f)
+    return isinstance(doc, dict) and doc.get('steer_from_test') is True
+  except (OSError, ValueError):
+    return False
+
 class Controls:
   def __init__(self, *, predict_lane_clearance: bool = False) -> None:
     if type(predict_lane_clearance) is not bool:
@@ -108,9 +118,14 @@ class Controls:
       'onroadEvents',
       'driverAssistance',
     ] + (['aolAxisState', 'aolSafetyWire'] if self.aol_replay or self.ordinary_axis_ack_required else [])
+    # Parking-lot EPS test (eps-test branch only): /data/starpilot/eps_test.json {"steer_from_test": true} makes the
+    # normal controller steer with the scripted testJoystick torque instead of the model, so AOL and its safety
+    # acknowledgements stay as in normal driving (joystickd cannot engage under AOL's axis transport).
+    self.eps_test_steer = _eps_test_steer()
     optional = list(
       dict.fromkeys(
         self.longitudinal_inputs.optional_services + ['starpilotCarState', 'deviceState', 'autoSteeringLearning', 'starpilotSteeringTracking', 'pandaStates']
+        + (['testJoystick'] if self.eps_test_steer else [])
       )
     )
     if optional:
@@ -746,6 +761,10 @@ class Controls:
       curvature_limited, lat_delay
     )
     actuators.torque = float(steer)
+    if self.eps_test_steer and CC.latActive and self.sm.recv_frame['testJoystick'] > 0 and \
+       (self.sm.frame - self.sm.recv_frame['testJoystick']) * DT_CTRL <= 0.2:
+      axes = list(self.sm['testJoystick'].axes)
+      actuators.torque = float(min(1.0, max(-1.0, axes[1]))) if len(axes) > 1 and math.isfinite(axes[1]) else 0.0
     if self.CP.steerControlType == car.CarParams.SteerControlType.curvature:
       actuators.curvature = float(lateral_output)
     else:
