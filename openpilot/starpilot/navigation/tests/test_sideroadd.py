@@ -55,32 +55,3 @@ def test_missing_or_corrupt_files_mean_no_lookup(tmp_path):
   modeld._last_read = -1e9
   assert modeld.latest('left') is None
   assert sideroadd.step(FakeFinder(), 0.0, tmp_path / 'req.json', tmp_path / 'res.json') == 0.0
-
-
-def test_guard_step_feeds_the_guard_and_never_raises(monkeypatch):
-  from openpilot.starpilot.diagnostics import features
-  from openpilot.starpilot.navigation import straight_guard
-
-  class SM:
-    def __init__(self, fail=False):
-      self.fail, self.seen = fail, {'carState': True, 'modelV2': True}
-
-    def update(self, timeout):
-      if self.fail:
-        raise RuntimeError('socket')
-
-  class Guard:
-    def __init__(self):
-      self.calls = []
-
-    def step(self, sample, crossing_at):
-      self.calls.append((sample, crossing_at))
-
-  errors = []
-  monkeypatch.setattr(features, 'log_error', lambda feature, e, where='': errors.append((feature, where)))
-  monkeypatch.setattr(straight_guard, 'sample_from', lambda sm, now_ns: 'sample')
-  finder, guard = bt.MapTurnFinder(), Guard()
-  sideroadd.guard_step(guard, SM(), finder)
-  assert guard.calls == [('sample', finder.crossing_now)]
-  sideroadd.guard_step(guard, SM(fail=True), finder)
-  assert errors == [('straight_guard', 'sideroadd')] and len(guard.calls) == 1

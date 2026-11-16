@@ -175,14 +175,6 @@ class MapTurnFinder:
     known = bool(tiles) and side_road.matches_road(tiles, latitude, longitude, bearing)
     return Lookup(t, side, road, known)
 
-  def crossing_now(self, latitude, longitude, bearing):
-    """(map_known, side_road.Crossing | None): the nearest junction ahead and whether the car's road goes on straight."""
-    from openpilot.starpilot.navigation import side_road
-    tiles = self._tiles(latitude, longitude)
-    if not tiles or not side_road.matches_road(tiles, latitude, longitude, bearing):
-      return False, None
-    return True, side_road.crossing(tiles, latitude, longitude, bearing)
-
   def _tiles(self, latitude, longitude) -> list:
     from openpilot.starpilot.navigation.road_tiles import TileFormatError, decode_road_tile, tiles_in_radius
     if self._store is None:

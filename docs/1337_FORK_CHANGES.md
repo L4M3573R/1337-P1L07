@@ -85,12 +85,12 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   (shadow/map/speed; default shadow), `intent.py` (turn beats a queued lane change below 20 mph), `navtilesd.py`
   (nearby tiles), `modeld.py` (GPS subscriptions), green blinker on Turning in `alert_renderer.py` and
   `starpilot/ui/onroad_alerts.py`.
-- **No-blinker straight guard, shadow only** (2026-11-15): `navigation/straight_guard.py`, run in `sideroadd.py`
-  (`guard_step`), map side `side_road.crossing` (nearest junction, its branches, whether the car's road goes on straight)
-  through `MapTurnFinder.crossing_now`. Logs `starpilot_feature` / `straight_guard` events (`would_hold`, `outcome`,
-  `no_map`) when the model starts turning onto a mapped side road with no blinker, the wheel still near centre and the
-  driver not steering, while the road continues straight. Publishes no control; a later active mode would act on the
-  steering output, because the blinker-turn lever (desire) is already none without a blinker.
+- **One blinker, one turn** (2026-11-16): `blinker_turns.BlinkerTurn`. After a turn is done, or the car has turned
+  without the comma, the blinker takes no more mapped roads until it goes off; a mapped road more than
+  `SIGNAL_AHEAD_M` (150 m) from where the blinker came on is not the one signalled for (queue creep behind a car not
+  counted); a nudge toward the blinker starts the turn even with a mapped road still ahead (driveways Mapbox lacks).
+  Before sideroadd's first answer the reason is 'map: looking up the road', not 'no map here'. (The no-blinker straight
+  guard, shadow only, was removed the same day: a better driving model is the planned fix for turning without a blinker.)
 
 ### Efficiency and fuel
 - **Energy ledger** (`246ace1369`, `9eafb2765a`, `eb7c0ce812`, `9355d3146c`, `575dc06820`, `835eb17fa5`):
@@ -181,6 +181,8 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   per mile, or per fixed window for launches; a variant qualifies with enough miles/episodes, 3 % gain and 80 % bootstrap
   confidence over the baseline; only the newest drive's outside-temperature band counts (`SEASON_BANDS` cold/mild/warm:
   summer never weighed against winter); fuel and time are compared per curve class (straight/gentle/curvy, from yaw)
+  crossed with the climate band (2026-11-16: off/heat/cool/mild from the car's setpoint, `0x5C4` bytes 0-3 = F - 56,
+  0 = off, against the outside temperature; `car_signals.climate_band`; stretches also keep `set_f`, `cabin_f`)
   with equal weights; time-free savings are always taken, then `_spend_budget` spends the 4 min/hr on the steps with the
   most fuel per extra minute across situations, weighted by miles per engaged hour (`situation_miles`), so a dearer step
   that adds little is left out, and no step under `MIN_GAL_PER_MINUTE` (0.02 gal per extra minute, ~$4/hr) is taken;
