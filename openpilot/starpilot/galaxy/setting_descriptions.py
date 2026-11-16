@@ -7,6 +7,13 @@ from openpilot.starpilot.ui.long_profile_feature import CATEGORY_HELP, VALUE_HEL
 from openpilot.starpilot.ui.feature_settings_state import SLC_OFFSET_KEYS
 
 DESCRIPTIONS = {
+  'GreenLightAlert': 'Chimes once when the model’s traffic-light stop prediction clears while you remain stopped.',
+  'LeadDepartingAlert': 'Chimes once when the tracked vehicle ahead starts moving while you remain stopped.',
+  'DriveModeProfiles': 'Matches acceleration and deceleration profiles to the vehicle’s Eco, Normal or Sport drive mode.',
+  'DriveModeAcceleration': 'Matches the acceleration profile to the vehicle’s drive mode.',
+  'DriveModeDeceleration': 'Matches the deceleration profile to the vehicle’s drive mode.',
+  'AggressiveCoolingEnabled': 'Uses a stronger fan curve on supported devices to reduce temperature at the cost of fan noise.',
+  'HighwaySmoothingLevel': 'Reduces small steering corrections on highways above about 40 mph. 0% is off; higher values add more smoothing.',
   'FordRearFogIndicator': 'Shows a movable amber telltale while the Ford rear fog light is on, using read-only vehicle status.',
   'DisengageOnAccelerator': 'When enabled, pressing the accelerator pedal will disengage openpilot.',
   'ReduceMotion': 'Reduces interface animations for a steadier display.',
@@ -108,6 +115,8 @@ DESCRIPTIONS = {
   'heading:starport': 'Settings for connecting Android Auto to the car through StarPort.',
   'StarPortNewSetup': 'Shows the guided StarPort setup with a live checklist instead of the classic setup screens.',
   'StarPortAllowHevc': 'Lets a car that offers only H.265 video receive H.265; a car with an H.264 mode keeps H.264.',
+  'StarPortKeyframeTest': 'Sends every H.265 frame as a keyframe and logs the car\'s acknowledgments, to diagnose H.265-only cars.',
+  'StarPortTallHevc': 'Uses the car\'s 1080x1920 H.265 screen mode instead of 720x1280, to diagnose H.265-only cars. Needs Allow H.265 video on.',
   'StarPortHeadUnitExperiments': 'Shows experimental fixes for specific cars and dongles, each with its own switch. Off is the standard connection.',
   'StarPortDedicatedWifi': "Joins the car's Wi-Fi on a second interface so the comma stays on its home Wi-Fi or phone hotspot.",
   'TeslaWakeOnCAN': 'Wakes comma when the Tesla wakes up, before you press the brake.',
@@ -180,6 +189,8 @@ DESCRIPTIONS = {
 INITIALIZATION = {
   'StarPortNewSetup': 'Applies the next time the setup screen opens.',
   'StarPortAllowHevc': 'Applies from the next StarPort connection.',
+  'StarPortKeyframeTest': 'Applies from the next StarPort connection.',
+  'StarPortTallHevc': 'Applies from the next StarPort connection.',
   'StarPortHeadUnitExperiments': 'Applies from the next StarPort connection.',
   'StarPortDedicatedWifi': 'Applies from the next StarPort connection.',
   'LateralControllerSelection': ('Applies when driving processes next start: the controller class, vehicle policy and ' +

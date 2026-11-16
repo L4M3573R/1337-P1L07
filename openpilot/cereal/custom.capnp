@@ -279,22 +279,25 @@ struct StarPilotLongitudinalPlan @0xda96579883444c35 {
   forceStopHolding @4 :Bool;
   forceStopBraking @5 :Bool;
   forceStopEpisodeMonoTime @6 :UInt64;
+  departureAlertKind @7 :UInt8; # 0: none, 1: green-light advisory, 2: lead departing
+  departureAlertMonoTime @8 :UInt64; # Original advisory model-source timestamp, ns
+  # 1337 fields follow upstream's (2026-11-16 Dom merge moved them from @7-@20 to @9-@22; older logs decode them wrong)
   # Pulse and Glide, logged every plan for tuning (all zero when the mode is off)
-  pulseGlideEnabled @7 :Bool;
-  pulseGlidePhase @8 :PulseGlidePhase;
-  pulseGlideAccelTarget @9 :Float32;  # m/s^2 the mode asked the cruise for
-  pulseGlideBandTop @10 :Float32;  # m/s wheel speed (the dash set speed / clusterRatio)
-  pulseGlideBandBottom @11 :Float32;  # m/s wheel speed
-  pulseGlideClusterRatio @12 :Float32;  # dash speedometer / wheel speed used for the band
-  pulseGlideHillPaused @13 :Bool;
+  pulseGlideEnabled @9 :Bool;
+  pulseGlidePhase @10 :PulseGlidePhase;
+  pulseGlideAccelTarget @11 :Float32;  # m/s^2 the mode asked the cruise for
+  pulseGlideBandTop @12 :Float32;  # m/s wheel speed (the dash set speed / clusterRatio)
+  pulseGlideBandBottom @13 :Float32;  # m/s wheel speed
+  pulseGlideClusterRatio @14 :Float32;  # dash speedometer / wheel speed used for the band
+  pulseGlideHillPaused @15 :Bool;
   # CEM stop detection, logged every plan (cemStopKnown is false when the detector withheld an observation)
-  cemStopKnown @14 :Bool;
-  cemStopLightDetected @15 :Bool;
-  cemStopModelStopping @16 :Bool;
-  cemStandstillHold @17 :Bool;
-  cemStopReason @18 :Text;
-  cemLightFilter @19 :Float32;
-  cemStopCommitted @20 :Bool;
+  cemStopKnown @16 :Bool;
+  cemStopLightDetected @17 :Bool;
+  cemStopModelStopping @18 :Bool;
+  cemStandstillHold @19 :Bool;
+  cemStopReason @20 :Text;
+  cemLightFilter @21 :Float32;
+  cemStopCommitted @22 :Bool;
 
   enum PulseGlidePhase {
     off @0;  # disabled, or unavailable (lead, stop, hill, below the band)
@@ -353,7 +356,7 @@ struct SlcState @0xa1680744031fdb2d {
   pendingSource @36 :Text;
   effectiveClusterTarget @37 :Float32; # m/s in the selected-cruise cluster coordinate
   hasEffectiveClusterTarget @38 :Bool;
-  isLimitingMaxSet @39 :Bool; # qualified raw ceiling below selected raw cruise
+  isLimitingMaxSet @39 :Bool; # adjusted limit at or below SET, in displayed units
   driverOverrideActive @40 :Bool;
   # Presentation only. Qualified source observations from this publisher cycle;
   # consumers use the outer session and frame freshness, never these rows for control.

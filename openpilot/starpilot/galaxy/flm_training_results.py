@@ -18,6 +18,9 @@ class FlmTrainingResults:
       "version": 1, "current": None, "history": []}
     if self.params is not None:
       result['preference'] = self.preference()
+      from openpilot.starpilot.galaxy.flm_saved_settings import snapshot
+
+      result['savedHistory'] = snapshot(self.params, result['preference'])
     return result
 
   def preference(self):
@@ -53,3 +56,8 @@ class FlmTrainingResults:
       return {'version': 1, 'valid': True, 'enabled': choice.enabled, 'parked': parked, 'vehicle': vehicle}
     except (OSError, RuntimeError, AttributeError, TypeError, ValueError, OverflowError, KjException):
       return unknown
+
+  def download(self):
+    from openpilot.starpilot.galaxy.flm_diagnostics import download
+
+    return download(self.snapshot(), self.params)

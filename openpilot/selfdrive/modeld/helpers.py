@@ -55,12 +55,16 @@ def wait_for_chestnut(timeout: float = 10.) -> None:
   # bring-up that failed and retried held that target to 27 s, and the GPU load lost the race by 8 ms. Make the node
   # writable the same way rather than wait on boot.
   start = time.monotonic()
+  while not chestnut_present():
+    if time.monotonic() - start > timeout:
+      raise TimeoutError("chestnut did not enumerate")
+    time.sleep(0.1)
   opened = False
-  while (node := chestnut_node()) is None or not os.access(node, os.R_OK | os.W_OK):
-    if node is not None and not opened:
+  while (node := chestnut_node()) is not None and not os.access(node, os.R_OK | os.W_OK):
+    if not opened:
       opened = True
       subprocess.run(["sudo", "-n", "chmod", "664", str(node)], capture_output=True, timeout=5)
       continue
     if time.monotonic() - start > timeout:
-      raise TimeoutError("chestnut did not enumerate" if node is None else f"chestnut {node} not accessible")
+      raise TimeoutError(f"chestnut {node} not accessible")
     time.sleep(0.1)

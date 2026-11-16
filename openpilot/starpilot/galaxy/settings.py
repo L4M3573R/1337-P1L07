@@ -13,7 +13,7 @@ import threading
 import time
 from typing import Protocol, cast
 
-from openpilot.starpilot.ui.feature_settings_owner import FeatureSettingsOwner
+from openpilot.starpilot.ui.feature_settings_owner import FeatureSettingsOwner, AGGRESSIVE_COOLING_KEY
 from openpilot.starpilot.galaxy.setting_descriptions import description
 from openpilot.starpilot.galaxy.localization_settings import LocalizationSettingsOwner
 from openpilot.starpilot.ui.controller_feature import SETUP_ACTION, SETUP_QUESTION
@@ -42,10 +42,10 @@ from openpilot.starpilot.ui.vasm_owner import ANNOTATION as VASM_ANNOTATION, RES
 PAGES = frozenset(("hub", "localization", "developer", "vehicle", "slc", "lane", "lane_change", "profiles", "personalities",
                    "traffic", "aggressive", "standard", "relaxed",
                    "curve", "torque", "tuning", "torque/bluepilot", "aol", "wheel", "appearance", "display", "data", "power", "sounds", "pip", "sentry", "vasm",
-                   "conditional", "conditional/cem", "conditional/ccm",
+                   "conditional", "conditional/cem",
                    *(f"{name}/{category}" for name in ("traffic", "aggressive", "standard", "relaxed")
                      for category in ("acceleration", "braking", "following"))))
-CONFIRM_ACTIONS = FEATURE_CONFIRM_ACTIONS | {DRIVER_MONITORING_RESET, CALIBRATION_RESET}
+CONFIRM_ACTIONS = (FEATURE_CONFIRM_ACTIONS - {SETUP_ACTION}) | {DRIVER_MONITORING_RESET, CALIBRATION_RESET}
 MAX_VIEWS = 64
 MAX_INTENTS = 64
 TTL = 60.0
@@ -247,7 +247,9 @@ class LiveContextSource:
         timeout = 0
         while True:
           if sm is None:
-            return False
+            sm = self._refreshed_snapshot(deadline)
+            if sm is None:
+              return False
           if hasattr(sm, "after_mono_ns"):
             self.device_after_mono_ns = max(self.device_after_mono_ns, sm.after_mono_ns)
             self.device_offset_ns = sm.device_offset_ns
@@ -282,9 +284,28 @@ class LiveContextSource:
           remaining_ms = int((deadline - self.wait_clock()) * 1000)
           if remaining_ms <= 0:
             return False
+          if hasattr(sm, "after_mono_ns"):
+            # A snapshot never advances by itself; one stale or skewed sample must not read as onroad.
+            sm = self._refreshed_snapshot(deadline)
+            if sm is None:
+              return False
+            continue
           timeout = min(50, remaining_ms)
       except (OSError, RuntimeError, AttributeError, TypeError, ValueError, OverflowError):
         return False
+
+  def _refreshed_snapshot(self, deadline):
+    """Wait for the next deviceState and pandaStates, then sample again; call with self.lock held."""
+    refresh = getattr(self.messages, "refresh", None)
+    remaining_ms = int((deadline - self.wait_clock()) * 1000)
+    if refresh is None or remaining_ms <= 0:
+      return None
+    self.lock.release()
+    try:
+      refreshed = refresh(remaining_ms) is True
+    finally:
+      self.lock.acquire()
+    return self._messages() if refreshed and not self.closed else None
 
   def configuration_allowed(self) -> bool:
     """Allow configuration in effective offroad mode or a fresh stationary Park."""
@@ -612,7 +633,6 @@ class SettingsGateway:
       fresh = self.context.sample() if live else ctx
       return bool(fresh.parked and not fresh.editing_saved_vehicle and fresh.cp_raw == ctx.cp_raw)
     return DeveloperSettingsOwner(self.params, authorized,
-                                  panda_wake=self._owner(ctx, live=live, session_valid=session_valid).panda_wake,
                                   starport=self.starport)
 
   def _localization_owner(self, ctx: AuthorityContext, *, live: bool = False,
@@ -639,7 +659,9 @@ class SettingsGateway:
                            minimum=1 if row.key == HOURS else 11.8, maximum=30 if row.key == HOURS else 12.5,
                            step=1 if row.key == HOURS else 0.1, unit="h" if row.key == HOURS else "V")
                    if row.key in (HOURS, VOLTS) else row for row in state.rows)
-      return replace(state, rows=rows)
+      cooling = self._owner(ctx).snapshot("power", parked=ctx.parked, system_long=False, lateral_context=False,
+                                          metric=ctx.metric, configure_while_driving=True)
+      return replace(state, title="Power and Cooling", rows=rows + tuple(cooling.rows))
     if page == "display":
       return self._display_owner(ctx).snapshot(Profile.COMPACT if HARDWARE.get_device_type() == "mici" else Profile.LARGE)
     if page == "pip":
@@ -652,6 +674,8 @@ class SettingsGateway:
                                       system_long=_qualified(ctx, "long"),
                                       lateral_context=_qualified(ctx, "lane") or (page == "lane" and _qualified(ctx, "lane_live")),
                                       metric=ctx.metric, configure_while_driving=True)
+    if page == "torque":
+      state = replace(state, rows=tuple(row for row in state.rows if row.key not in ("torque:factor:reset", "torque:friction:reset")))
     if ctx.editing_saved_vehicle:
       from opendbc.car.values import PLATFORMS
       platform = PLATFORMS[ctx.cp.carFingerprint]
@@ -855,7 +879,7 @@ class SettingsGateway:
       return self._appearance_owner(ctx, live=True, session_valid=session_valid).apply(intent.request)
     if intent.page == "sounds":
       return self._sounds_owner(ctx, live=True, session_valid=session_valid).apply(intent.request)
-    if intent.page == "power":
+    if intent.page == "power" and intent.request.key != AGGRESSIVE_COOLING_KEY:
       return self._power_owner(ctx, live=True, session_valid=session_valid).apply(_power_request(intent.request))
     if intent.page == "display":
       return self._display_owner(ctx, live=True, session_valid=session_valid).apply(intent.request)

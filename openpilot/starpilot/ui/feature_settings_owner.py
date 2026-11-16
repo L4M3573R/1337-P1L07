@@ -7,6 +7,9 @@ Reset and migration actions additionally require a parked vehicle.
 
 from __future__ import annotations
 
+from openpilot.starpilot.ui.feature_profile_edit import (edit_document, PRESETS as PRESETS,
+                                                        PROFILE_NAMES as PROFILE_NAMES, DOCUMENT_PROFILE_NAMES as DOCUMENT_PROFILE_NAMES)
+
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import replace
@@ -17,6 +20,7 @@ from openpilot.starpilot.lateral.pause import KEYS as LATERAL_PAUSE_KEYS
 from openpilot.starpilot.lateral.lane_centering import STRENGTH_BASELINE, STRENGTH_MAX
 
 from opendbc.car.structs import car
+from openpilot.common.hardware import HARDWARE
 from openpilot.common.params import UnknownKeyName
 from openpilot.starpilot.longitudinal.accel_profile import A_CRUISE_MAX_VALS_TRAFFIC_ALL, interpolate_accel_profile
 from openpilot.starpilot.longitudinal.profile_runtime import TRAFFIC_CRUISE_BRAKE_MAGNITUDE
@@ -26,11 +30,9 @@ from openpilot.starpilot.longitudinal.encouragement import KEY as NUDGE_KEY
 from openpilot.starpilot.longitudinal.planner_selection import KEY as PLANNER_SELECTION_KEY, save_selection
 
 from openpilot.starpilot.longitudinal.profile_document import (
-  ACCELERATION_PRESETS, ACCELERATION_SPEEDS_MPH, BRAKING_PRESETS, FOLLOWING_PRESETS, CURVE_BOUNDS,
-  DEFAULT_DECELERATION_PROFILE, MAX_EXTRA_STOPPED_GAP_M, PERSONALITY_PROFILES_PARAM, default_personality_profiles, initial_custom_curve,
-  FOLLOWING_SPEEDS_MPH, is_truck_fingerprint,
+  ACCELERATION_SPEEDS_MPH, CURVE_BOUNDS,
+  DEFAULT_DECELERATION_PROFILE, MAX_EXTRA_STOPPED_GAP_M, PERSONALITY_PROFILES_PARAM, default_personality_profiles, FOLLOWING_SPEEDS_MPH, is_truck_fingerprint,
   personality_reference_curves, serialize_personality_profiles,
-  update_personality_profile, profile_document,
   synchronise_profile_document_enabled,
 )
 from openpilot.starpilot.ui.feature_settings_state import (
@@ -81,10 +83,20 @@ from openpilot.starpilot.curve_speed.actions import ACTION_KEYS as CURVE_ACTION_
 from openpilot.starpilot.controllers.toyota_cruise import capability as toyota_cruise_capability
 
 
-GLOBAL_BOOL_PREFERENCES = frozenset((LEAD_APPROACH_KEY, LEAD_TAKEOFF_KEY, NUDGE_KEY, "DisengageOnAccelerator"))
+AGGRESSIVE_COOLING_KEY = "AggressiveCoolingEnabled"
+AGGRESSIVE_COOLING_DESCRIPTION = ("Runs the fan sooner and harder to keep the comma 10-16 °C (18-29 °F) cooler on hot days, " +
+                                  "at the cost of more fan noise. Applies next drive.")
+GLOBAL_BOOL_PREFERENCES = frozenset((LEAD_APPROACH_KEY, LEAD_TAKEOFF_KEY, NUDGE_KEY, "DisengageOnAccelerator", AGGRESSIVE_COOLING_KEY))
+
+
+def cooling_available() -> bool:
+  return HARDWARE.get_device_type() in ("tici", "tizi")
+
+DRIVE_MODE_KEYS = ("DriveModeProfiles", "DriveModeAcceleration", "DriveModeDeceleration")
 
 BOOL_DEFAULTS = {
   "GMPedalLongitudinal": False, "ForceStops": True, "AlwaysAllowUploads": False, "TurnAssist": True,
+  "DriveModeProfiles": False, "DriveModeAcceleration": True, "DriveModeDeceleration": True,
   "SubaruAvhStartup": False,
   "SubaruStopStartOff": False,
   "SubaruSNG": False,
@@ -101,6 +113,7 @@ BOOL_DEFAULTS = {
   LEAD_TAKEOFF_KEY: False,
   NUDGE_KEY: True,
   "DisengageOnAccelerator": False,
+  AGGRESSIVE_COOLING_KEY: False,
   CURVE_MASTER_KEY: False, CURVE_NO_LEAD_KEY: False,
   "ShowCSCStatus": False,
   "ForceAutoTuneOff": False, "AlwaysOnLateral": True, "NostalgiaMode": False,
@@ -118,9 +131,6 @@ FLOAT_SPECS = {
 }
 SLC_PRIORITY, SLC_SECONDARY, SLC_TERTIARY = SOURCE_PRIORITY_KEYS
 LONG_PREFIX = "profile:"
-PRESETS = {"acceleration": ACCELERATION_PRESETS, "braking": BRAKING_PRESETS, "following": FOLLOWING_PRESETS}
-PROFILE_NAMES = ("aggressive", "standard", "relaxed")
-DOCUMENT_PROFILE_NAMES = ("traffic", *PROFILE_NAMES)
 AOL_BUTTONS = ("LKASButtonControl", "MainCruiseButtonControl", "DistanceButtonControl",
                "LongDistanceButtonControl", "VeryLongDistanceButtonControl")
 AOL_DISTANCE_BUTTONS = AOL_BUTTONS[2:]
@@ -801,6 +811,52 @@ class FeatureSettingsOwner:
                           authorized=authorized, temp_prefix=".turn-assist-")
     return result.committed and result.verified
 
+  def _highway_smoothing_capability(self) -> tuple | None:
+    from openpilot.starpilot.lateral.controller_selection import turn_assist_supported
+    cp = self.vehicle_params()
+    if cp is None or not turn_assist_supported(cp):
+      return None
+    return (cp.carFingerprint, cp.lateralTuning.which(), str(cp.steerControlType), cp.passive, cp.dashcamOnly, cp.notCar,
+            tuple((str(config.safetyModel), int(config.safetyParam)) for config in cp.safetyConfigs))
+
+  def _highway_smoothing_row(self, configurable: bool) -> FeatureRow:
+    from openpilot.selfdrive.controls.lib.highway_correction_gain import KEY, MAX_SETTING, MIN_SETTING
+    capability = self._highway_smoothing_capability()
+    value, raw, valid = self._value(KEY)
+    try:
+      number = float(value)
+      valid = valid and self._readable(KEY) and math.isfinite(number) and MIN_SETTING <= number <= MAX_SETTING
+    except ValueError:
+      valid, number = False, MAX_SETTING
+    strength = (MAX_SETTING - number) * 100 / (MAX_SETTING - MIN_SETTING)
+    allowed = configurable and self.authority("torque") and capability is not None
+    return FeatureRow(KEY, "Highway Smoothing", f"{strength:.0f}" if valid else "Invalid saved value", raw,
+                      step=1.0 if valid else 0., minimum=0., maximum=100., unit="%",
+                      available=allowed and (valid or self.authority("parked_preferences") and self._readable(KEY)),
+                      repair_value="0" if not valid else "", default_value="0",
+                      vehicle_fingerprint=self.vehicle_fingerprint(), capability=capability,
+                      reason="Reduces small steering corrections on highways above about 40 mph. 0% is off; higher values add more smoothing.")
+
+  def _apply_highway_smoothing(self, request: FeatureSettingsRequest) -> bool:
+    from openpilot.selfdrive.controls.lib.highway_correction_gain import KEY, MAX_SETTING, MIN_SETTING
+    def authorized():
+      row = self._highway_smoothing_row(self.authority("preferences"))
+      return (row.available and (not row.repair_value or request.value == row.repair_value) and
+              row.capability == request.capability and row.vehicle_fingerprint == request.vehicle_fingerprint and
+              row.source == request.expected and request.related_source is None and not request.direction)
+    if not authorized():
+      return False
+    try:
+      number = float(request.value)
+    except ValueError:
+      return False
+    if not math.isfinite(number) or not 0.0 <= number <= 100.0:
+      return False
+    gain_setting = MAX_SETTING - number * (MAX_SETTING - MIN_SETTING) / 100
+    result = commit_exact(self.params, key=KEY, max_bytes=128, raw=f"{gain_setting:.8g}".encode(), expected=request.expected,
+                          authorized=authorized, temp_prefix=".highway-smoothing-")
+    return result.committed and result.verified
+
   def snapshot(self, page: str, *, parked: bool, system_long: bool, lateral_context: bool, metric: bool,
                configure_while_driving: bool = False) -> FeatureSettingsState:
     selected_vehicle = self._vehicle_params_source()
@@ -823,13 +879,18 @@ class FeatureSettingsOwner:
       title = "Data Uploads"
       rows = [self._bool_row("AlwaysAllowUploads", "Always Allow Uploads", self.authority("preferences"),
                              "Allow queued full logs and videos on metered networks. Uses mobile data.")]
+    elif page == "power":
+      title = "Power and Cooling"
+      if cooling_available():
+        rows.append(self._bool_row(AGGRESSIVE_COOLING_KEY, "Aggressive Cooling", self.authority("preferences"),
+                                   AGGRESSIVE_COOLING_DESCRIPTION))
     elif page == FeaturePage.HUB:
       rows = [FeatureRow("", "Curve Speed Controller", "Adjust how speed is reduced for curves ahead", page=FeaturePage.CURVE, available=True),
               FeatureRow("", "Speed Limit Controller", "Choose speed-limit sources, offsets, and confirmation behavior", page=FeaturePage.SLC, available=True),
               FeatureRow("", "Lane Centering", "Adjust lane positioning, lane detection, and steering alerts", page=FeaturePage.LANE, available=True),
               FeatureRow("", "Lane Changes", "Configure lane-change speed, automatic timing, and driver nudges", page=FeaturePage.LANE_CHANGE, available=True),
               FeatureRow("", "Long Planner", "Tune acceleration, braking, and following distances", page=FeaturePage.PROFILES, available=True),
-              FeatureRow("", "Conditional Driving Modes", "Choose when to switch between Chill and Experimental", page=FeaturePage.CONDITIONAL, available=True),
+              FeatureRow("", "Driving Modes", "Choose Automatic, Chill or Experimental", page=FeaturePage.CONDITIONAL, available=True),
               FeatureRow("", "Steering and Torque", "Select the steering controller and tune its response", page=FeaturePage.TORQUE, available=True),
               FeatureRow("", "Always On Lateral", "Keep steering assistance active independently of cruise control", page=FeaturePage.AOL, available=True),
               FeatureRow("", "Wheel Controls", "Assign steering-wheel buttons and cruise behavior", page=FeaturePage.WHEEL, available=True)]
@@ -854,6 +915,17 @@ class FeatureSettingsOwner:
     elif page == FeaturePage.VEHICLE:
       title = "Vehicle Settings"
       rows = list(self._alpha_long_rows(parked))
+      from openpilot.starpilot.longitudinal.drive_mode import capable as drive_mode_capable
+      if drive_mode_capable(self.vehicle_params()):
+        match_enabled, _, _ = self._value("DriveModeProfiles")
+        rows.append(self._bool_row("DriveModeProfiles", "Match Drive Mode", configurable and system_long,
+                                   reason="Eco, Normal and Sport select Eco, Standard and Sport+ acceleration with Eco, " +
+                                          "Standard and Sport deceleration, replacing the selected profiles below. Traffic Mode is unchanged."))
+        if match_enabled == "1":
+          rows.append(self._bool_row("DriveModeAcceleration", "Match Acceleration", configurable and system_long,
+                                     reason="Eco, Normal and Sport select Eco, Standard and Sport+ acceleration."))
+          rows.append(self._bool_row("DriveModeDeceleration", "Match Deceleration", configurable and system_long,
+                                     reason="Eco, Normal and Sport select Eco, Standard and Sport deceleration."))
       rows.extend(FordRearFogFeature(self).rows(parked))
       capability = self._auto_hold_capability()
       allowed = configurable and capability is not None and self.authority("vehicle")
@@ -883,7 +955,7 @@ class FeatureSettingsOwner:
       rows.extend(self.gm_truck.rows(parked))
       rows.extend(self.gm_ev_preset.rows(parked))
       rows.extend(self.volt_radar.rows())
-      rows.extend(row for row in self.panda_wake.rows(parked) if row.key != "IgnoreIgnitionLine")
+      rows.extend(self.panda_wake.rows(parked))
       pedal_capability = self._pedal_setup_capability()
       if pedal_capability is not None:
         from opendbc.car.gm.values import GMFlags
@@ -966,9 +1038,9 @@ class FeatureSettingsOwner:
                                        if valid and nostalgia in ("0", "1") else
                                        "Choose Off to repair the saved preference"),
                                capability=capability, repair_value="Off" if nostalgia not in ("0", "1") else ""))
-    elif page in (FeaturePage.CONDITIONAL, FeaturePage.CONDITIONAL_CEM, FeaturePage.CONDITIONAL_CCM):
-      title = "Conditional Driving Modes" if page == FeaturePage.CONDITIONAL else \
-              "Experimental Conditions" if page == FeaturePage.CONDITIONAL_CEM else "Chill Conditions"
+    elif page in (FeaturePage.CONDITIONAL, FeaturePage.CONDITIONAL_CEM):
+      title = "Driving Modes" if page == FeaturePage.CONDITIONAL else \
+              "Automatic Conditions"
       rows.extend(self.conditional.rows(page, parked))
     elif page == FeaturePage.CURVE:
       title = "Curve Speed Controller"
@@ -1030,6 +1102,8 @@ class FeatureSettingsOwner:
       cp = self.vehicle_params()
       if cp is not None and turn_assist_supported(cp):
         rows.append(self._turn_assist_row(configurable))
+      if self._highway_smoothing_capability() is not None:
+        rows.append(self._highway_smoothing_row(configurable))
       setup_row = self.controller.setup_row()
       if setup_row is not None:
         rows.append(setup_row)
@@ -1315,7 +1389,6 @@ class FeatureSettingsOwner:
         if page in (
             FeaturePage.CONDITIONAL,
             FeaturePage.CONDITIONAL_CEM,
-            FeaturePage.CONDITIONAL_CCM,
         ) else
         "Changes apply during this drive. Pace and trigger changes wait until the current signal and maneuver end."
         if page == FeaturePage.LANE_CHANGE else
@@ -1373,6 +1446,8 @@ class FeatureSettingsOwner:
       return FordBluePilotFeature(self).apply(request)
     if key == "TurnAssist":
       return self._apply_turn_assist(request)
+    if key == "HighwaySmoothingLevel":
+      return self._apply_highway_smoothing(request)
     if key == 'LateralControllerSelection':
       return self.controller.apply(request)
     if key == SETUP_ACTION:
@@ -1481,7 +1556,7 @@ class FeatureSettingsOwner:
       group = "long"
     elif key in BOOL_DEFAULTS or key in FLOAT_SPECS or key in (*SOURCE_PRIORITY_KEYS, *ADVANCE_KEYS, 'SLCConfirmation', PEDAL_OVERRIDE_KEY):
       source_key = key
-      long_key = (key in ("CustomPersonalities", "ForceStops", "ForceStopDistanceOffset") or "Personality" in key or
+      long_key = (key in ("CustomPersonalities", "ForceStops", "ForceStopDistanceOffset", *DRIVE_MODE_KEYS) or "Personality" in key or
                   key.endswith(("Follow", "FollowHigh")) or "Jerk" in key)
       if key in ("ShowSpeedLimits", "AlwaysAllowUploads", *SOURCE_PRIORITY_KEYS) or (key == "ForceStops" and request.value == "Off"):
         group = "preferences"
@@ -1788,101 +1863,4 @@ class FeatureSettingsOwner:
     return result.committed and result.verified
 
   def _edit_document(self, key: str, value: str, *, seed_capability: tuple | None = None) -> str | None:
-    parts = key.split(":")
-    if key == "profile:stopped_gap":
-      document, _, valid = self._document()
-      if not valid:
-        return None
-      if document is None:
-        document = profile_document(default_personality_profiles(False, is_truck_fingerprint(self.vehicle_fingerprint())), enabled=False)
-      gap = float(value) * (1.0 if self._value("IsMetric")[0] == "1" else 0.3048)
-      if not math.isfinite(gap) or not 0. <= gap <= MAX_EXTRA_STOPPED_GAP_M:
-        return None
-      document["extraStoppedGapM"] = round(gap, 6)
-      return json.dumps(document, separators=(",", ":"), sort_keys=True, allow_nan=False)
-    if key in ('profile:global_acceleration', 'profile:global_braking'):
-      category = 'acceleration' if key.endswith('acceleration') else 'braking'
-      selected = preset_value(value) if type(value) is str else None
-      choices = ('dom_default', 'standard', 'eco', 'sport', 'sport_plus') if category == 'acceleration' else ('dom_default', 'standard', 'eco', 'sport')
-      if selected not in choices:
-        return None
-      document, _, valid = self._document()
-      if not valid:
-        return None
-      fingerprint = self.vehicle_fingerprint()
-      if not fingerprint:
-        return None
-      truck = is_truck_fingerprint(fingerprint)
-      profiles = document['profiles'] if document is not None else default_personality_profiles(False, truck)
-      acceleration = document['selectedAccelerationProfile'] if document is not None else 'dom_default'
-      braking = document['selectedDecelerationProfile'] if document is not None else DEFAULT_DECELERATION_PROFILE
-      return serialize_personality_profiles(profiles, False, truck, enabled=document['enabled'] if document is not None else False,
-                                            selected_acceleration_profile=selected if category == 'acceleration' else acceleration,
-                                            selected_deceleration_profile=selected if category == 'braking' else braking,
-                                            extra_stopped_gap_m=document.get("extraStoppedGapM", 0.) if document is not None else 0.)
-    if len(parts) not in (3, 4) or parts[1] not in DOCUMENT_PROFILE_NAMES or parts[2] not in PRESETS:
-      return None
-    fingerprint = self.vehicle_fingerprint()
-    if not fingerprint:
-      return None
-    document, _, valid = self._document()
-    if not valid:
-      return None
-    name, category = parts[1], parts[2]
-    cp = self.vehicle_params() if name == "traffic" else None
-    ev = (bool(cp is not None and getattr(cp, "transmissionType", None) == car.CarParams.TransmissionType.direct)
-          if name == "traffic" else
-          seed_capability is not None and seed_capability[1] == car.CarParams.TransmissionType.direct)
-    truck = is_truck_fingerprint(fingerprint) and not ev if name == "traffic" or seed_capability is not None else is_truck_fingerprint(fingerprint)
-    profiles = document["profiles"] if document is not None else default_personality_profiles(ev, truck)
-    config = profiles[name][category]
-    seed_config = config
-    if config['preset'] == 'selected_profile':
-      selected = (document['selectedAccelerationProfile' if category == 'acceleration' else 'selectedDecelerationProfile']
-                  if document is not None else ('dom_default' if category == 'acceleration' else DEFAULT_DECELERATION_PROFILE))
-      seed_config = {'preset': selected, 'curve': config['curve']}
-    if len(parts) == 3:
-      value = preset_value(value)
-      if value not in PRESETS[category]:
-        return None
-      reference = None
-      if seed_config["preset"] == "dom_default":
-        if name == "traffic":
-          if category == "acceleration":
-            reference = [round(interpolate_accel_profile(speed * MPH_TO_MPS, A_CRUISE_MAX_VALS_TRAFFIC_ALL), 4)
-                         for speed in ACCELERATION_SPEEDS_MPH]
-          elif category == "braking":
-            reference = [round(TRAFFIC_CRUISE_BRAKE_MAGNITUDE, 4)] * len(ACCELERATION_SPEEDS_MPH)
-          else:
-            source = dict(self.traffic_profiles._sources()[0])
-            low, low_valid = self.traffic_profiles._value("TrafficFollow", source["TrafficFollow"])
-            high, high_valid = self.traffic_profiles._value("RelaxedFollow", source["RelaxedFollow"])
-            if not low_valid or not high_valid or low is None or high is None:
-              return None
-            reference = [round(low + (high - low) * min(speed * MPH_TO_MPS / 25.0, 1.0), 4)
-                         for speed in FOLLOWING_SPEEDS_MPH]
-        else:
-          low, high = CURVE_BOUNDS[category]
-          reference = [round(max(low, min(high, point)), 4)
-                       for point in personality_reference_curves(ev, truck)[name][category]]
-      if config['preset'] == 'selected_profile' and category == 'braking' and seed_config['preset'] != 'dom_default' and not config['curve']:
-        magnitude = {'standard': 1.2, 'eco': 0.6, 'sport': 2.4}[seed_config['preset']]
-        curve = [min(magnitude, CURVE_BOUNDS['braking'][1])] * len(ACCELERATION_SPEEDS_MPH) if value == 'custom' else []
-      else:
-        curve = initial_custom_curve(category, seed_config, ev, truck, legacy_curve=reference) if value == "custom" else []
-      updated = update_personality_profile(profiles, name, category, value, curve, ev, truck)
-    else:
-      if config["preset"] != "custom":
-        return None
-      index = int(parts[3])
-      if not 0 <= index < 10:
-        return None
-      curve = list(config["curve"])
-      curve[index] = float(value)
-      updated = update_personality_profile(profiles, name, category, "custom", curve, ev, truck)
-    enabled, _, _ = self._value("CustomPersonalities")
-    return serialize_personality_profiles(updated, ev, truck, enabled=enabled == "1",
-                                          selected_acceleration_profile=document["selectedAccelerationProfile"] if document is not None else "dom_default",
-                                          selected_deceleration_profile=(document["selectedDecelerationProfile"] if document is not None
-                                                                         else DEFAULT_DECELERATION_PROFILE),
-                                          extra_stopped_gap_m=document.get("extraStoppedGapM", 0.) if document is not None else 0.)
+    return edit_document(self, key, value, seed_capability=seed_capability)

@@ -300,6 +300,10 @@ class BlinkerTurn:
     return Decision(False, 'map: no road there, waiting for a nudge' if lookup.map_known
                     else 'no map here, waiting for a nudge')
 
+  def restart_signal(self) -> None:
+    """A lane change on this blinker just ended (into the turn lane): count the signal distance from here."""
+    self.signal_m = 0.0
+
   def _nudge_or_wait(self, heading, nudged, reason) -> Decision:
     return self._start(heading, 'nudge', None) if nudged else Decision(False, reason)
 

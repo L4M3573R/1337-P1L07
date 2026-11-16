@@ -36,6 +36,17 @@ need native libraries) and pass when run directly with the venv:
 - `selfdrive/ui/tests/test_camera_speed_gates.py::test_connection_retries_advance_when_recorded_clock_is_frozen_or_rewound`
   (2), `starpilot/ui/tests/test_laboratory_home.py`, `test_settings_actions.py` compact targets, and
   `starpilot/replay/tests/test_export.py` (needs `libmedia_mux.so`) under `./dev` (2026-11-15, failing on HEAD too)
+- `starpilot/models/tests/test_modeld_startup_fallback.py::test_jetlink_gets_the_frames_delay_before_every_run`: upstream
+  added `+ volkswagen_tau` to modeld's `lat_delay` line without updating this AST test (fails on pristine Dom, 2026-11-16)
+- `selfdrive/controls/tests/test_conditional_runtime_loop.py::...test_automatic_chill_ignores_retired_slc_modes_but_keeps_native_radar_veto`
+  ('no_trigger' != 'ccm_speed'): fails on pristine Dom too (2026-11-16)
+- `scripts/check_1337.py --tests` runs through `toolbox run -c op-ubuntu`, which only the laptop has; on the PC run the
+  feature tests with `./dev pytest` directly (2026-11-16)
+
+### Schema notes
+- `StarPilotLongitudinalPlan` (`custom.capnp`): upstream took `@7`/`@8` for `departureAlertKind`/`departureAlertMonoTime`,
+  so the 2026-11-16 merge moved the 1337 Pulse and Glide and CEM stop fields from `@7`-`@20` to `@9`-`@22` (Cap'n Proto
+  allows no gaps). Code reads them by name; logs recorded before that merge decode those fields wrong.
 
 ## Features
 
@@ -83,6 +94,14 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   under 15 %, road edge on that side under 1 m std and within 2.5 m of the lane line over 30 m), `desire_helper.py`
   (`no_lane`: neither a nudge nor auto starts the change), `modeld.py`. Replayed on the 36 lane changes of 2026-11-14/15:
   blocks 9, all turns signalled above 20 mph or the on-ramp cut, none of the 27 real lane changes.
+- **Early turn slowdown** (2026-11-16): `intent._approach`. Signalled at 20-45 mph (`APPROACH_MAX_MPH`), the mapped road
+  ahead goes to turn speed early enough to ease down to the learned speed (36 mph to 9 mph needs ~120 m), only when the
+  blinker can only mean a turn: no lane that side (modeld passes `lane_clearly_absent` as `no_lane_side`) or a lane change
+  toward it just finished on this blinker (`BlinkerTurn.restart_signal`). Never during a lane change; map answers older
+  than 3 s are ignored; the 150 m signal limit applies. Logs `approach_reason`.
+- **Parking-lot EPS test switch** (2026-11-16): `hyundai/carcontroller.eps_test_max_angle`: `/data/starpilot/eps_test.json`
+  {"max_angle": deg} moves the >90 degree cut-out (stock 85 deg after 89 frames) for that drive. Test only; remove the
+  file after the test. The test pattern itself is a script run over SSH with JoystickDebugMode, not in the repo.
 - **Turn yield** (2026-11-16): `starpilot/lateral/turn_yield.py`, `controlsd._turn_yielding`. Below 20 mph with one
   blinker, while the driver steers toward it, the lateral controller runs inactive (no torque, state reset; latActive
   stays true) and takes back over 0.3 s after release; logs `turn_yield` changes. The controller had pushed back at full

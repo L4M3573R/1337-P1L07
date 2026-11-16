@@ -106,6 +106,9 @@ def matching_turn_signal(sm, now_ns: int, *, supported: bool) -> bool:
               0 <= instruction.distanceMeters <= min(250., max(30., 15. + max(0., cs.vEgo) * 12.)))
 
 
+APPROACH_MAX_MPH = 45.0  # signalled above this, nothing is planned for a turn yet
+
+
 class TurnIntent:
   def __init__(self, params=None, cp=None):
     from openpilot.starpilot.lateral.auto_lane_change import steering_capable
@@ -113,7 +116,11 @@ class TurnIntent:
     self.guidance = LiveLaneChangePolicy(params) if params is not None else None
     self.steering_capable = steering_capable(cp)
     self.signal_stop_hold = False
-    self.signal_stop_seen_ns = 0
+    self.signal_stop_completed = False
+    self.no_lane_side = 0  # -1 left / 1 right: modeld's lane_clearly_absent for the blinker side, last frame
+    self.approach_lane_change = False  # a lane change is running on this blinker
+    self.approach_turn_lane = False  # one finished on this blinker: now in the lane the turn leaves from
+    self.approach_reason = ''
     self.key = None
     self.stop_hold = False
     # Decision log for remote review: where this frame's turn desire came from, or what held it back.
@@ -133,6 +140,52 @@ class TurnIntent:
       from openpilot.starpilot.navigation.blinker_turns import mode
       self._mode, self._mode_read_ns = mode(), now_ns
     return self._mode
+
+  def _approach(self, sm, now_ns: int, cs, current_desire) -> None:
+    """Above the turn cutoff with the blinker on: publish the mapped road ahead to plannerd's turn speed early enough to
+    ease down to the turn speed (36 mph to 9 mph takes about 120 m at turn_speed.TURN_DECEL), but only when the blinker
+    can only mean a turn: no lane on that side (modeld's lane_clearly_absent), or a lane change toward it has just
+    finished on this blinker (into the turn lane). Never while a lane change is running. 2026-11-16: signalled at 36 mph,
+    the turn logic woke below 20 mph with the road 21 m away and the car entered the turn at 18 mph."""
+    from openpilot.starpilot.gps.source import select_source
+    from openpilot.starpilot.navigation.blinker_turns import LOOKUP_MAX_AGE_S, SIGNAL_AHEAD_M
+    side = 'left' if cs.leftBlinker else 'right'
+    lane_change = current_desire in (log.Desire.laneChangeLeft, log.Desire.laneChangeRight)
+    if lane_change:
+      self.approach_lane_change = True
+    elif self.approach_lane_change:
+      self.approach_lane_change, self.approach_turn_lane = False, True
+      self.blinker_turn.restart_signal()
+    fix = select_source(sm, now_ns)
+    heading = lookup = None
+    if fix is not None:
+      gps = fix[1][1]
+      if math.isfinite(gps.bearingDeg) and gps.speed > 1.0:
+        heading = float(gps.bearingDeg)
+        self.map_finder.request(gps.latitude, gps.longitude, heading, side)
+      lookup = self.map_finder.latest(side)
+    # keeps the signal distance and the heading at the blinker counting; above the cutoff it never turns
+    self.blinker_turn.update(now_ns / 1e9, side, cs.vEgo, heading, lookup, False, lead=_following(sm))
+    fresh = lookup is not None and 0.0 <= now_ns / 1e9 - lookup.t <= LOOKUP_MAX_AGE_S
+    road = lookup.road if fresh else None
+    distance = None
+    if lane_change:
+      self.approach_reason = 'lane change under way'
+    elif not (self.no_lane_side == (-1 if side == 'left' else 1) or self.approach_turn_lane):
+      self.approach_reason = 'a lane on that side: may be a lane change'
+    elif road is None:
+      self.approach_reason = 'no mapped road on that side'
+    else:
+      distance = road.distance_m - max(0.0, cs.vEgo) * max(0.0, now_ns / 1e9 - lookup.t)
+      if self.blinker_turn.signal_m + distance > SIGNAL_AHEAD_M:
+        distance, self.approach_reason = None, 'mapped road too far for this blinker'
+      else:
+        self.approach_reason = 'slowing for the mapped road'
+    if now_ns - getattr(self, '_turn_status_ns', 0) >= 100_000_000:
+      self._turn_status_ns = now_ns
+      from openpilot.starpilot.navigation.turn_speed import write_status
+      write_status({'t': now_ns / 1e9, 'side': side, 'turning': False, 'distance_m': distance,
+                    'angle_deg': float(road.angle_deg) if distance is not None else None})
 
   def _timed_turn(self, sm, now_ns: int, cs) -> bool:
     """Map/nudge timing: True once the turn should start (and while it is in progress)."""
@@ -204,34 +257,43 @@ class TurnIntent:
       signaling = bool(cs.leftBlinker or cs.rightBlinker)
       policy = self.guidance.sample(now_ns, signaling=signaling,
                                     maneuver_active=current_desire != log.Desire.none)
-      # StarPilot turn desires: once a stop is predicted short of the turn, hold the turn until the
-      # car stops (a stopped car's planner keeps reporting shouldStop) or the blinker turns off.
+      # StarPilot turn desires: once a stop is predicted short of the turn, hold the turn until that stop is completed
+      # (upstream: released once the stop request clears after a standstill) or the blinker turns off.
       stop_predicted = bool(model_stop or plan.shouldStop)
       turn_mode = self._turn_mode(now_ns)
       timed = turn_mode == 'map'
       if not signaling:
         self.blinker_turn.update(now_ns / 1e9, None, cs.vEgo, None, None, False)
         self.shadow_turning, self.shadow_reason, self.shadow_start_m = False, '', None
+        self.approach_lane_change = self.approach_turn_lane = False
+        self.approach_reason = ''
+      elif (timed and cs.leftBlinker != cs.rightBlinker and cc.latActive and str(cs.gearShifter) == 'drive' and
+            math.isfinite(cs.vEgo) and 20 * CV.MPH_TO_MS <= cs.vEgo < APPROACH_MAX_MPH * CV.MPH_TO_MS):
+        try:
+          self._approach(sm, now_ns, cs, current_desire)
+        except (KeyError, AttributeError, TypeError, ValueError) as e:  # slowing early is a nicety; never cost the turn
+          from openpilot.starpilot.diagnostics.features import log_error
+          log_error('turn_intent', e, where='approach')
       elif turn_mode == 'shadow' and cs.leftBlinker != cs.rightBlinker:
-        self._timed_turn(sm, now_ns, cs)  # decide and log only, on every blinker use; the old behavior still steers
+        try:
+          self._timed_turn(sm, now_ns, cs)  # decide and log only, on every blinker use; the old behavior still steers
+        except (KeyError, AttributeError, TypeError, ValueError) as e:  # a shadow log must never cost the turn itself
+          from openpilot.starpilot.diagnostics.features import log_error
+          log_error('turn_intent', e, where='shadow')
       if timed:
         stop_predicted = False  # the turn waits for the road itself, so a predicted stop needs no extra hold
-      if not signaling or cs.standstill:
-        self.signal_stop_hold = False
-      elif stop_predicted:
-        self.signal_stop_hold = True
-        self.signal_stop_seen_ns = now_ns
-      # The first gate that fails is logged (blockedBy) when exactly one blinker is on.
+      # The first gate that fails is logged (blockedBy) when exactly one blinker is on. Standstill, the stop hold and
+      # the low speed bound come after the freshness checks, so only fresh, valid messages can complete a stop.
       gates = (('unsupported model', not supported), ('car cannot steer', not self.steering_capable),
                ('guidance off', not policy.turn_signal_guidance),
-               # Below the cutoff the turn wins over a queued or running lane change (as in sunnypilot); only an
-               # existing turn is kept as it is.
-               ('other maneuver', current_desire not in (log.Desire.none, log.Desire.laneChangeLeft, log.Desire.laneChangeRight)),
-               ('stop predicted', self.signal_stop_hold), ('steering inactive', not cc.latActive),
+               # Below the cutoff the turn wins over a queued or running lane change toward the blinker (as in
+               # sunnypilot); any other maneuver already under way is kept as it is.
+               ('other maneuver', current_desire not in (log.Desire.none, log.Desire.laneChangeLeft if cs.leftBlinker else
+                                                         log.Desire.laneChangeRight)),
+               ('steering inactive', not cc.latActive),
                ('CAN invalid', not cs.canValid or cs.canTimeout), ('not in drive', str(cs.gearShifter) != 'drive'),
-               ('standstill', cs.standstill),
-               ('speed outside 0.1-20 mph', not math.isfinite(cs.vEgo) or not 0.1 < cs.vEgo < 20 * CV.MPH_TO_MS),
-               ('no single blinker', cs.leftBlinker == cs.rightBlinker), ('not started', not device.started))
+               ('speed outside 0.1-20 mph', not math.isfinite(cs.vEgo) or not cs.vEgo < 20 * CV.MPH_TO_MS),
+               ('not started', not device.started))
       blocked = next((name for name, failed in gates if failed), None)
       if blocked is not None:
         self.blocked_by = blocked if cs.leftBlinker != cs.rightBlinker else ''
@@ -245,6 +307,22 @@ class TurnIntent:
           return current_desire
       if not device.startedMonoTime <= plan.modelMonoTime <= sm.logMonoTime['longitudinalPlan']:
         self.blocked_by = 'stale plan'
+        return current_desire
+      if not signaling:
+        self.signal_stop_hold = self.signal_stop_completed = False
+      elif cs.standstill:
+        self.signal_stop_hold = False
+        self.signal_stop_completed = True
+      elif stop_predicted:
+        self.signal_stop_hold = True
+      elif self.signal_stop_completed:
+        # A completed stop may release after its final planner sample clears.
+        self.signal_stop_hold = self.signal_stop_completed = False
+      late_gates = (('stop predicted', self.signal_stop_hold), ('standstill', cs.standstill),
+                    ('speed outside 0.1-20 mph', cs.vEgo <= 0.1), ('no single blinker', cs.leftBlinker == cs.rightBlinker))
+      blocked = next((name for name, failed in late_gates if failed), None)
+      if blocked is not None:
+        self.blocked_by = blocked if cs.leftBlinker != cs.rightBlinker else ''
         return current_desire
       if (cs.leftBlinker and cs.leftBlindspot) or (cs.rightBlinker and cs.rightBlindspot):
         self.blocked_by = 'blind spot'

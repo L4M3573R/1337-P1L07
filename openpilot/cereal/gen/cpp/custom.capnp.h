@@ -739,7 +739,7 @@ struct StarPilotLongitudinalPlan {
 
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(da96579883444c35, 8, 1)
+    CAPNP_DECLARE_STRUCT_HEADER(da96579883444c35, 9, 1)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -4312,6 +4312,10 @@ public:
 
   inline  ::uint64_t getForceStopEpisodeMonoTime() const;
 
+  inline  ::uint8_t getDepartureAlertKind() const;
+
+  inline  ::uint64_t getDepartureAlertMonoTime() const;
+
   inline bool getPulseGlideEnabled() const;
 
   inline  ::cereal::StarPilotLongitudinalPlan::PulseGlidePhase getPulseGlidePhase() const;
@@ -4389,6 +4393,12 @@ public:
 
   inline  ::uint64_t getForceStopEpisodeMonoTime();
   inline void setForceStopEpisodeMonoTime( ::uint64_t value);
+
+  inline  ::uint8_t getDepartureAlertKind();
+  inline void setDepartureAlertKind( ::uint8_t value);
+
+  inline  ::uint64_t getDepartureAlertMonoTime();
+  inline void setDepartureAlertMonoTime( ::uint64_t value);
 
   inline bool getPulseGlideEnabled();
   inline void setPulseGlideEnabled(bool value);
@@ -19081,6 +19091,34 @@ inline void StarPilotLongitudinalPlan::Builder::setForceStopEpisodeMonoTime( ::u
       ::capnp::bounded<4>() * ::capnp::ELEMENTS, value);
 }
 
+inline  ::uint8_t StarPilotLongitudinalPlan::Reader::getDepartureAlertKind() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t StarPilotLongitudinalPlan::Builder::getDepartureAlertKind() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setDepartureAlertKind( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint64_t StarPilotLongitudinalPlan::Reader::getDepartureAlertMonoTime() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t StarPilotLongitudinalPlan::Builder::getDepartureAlertMonoTime() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setDepartureAlertMonoTime( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<5>() * ::capnp::ELEMENTS, value);
+}
+
 inline bool StarPilotLongitudinalPlan::Reader::getPulseGlideEnabled() const {
   return _reader.getDataField<bool>(
       ::capnp::bounded<18>() * ::capnp::ELEMENTS);
@@ -19111,58 +19149,58 @@ inline void StarPilotLongitudinalPlan::Builder::setPulseGlidePhase( ::cereal::St
 
 inline float StarPilotLongitudinalPlan::Reader::getPulseGlideAccelTarget() const {
   return _reader.getDataField<float>(
-      ::capnp::bounded<10>() * ::capnp::ELEMENTS);
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
 }
 
 inline float StarPilotLongitudinalPlan::Builder::getPulseGlideAccelTarget() {
   return _builder.getDataField<float>(
-      ::capnp::bounded<10>() * ::capnp::ELEMENTS);
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
 }
 inline void StarPilotLongitudinalPlan::Builder::setPulseGlideAccelTarget(float value) {
-  _builder.setDataField<float>(
-      ::capnp::bounded<10>() * ::capnp::ELEMENTS, value);
-}
-
-inline float StarPilotLongitudinalPlan::Reader::getPulseGlideBandTop() const {
-  return _reader.getDataField<float>(
-      ::capnp::bounded<11>() * ::capnp::ELEMENTS);
-}
-
-inline float StarPilotLongitudinalPlan::Builder::getPulseGlideBandTop() {
-  return _builder.getDataField<float>(
-      ::capnp::bounded<11>() * ::capnp::ELEMENTS);
-}
-inline void StarPilotLongitudinalPlan::Builder::setPulseGlideBandTop(float value) {
-  _builder.setDataField<float>(
-      ::capnp::bounded<11>() * ::capnp::ELEMENTS, value);
-}
-
-inline float StarPilotLongitudinalPlan::Reader::getPulseGlideBandBottom() const {
-  return _reader.getDataField<float>(
-      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
-}
-
-inline float StarPilotLongitudinalPlan::Builder::getPulseGlideBandBottom() {
-  return _builder.getDataField<float>(
-      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
-}
-inline void StarPilotLongitudinalPlan::Builder::setPulseGlideBandBottom(float value) {
   _builder.setDataField<float>(
       ::capnp::bounded<12>() * ::capnp::ELEMENTS, value);
 }
 
-inline float StarPilotLongitudinalPlan::Reader::getPulseGlideClusterRatio() const {
+inline float StarPilotLongitudinalPlan::Reader::getPulseGlideBandTop() const {
   return _reader.getDataField<float>(
       ::capnp::bounded<13>() * ::capnp::ELEMENTS);
 }
 
-inline float StarPilotLongitudinalPlan::Builder::getPulseGlideClusterRatio() {
+inline float StarPilotLongitudinalPlan::Builder::getPulseGlideBandTop() {
   return _builder.getDataField<float>(
       ::capnp::bounded<13>() * ::capnp::ELEMENTS);
 }
-inline void StarPilotLongitudinalPlan::Builder::setPulseGlideClusterRatio(float value) {
+inline void StarPilotLongitudinalPlan::Builder::setPulseGlideBandTop(float value) {
   _builder.setDataField<float>(
       ::capnp::bounded<13>() * ::capnp::ELEMENTS, value);
+}
+
+inline float StarPilotLongitudinalPlan::Reader::getPulseGlideBandBottom() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<14>() * ::capnp::ELEMENTS);
+}
+
+inline float StarPilotLongitudinalPlan::Builder::getPulseGlideBandBottom() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<14>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setPulseGlideBandBottom(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<14>() * ::capnp::ELEMENTS, value);
+}
+
+inline float StarPilotLongitudinalPlan::Reader::getPulseGlideClusterRatio() const {
+  return _reader.getDataField<float>(
+      ::capnp::bounded<15>() * ::capnp::ELEMENTS);
+}
+
+inline float StarPilotLongitudinalPlan::Builder::getPulseGlideClusterRatio() {
+  return _builder.getDataField<float>(
+      ::capnp::bounded<15>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotLongitudinalPlan::Builder::setPulseGlideClusterRatio(float value) {
+  _builder.setDataField<float>(
+      ::capnp::bounded<15>() * ::capnp::ELEMENTS, value);
 }
 
 inline bool StarPilotLongitudinalPlan::Reader::getPulseGlideHillPaused() const {
@@ -19271,30 +19309,30 @@ inline ::capnp::Orphan< ::capnp::Text> StarPilotLongitudinalPlan::Builder::disow
 
 inline float StarPilotLongitudinalPlan::Reader::getCemLightFilter() const {
   return _reader.getDataField<float>(
-      ::capnp::bounded<14>() * ::capnp::ELEMENTS);
+      ::capnp::bounded<16>() * ::capnp::ELEMENTS);
 }
 
 inline float StarPilotLongitudinalPlan::Builder::getCemLightFilter() {
   return _builder.getDataField<float>(
-      ::capnp::bounded<14>() * ::capnp::ELEMENTS);
+      ::capnp::bounded<16>() * ::capnp::ELEMENTS);
 }
 inline void StarPilotLongitudinalPlan::Builder::setCemLightFilter(float value) {
   _builder.setDataField<float>(
-      ::capnp::bounded<14>() * ::capnp::ELEMENTS, value);
+      ::capnp::bounded<16>() * ::capnp::ELEMENTS, value);
 }
 
 inline bool StarPilotLongitudinalPlan::Reader::getCemStopCommitted() const {
   return _reader.getDataField<bool>(
-      ::capnp::bounded<24>() * ::capnp::ELEMENTS);
+      ::capnp::bounded<48>() * ::capnp::ELEMENTS);
 }
 
 inline bool StarPilotLongitudinalPlan::Builder::getCemStopCommitted() {
   return _builder.getDataField<bool>(
-      ::capnp::bounded<24>() * ::capnp::ELEMENTS);
+      ::capnp::bounded<48>() * ::capnp::ELEMENTS);
 }
 inline void StarPilotLongitudinalPlan::Builder::setCemStopCommitted(bool value) {
   _builder.setDataField<bool>(
-      ::capnp::bounded<24>() * ::capnp::ELEMENTS, value);
+      ::capnp::bounded<48>() * ::capnp::ELEMENTS, value);
 }
 
 inline bool SlcState::Reader::hasSlotId() const {

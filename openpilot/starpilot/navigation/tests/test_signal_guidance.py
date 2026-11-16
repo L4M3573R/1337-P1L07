@@ -56,10 +56,11 @@ def test_global_direction_and_model_selection(case, brand):
   assert select(owner, sm, log.Desire.turnLeft) == log.Desire.turnLeft  # an existing turn is kept
 
 
-@pytest.mark.parametrize('lane_change', [log.Desire.laneChangeLeft, log.Desire.laneChangeRight])
-def test_turn_wins_over_a_lane_change_below_the_cutoff(case, lane_change):
+def test_turn_wins_over_a_lane_change_below_the_cutoff(case):
   params, cp, sm = case
   owner = TurnIntent(params, cp)
+  lane_change = log.Desire.laneChangeLeft
+  assert select(owner, sm, log.Desire.laneChangeRight) == log.Desire.laneChangeRight  # one the other way finishes first
   assert select(owner, sm, lane_change) == log.Desire.turnLeft  # left blinker at 11 mph
   sm['carState'].vEgo = 10.  # 22 mph: above the cutoff the lane change stands
   assert select(owner, sm, lane_change) == lane_change

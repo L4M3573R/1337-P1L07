@@ -209,7 +209,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
 
   def context_source(params):
     from openpilot.starpilot.galaxy.settings import LiveContextSource
-    return LiveContextSource(params, messages=evidence_source, evidence_wait_ms=0) if evidence_source is not None else LiveContextSource(params)
+    return LiveContextSource(params, messages=evidence_source) if evidence_source is not None else LiveContextSource(params)
 
   if parked is None:
     from openpilot.common.params import Params
@@ -235,6 +235,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
   models_lock = threading.Lock()
   settings_gateway = settings
   recovery_gateway = None
+  flm_backup_gateway = None
   vehicle_gateway = vehicle_selection
   toyota_source = toyota_tools
   model_source = models
@@ -490,6 +491,15 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
         from openpilot.starpilot.galaxy.defaults_recovery import DefaultsRecovery
         recovery_gateway = DefaultsRecovery(gateway)
       return recovery_gateway
+
+  def flm_backups():
+    nonlocal flm_backup_gateway
+    gateway = feature_settings()
+    with settings_lock:
+      if flm_backup_gateway is None:
+        from openpilot.starpilot.galaxy.flm_backup import FlmBackup
+        flm_backup_gateway = FlmBackup(gateway)
+      return flm_backup_gateway
 
   def toyota_owner():
     nonlocal toyota_source
@@ -1011,15 +1021,19 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
           self.json(400, {'error': 'Invalid map tile'})
           return
         try:
-          query = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=1)
-          theme = query.get('theme', ['light'])[0]
-          if set(query) - {'theme'} or theme not in ('light', 'dark'):
+          query = parse_qs(urlsplit(self.path).query, keep_blank_values=True, max_num_fields=2)
+          theme = query.get('theme', ['light'])
+          provider = query.get('provider', ['mapbox'])
+          if (set(query) - {'theme', 'provider'} or len(theme) != 1 or theme[0] not in ('light', 'dark') or
+              len(provider) != 1 or provider[0] not in ('mapbox', 'google')):
             raise ValueError('Invalid map theme')
         except ValueError:
           self.json(400, {'error': 'Invalid map theme'})
           return
         try:
-          tile = navigation_owner().map_tile(*(int(value) for value in match.groups()), theme)
+          coords = (int(value) for value in match.groups())
+          tile = (navigation_owner().map_tile(*coords, theme[0], provider='google')
+                  if provider[0] == 'google' else navigation_owner().map_tile(*coords, theme[0]))
         except (OSError, ValueError, RuntimeError):
           self.json(503, {'error': 'Map tiles are unavailable'})
         else:
@@ -1051,13 +1065,19 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
         else:
           if self.require_session():
             self.json(200, result)
-      elif path == '/api/software/status':
+      elif path in ('/api/software/status', '/api/update/fast/status'):
         identity = self.settings_session()
         if identity is None:
           if not self.require_session():
             return
         try:
-          result = software_snapshot(include_history=parse_qs(urlsplit(self.path).query).get('history') != ['0'])
+          if path == '/api/update/fast/status':
+            installed = (software_source if software_source is not None else SoftwareStatus()).snapshot()['installed']
+            result = {'branch': installed['branch'], 'localCommit': installed['commit'],
+                      'running': False, 'stage': 'updated', 'updateAvailable': False,
+                      'message': 'Galaxy has been upgraded. Reload this page, or close and reopen the Galaxy app, to load the new interface.'}
+          else:
+            result = software_snapshot(include_history=parse_qs(urlsplit(self.path).query).get('history') != ['0'])
         except (SoftwareUnavailable, SoftwareOperationError, OSError):
           self.json(503, {'error': 'Software status is unavailable'})
         else:
@@ -1345,6 +1365,34 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
         else:
           if self.require_session():
             self.json(200, result)
+      elif path == '/api/flm/backup':
+        if not self.require_session():
+          return
+        identity = self.settings_session()
+        if urlsplit(self.path).query:
+          self.json(400, {'error': 'Unexpected tune backup query'})
+          return
+        from openpilot.starpilot.galaxy.flm_backup import BackupRefused
+        try:
+          result = flm_backups().export()
+        except (SettingsChanged, BackupRefused) as error:
+          self.json(409, {'error': str(error)})
+        except (SettingsUnavailable, OSError, RuntimeError, ValueError):
+          self.json(503, {'error': 'Tune backup is unavailable'})
+        else:
+          if self.settings_session() == identity:
+            self.attachment('starpilot-flm-tune.json', json.dumps(result, indent=2).encode(), 'application/json; charset=utf-8')
+          else:
+            self.json(401, {'error': 'Sign in to Galaxy'})
+      elif path == '/api/flm/logs/download':
+        if not self.require_session():
+          return
+        if urlsplit(self.path).query:
+          self.json(400, {'error': 'Unexpected FLM log query'})
+          return
+        filename, body = training_results_source.download()
+        if self.require_session():
+          self.attachment(filename, body, 'application/json; charset=utf-8')
       elif path == '/api/flm/training-results':
         if not self.require_session():
           return
@@ -1654,6 +1702,7 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
       if path not in ('/api/companion/uplink', '/api/companion/settings', '/api/companion/location',
                       '/api/connect/proxy', '/api/connect/provider', '/api/auth/login', '/api/auth/logout', '/api/settings/preview', '/api/settings/confirm',
                       '/api/settings/recovery/preview', '/api/settings/recovery/confirm',
+                      '/api/settings/flm-backup/preview', '/api/settings/flm-backup/confirm',
                       '/api/settings/reset-default', '/api/settings/restore', '/api/recordings/action',
                       '/api/replay/start', '/api/replay/control', '/api/replay/stop',
                       '/api/replay/export-start',
@@ -1690,7 +1739,8 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
         size = int(self.headers.get('Content-Length', ''))
       except ValueError:
         size = -1
-      max_size = 256 * 1024 if path == '/api/settings/restore' else 17408 if path in ('/api/ui/layout', '/api/ui/layout/preview') else 4096
+      max_size = (256 * 1024 if path == '/api/settings/restore' else 66 * 1024 if path == '/api/settings/flm-backup/preview' else
+                  17408 if path in ('/api/ui/layout', '/api/ui/layout/preview') else 4096)
       if not 0 < size <= max_size:
         self.json(413, {'error': 'Invalid request size'})
         return
@@ -1706,6 +1756,32 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
         payload = json.loads(self.rfile.read(size), object_pairs_hook=unique_object)
       except (ValueError, UnicodeError, RecursionError):
         self.json(400, {'error': 'Invalid request'})
+        return
+      if path in ('/api/settings/flm-backup/preview', '/api/settings/flm-backup/confirm'):
+        identity = self.settings_session()
+        if identity is None:
+          self.json(401, {'error': 'Sign in to Galaxy'})
+          return
+        from openpilot.starpilot.galaxy.flm_backup import BackupRefused
+        try:
+          def authorized():
+            return self.settings_session() == identity
+          if path.endswith('/preview'):
+            if type(payload) is not dict or set(payload) != {'backup', 'mode'}:
+              raise BackupRefused('Invalid restore preview.')
+            result = flm_backups().preview(payload['backup'], payload['mode'], identity, authorized=authorized)
+          else:
+            if (type(payload) is not dict or set(payload) != {'intent', 'confirmed'} or
+                type(payload['intent']) is not str or len(payload['intent']) > 64 or payload['confirmed'] is not True):
+              raise BackupRefused('Confirm the restore preview first.')
+            with effect_lock:
+              result = flm_backups().confirm(payload['intent'], identity, authorized=authorized)
+        except (SettingsChanged, BackupRefused) as error:
+          self.json(409 if authorized() else 401, {'error': str(error) if authorized() else 'Sign in to Galaxy'})
+        except (SettingsUnavailable, OSError, RuntimeError, ValueError, TypeError):
+          self.json(503, {'error': 'Tune restore is unavailable. Refresh the saved tune before retrying.'})
+        else:
+          self.json(200 if authorized() else 401, result if authorized() else {'error': 'Sign in to Galaxy'})
         return
       if path.startswith('/api/replay/'):
         replay_api.post(self, path, payload)
@@ -1888,28 +1964,38 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
               raise ValidationError('Enter a destination to search')
             if 'autocomplete' in payload and payload['autocomplete'] is not True:
               raise ValidationError('Enter a destination to search')
-            result = {'results': (navigation_owner().search_places(payload['query'], identity, payload['searchId'], payload['clientId'],
-                                                                   autocomplete='autocomplete' in payload)
-                                  if 'searchId' in payload else navigation_owner().search(payload['query']))}
+            results = (navigation_owner().search_places(payload['query'], identity, payload['searchId'], payload['clientId'],
+                                                        autocomplete='autocomplete' in payload)
+                       if 'searchId' in payload else navigation_owner().search(payload['query']))
+            result = {'results': results, 'provider': getattr(results, 'provider', 'mapbox')}
           else:
             fields = {'configure': {'patch'}, 'select': {'destination'}, 'selectPlace': {'id', 'searchId'},
                       'cancelSearch': {'searchId'}, 'clear': set(), 'favorite': {'destination'},
                       'favoritePlace': {'id', 'searchId'}, 'removeFavorite': {'id'}, 'labelFavorite': {'id', 'label'},
-                      'removeRecent': {'id'}, 'clearRecents': set(), 'selectRoute': {'index'}}
+                      'removeRecent': {'id'}, 'clearRecents': set(), 'selectRoute': {'index'}, 'testGoogleKey': set(),
+                      'resolveShare': {'text'}, 'share': {'text'}}
             action = payload.get('action')
-            optional = {'label'} if action in ('favorite', 'favoritePlace') and 'label' in payload else set()
+            optional = ({'label'} if action in ('favorite', 'favoritePlace') and 'label' in payload else
+                        {'key'} if action == 'testGoogleKey' and 'key' in payload else
+                        {'intentId'} if action == 'share' and 'intentId' in payload else set())
             if type(action) is not str or action not in fields or set(payload) != {'action', 'revision'} | fields[action] | optional:
               raise ValidationError('Invalid navigation action')
-            needs_park = action == 'configure' and isinstance(payload['patch'], dict) and 'token' in payload['patch']
+            needs_park = action == 'configure' and isinstance(payload['patch'], dict) and bool({'token', 'googleKey'} & payload['patch'].keys())
             def authorized():
               return self.settings_session() == identity and (not needs_park or configuration_allowed())
-            with (nullcontext() if action in ('selectPlace', 'favoritePlace') else effect_lock):
+            with (nullcontext() if action in ('selectPlace', 'favoritePlace', 'testGoogleKey', 'resolveShare', 'share') else effect_lock):
               if not authorized():
-                raise PermissionError('Park your car before changing the Mapbox key' if needs_park else 'Sign in to Galaxy')
+                raise PermissionError('Park your car before changing a map key' if needs_park else 'Sign in to Galaxy')
               nav = navigation_owner()
               keywords = {'expected_revision': payload['revision'], 'authorized': authorized}
               if action == 'configure':
                 result = nav.configure(payload['patch'], **keywords)
+              elif action == 'testGoogleKey':
+                result = dict(nav.snapshot(), googleKeyTest=nav.test_google_key(payload.get('key')))
+              elif action == 'resolveShare':
+                result = dict(nav.snapshot(), sharedText=nav.resolve_share(payload['text']))
+              elif action == 'share':
+                result = nav.share(payload['text'], intent_id=payload.get('intentId'), **keywords)
               elif action == 'selectPlace':
                 result = nav.select_place(payload['id'], payload['searchId'], identity, **keywords)
               elif action == 'cancelSearch':
@@ -1939,7 +2025,8 @@ def make_server(*, port=8082, host='127.0.0.1', monitor=None, owner=None, crashe
         except ConflictError as error:
           self.json(409, {'error': str(error)})
         except ValidationError as error:
-          self.json(400, {'error': str(error)})
+          query = getattr(error, 'query', None)
+          self.json(400, {'error': str(error), **({'query': query} if query else {})})
         except PermissionError as error:
           if self.require_session():
             self.json(409, {'error': str(error)})

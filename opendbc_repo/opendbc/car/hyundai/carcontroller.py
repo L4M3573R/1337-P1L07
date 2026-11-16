@@ -53,6 +53,19 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 MAX_ANGLE = 85
 MAX_ANGLE_FRAMES = 89
 MAX_ANGLE_CONSECUTIVE_FRAMES = 2
+# Parking-lot EPS test (2026-11-16): /data/starpilot/eps_test.json {"max_angle": degrees} moves that cut-out angle for
+# the drive (read once when the car starts) to find where this car's EPS really faults. No file: the stock 85.
+EPS_TEST_PATH = '/data/starpilot/eps_test.json'
+
+
+def eps_test_max_angle(path: str = EPS_TEST_PATH) -> float:
+  try:
+    import json
+    with open(path) as f:
+      value = json.load(f).get('max_angle')
+    return float(value) if isinstance(value, (int, float)) and MAX_ANGLE <= value <= 720 else MAX_ANGLE
+  except (OSError, ValueError, AttributeError):
+    return MAX_ANGLE
 
 # On some HKG CAN and CAN FD non-CANFD_ALT_BUTTONS, the cancel button (CF_Clu_CruiseSwState / CRUISE_BUTTONS = 4) is
 # a pause/resume toggle, not a dedicated cancel. Firing it mid-brake inadvertently can cause a re-enable attempt
@@ -115,6 +128,7 @@ class CarController(CarControllerBase):
     self.CAN = CanBus(CP)
     self.params = CarControllerParams(CP)
     self.packer = CANPacker(dbc_names[Bus.pt])
+    self.max_angle = eps_test_max_angle()
     self.angle_limit_counter = 0
     self.angle_vm = VehicleModel(CP) if CP.flags & HyundaiFlags.CANFD_ANGLE_STEERING else None
     self.apply_angle_last = 0.0
@@ -162,6 +176,9 @@ class CarController(CarControllerBase):
     ioniq6_status = (self.ioniq6_longitudinal is not None and
                      int(CP.safetyConfigs[-1].safetyParam) in (0x8015, 0x8095, 0x8815, 0x8895))
     self.ioniq6_bsm_enabled = ioniq6_status
+    self.ioniq6_stock_aol_status = (CP.carFingerprint == CAR.HYUNDAI_IONIQ_6 and
+                                  not CP.openpilotLongitudinalControl and CP.pcmCruise and
+                                  int(CP.safetyConfigs[-1].safetyParam) in (0x0811, 0x0891))
     self.canfd_torque_aol_status = (qualified_canfd_stock_aol(CP) or qualified_canfd_long_aol(CP))
     self.canfd_dash_icons = CanFDDashIcons() if ioniq6_status or self.canfd_torque_aol_status else None
     self.classic_dash_icons = CanFDDashIcons() if classic_aol_dash_enabled(CP) else None
@@ -215,7 +232,7 @@ class CarController(CarControllerBase):
                     apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, self.params))
 
     # >90 degree steering fault prevention
-    self.angle_limit_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringAngleDeg) >= MAX_ANGLE, CC.latActive,
+    self.angle_limit_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringAngleDeg) >= self.max_angle, CC.latActive,
                                                                        self.angle_limit_counter, MAX_ANGLE_FRAMES,
                                                                        MAX_ANGLE_CONSECUTIVE_FRAMES)
 
@@ -527,16 +544,25 @@ class CarController(CarControllerBase):
     else:
       steering_status_active = CC.enabled
       if ((self.CP.carFingerprint == CAR.KIA_CARNIVAL_2025 and self.CP.safetyConfigs[-1].safetyParam == 0x28B4) or
-          self.canfd_torque_aol_status or (self.ioniq6_longitudinal is not None and
+          self.ioniq6_stock_aol_status or self.canfd_torque_aol_status or (self.ioniq6_longitudinal is not None and
                                  self.CP.safetyConfigs[-1].safetyParam in (0x8815, 0x8895))):
         # AOL may steer while ordinary cruise engagement remains off.
         steering_status_active |= CC.latActive
       stock_source = getattr(CS, "stock_lfa_status", None)
       stock_lfa = stock_source.current(clock_boot_ns()) if stock_source is not None else None
       stock_faults = stock_source.last_fault() if stock_source is not None and stock_lfa is None else None
+      stock_owned_status = False
+      if stock_source is not None:
+        display_healthy = CS.out.canValid and not (CS.out.canTimeout or CS.out.steerFaultTemporary or
+                                                   CS.out.steerFaultPermanent or CS.out.accFaulted)
+        stock_owned_status = stock_source.owns_display_status(apply_steer_req, clock_boot_ns(), healthy=display_healthy)
+      damping_source = getattr(CS, "stock_lkas_damping", None)
       can_sends.extend(hyundaicanfd.create_steering_messages(self.packer, self.CP, self.CAN,
                                                             steering_status_active, apply_steer_req, apply_torque,
-                                                            stock_lfa=stock_lfa, stock_lfa_faults=stock_faults))
+                                                            stock_lfa=stock_lfa, stock_lfa_faults=stock_faults,
+                                                            stock_lfa_owned_status=stock_owned_status,
+                                                            stock_lkas_damping=(damping_source.current_damping(clock_boot_ns())
+                                                              if damping_source is not None else None)))
       if _projection is not None:
         _projection.emit('hyundai.CANFD_TORQUE', apply_torque, apply_steer_req, can_sends[-1])
 

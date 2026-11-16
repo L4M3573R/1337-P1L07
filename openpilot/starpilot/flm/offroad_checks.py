@@ -4,8 +4,9 @@ from pathlib import Path
 from typing import Any
 from openpilot.starpilot.flm.offroad_controller_checks import check_candidate, check_original_native
 from openpilot.starpilot.flm.offroad_route import RETAIN
-from openpilot.starpilot.flm.log_decode import decode_full_rlog_segment
-from openpilot.starpilot.galaxy.drive_analysis import _closed_source
+from openpilot.starpilot.flm.log_decode import LogDecodeCancelled, LogDecodeError, decode_full_rlog_segment
+from openpilot.starpilot.flm.offroad_route import RouteInputCancelled, RouteInputError, route_permission
+from openpilot.starpilot.galaxy.drive_analysis import _Incomplete, _closed_source
 
 
 TRAINING_FRACTIONS = (1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05)
@@ -55,6 +56,8 @@ def fit_training_step(assessment, group, cohort, proposal, previous, root, *, pe
         'attempts': attempts,
         'selected_fraction': fraction,
       }
+    if _original_input_refusal(checked):
+      break
   return None, {
     'policy': 'training_only_native_feasibility_v1',
     'training_windows': train,
@@ -78,6 +81,7 @@ def fit_independent_route(assessment, group, cohort, prior, proposal, previous, 
     or not 6 <= len(validation) <= 12
     or len(set(train + validation)) != len(train + validation)
     or assessment.receipt.source_sha256 == prior.receipt.source_sha256
+    or {row[1] for row in assessment.receipt.segments}.intersection(row[1] for row in prior.receipt.segments)
     or assessment.receipt.route_id == prior.receipt.route_id
     or prior.receipt.completed_wall_ns >= assessment.receipt.completed_wall_ns
     or prior.receipt.cp_sha256 != assessment.receipt.cp_sha256
@@ -117,6 +121,8 @@ def fit_independent_route(assessment, group, cohort, prior, proposal, previous, 
     )
     attempts.append({'fraction': fraction, 'feasible': feasible, 'original_training_windows': checked})
     if not feasible:
+      if _original_input_refusal(checked):
+        break
       continue
     proof['selected_fraction'] = fraction
     # The independent drive's actual response is read only after strength freezes.
@@ -137,6 +143,12 @@ def fit_independent_route(assessment, group, cohort, prior, proposal, previous, 
       observed = estimate(prior.tracking_windows, cohort=cohort['cohort'], permitted=permitted)
       _, side, phase = cohort['cohort'].split(':')
       replication = None if observed is None else suggest(observed, {name: previous[name] for name in NAMES}, side=side, phase=phase)
+      if observed is not None and proposal.get('coordinate_policy') in ('angle_tracking_supported26_v1', 'acceleration_center_deadbands_v1'):
+        from openpilot.starpilot.flm.offroad_coordinate_policy import tracking_coordinate_candidates
+
+        replication = next((p for p in tracking_coordinate_candidates(
+          observed, prior.tracking_windows, {name: previous[name] for name in NAMES}, side=side, phase=phase,
+        ) if p['parameter'] == proposal['parameter']), None)
       supported = (
         replication is not None
         and replication['parameter'] == proposal['parameter']
@@ -184,6 +196,19 @@ def fit_independent_route(assessment, group, cohort, prior, proposal, previous, 
   return None, proof, None
 
 
+def _original_input_refusal(rows):
+  # Neither strength nor candidate values change these original-source labels.
+  for row in rows:
+    numerical = row.get('numerical') or {}
+    reason = numerical.get('reason')
+    if not row['qualified'] and (
+      reason == 'original_hint_requires_exact_unclipped_native_pair'
+      or reason == 'same_state_controller_checks_only' and type(numerical.get('scored_frames')) is int and numerical['scored_frames'] < 50
+    ):
+      return True
+  return False
+
+
 def _changed_windows(results):
   return {
     r['window']
@@ -218,11 +243,30 @@ def _release_unused_analysis_heap():
 
 
 def _original_results(assessment, original, ids, values, root, *, permitted, source_batch=False):
+  from openpilot.starpilot.flm.offroad_route import PartialRouteReceipt
+
+  if type(getattr(assessment, 'receipt', None)) is PartialRouteReceipt:
+    raise ValueError('Partial reviews cannot qualify a tune or resolve a trial')
+  permitted = route_permission(permitted)
+  try:
+    return _read_original_results(assessment, original, ids, values, root, permitted=permitted, source_batch=source_batch)
+  except LogDecodeCancelled:
+    raise
+  except (LogDecodeError, OSError, _Incomplete) as error:
+    if not permitted():
+      raise RouteInputCancelled('Parked checks cancelled') from error
+    name = getattr(getattr(assessment, 'receipt', None), 'route_id', None)
+    if name is None:
+      raise
+    raise RouteInputError(name, str(error)) from error
+
+
+def _read_original_results(assessment, original, ids, values, root, *, permitted, source_batch=False):
   spans = {w['identity']: w for w in original if w['identity'] in ids}
   if not (1 if source_batch else 3) <= len(ids) <= 24 or len(set(ids)) != len(ids) or set(spans) != set(ids):
     raise ValueError('Every preselected original window required')
   if not permitted():
-    raise ValueError('Parked checks cancelled')
+    raise RouteInputCancelled('Parked checks cancelled')
   if getattr(assessment, 'evidence_sources', None):
     results = []
     if any(w.get('route') not in assessment.evidence_sources for w in spans.values()):
@@ -230,10 +274,7 @@ def _original_results(assessment, original, ids, values, root, *, permitted, sou
     for route, source in sorted(assessment.evidence_sources.items()):
       selected = tuple(key for key in ids if spans[key]['route'] == route)
       if selected:
-        try:
-          checked = _original_results(source, original, selected, values, root, permitted=permitted, source_batch=True)
-        except FileNotFoundError:
-          checked = [{'window': key, 'qualified': False, 'reason': 'historical_dense_source_unavailable'} for key in selected]
+        checked = _original_results(source, original, selected, values, root, permitted=permitted, source_batch=True)
         results.extend(dict(row, route=route, source_sha256=source.receipt.source_sha256) for row in checked)
     return results
   _release_unused_analysis_heap()
@@ -251,11 +292,11 @@ def _original_results(assessment, original, ids, values, root, *, permitted, sou
   ranges = tuple((w['start_ns'], w['end_ns']) for w in spans.values())
   for number in sorted(segments):
     if not permitted():
-      raise ValueError('Parked checks cancelled')
+      raise RouteInputCancelled('Parked checks cancelled')
     name, digest, size = receipt.segments[number]
     with _closed_source(Path(root), name, inventory['segments'][number]['files'], permitted, prefer_rlog=True) as (raw, codec, current, _):
       if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
-        raise ValueError('Original numerical input changed')
+        raise RouteInputError(receipt.route_id, 'Original numerical input changed')
       events = decode_full_rlog_segment(raw, codec, cancelled=lambda: not permitted(), retain=RETAIN)
       for event in events:
         if event.which() == 'starpilotLateralState':
@@ -276,8 +317,10 @@ def _original_results(assessment, original, ids, values, root, *, permitted, sou
             outputs.append(read_applied(event))
           except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
             missing.append(int(event.logMonoTime))
-      if not current() or not permitted():
-        raise ValueError('Original input changed during checks')
+      if not permitted():
+        raise RouteInputCancelled('Parked checks cancelled')
+      if not current():
+        raise RouteInputError(receipt.route_id, 'Original input changed during checks')
     # Parsed evidence owns primitives; release segment readers before replay.
     del events, raw
     for wid, w in sorted(spans.items()):
@@ -287,11 +330,10 @@ def _original_results(assessment, original, ids, values, root, *, permitted, sou
       if any(start - 30_000_000 <= stamp <= end + 30_000_000 for stamp in missing):
         results.append({'window': wid, 'qualified': False, 'reason': 'original_control_or_delivery_metadata_omitted'})
         continue
-      before = [c for c in controls if c.control_ns <= start and c.replay_snapshot and start - c.control_ns <= 1_000_000_000]
-      if not before:
+      checkpoint = original_checkpoint(controls, outputs, start)
+      if checkpoint is None:
         results.append({'window': wid, 'qualified': False, 'reason': 'original_checkpoint_preroll_missing'})
         continue
-      checkpoint = max(c.control_ns for c in before)
       block = tuple(c for c in controls if checkpoint <= c.control_ns <= end + 30_000_000)
       original_outputs = tuple(outputs)
       numerical = check_candidate(assessment.cp, block, values, score_start_ns=start, score_end_ns=end, require_change=False, original_outputs=original_outputs)
@@ -351,6 +393,28 @@ def needed_original(event, ranges, kind):
   try:
     row = event.starpilotLateralState.learningEvidence if kind == 'control' else event.starpilotCarState.appliedEvidence
     stamp = int(row.controlMonoTime)
+    if not 0 < stamp <= header:
+      return False
+    if kind == 'applied':
+      applied, observed = int(row.appliedMonoTime), int(row.carrierObservedMonoTime)
+      if not stamp <= applied <= observed <= header:
+        return False
+      # Card's recorded observation can be in range even when publication is later.
+      if any(start - 1_000_000_000 <= observed <= end + 30_000_000 for start, end in ranges):
+        return True
   except (ValueError, TypeError, AttributeError, OverflowError):
     return False
-  return any(start - 1_000_000_000 <= stamp <= end for start, end in ranges)
+  return any(start - 1_000_000_000 <= stamp <= end + 30_000_000 for start, end in ranges)
+
+
+def original_checkpoint(controls, outputs, start):
+  """Keep the real source of the starting Card hold inside existing pre-roll."""
+  before = [c.control_ns for c in controls if c.replay_snapshot and start - 1_000_000_000 <= c.control_ns <= start]
+  if not before:
+    return None
+  first = min((c.control_ns for c in controls if c.control_ns >= start), default=start)
+  carriers = [] if any(o.control_ns == first for o in outputs) else [
+    o for o in outputs if first - 30_000_000 <= o.carrier_observed_ns <= first
+  ]
+  cutoff = min(start, max(carriers, key=lambda o: o.carrier_observed_ns).control_ns) if carriers else start
+  return max((stamp for stamp in before if stamp <= cutoff), default=None)

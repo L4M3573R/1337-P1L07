@@ -13,9 +13,9 @@ from openpilot.starpilot.aol.vehicle import policy_for
 from openpilot.starpilot.tests.test_ford_reverse_intent import NOW, PRODUCER, change, native_change, sample
 
 
-def baseline():
+def baseline(candidate=CAR.SUBARU_IMPREZA_2020):
   with OpenpilotPrefix():
-    cp = CarInterface.get_params(CAR.SUBARU_IMPREZA_2020, gen_empty_fingerprint(), [], False, False, False)
+    cp = CarInterface.get_params(candidate, gen_empty_fingerprint(), [], False, False, False)
   policy = policy_for(cp)
   cp.alternativeExperience |= policy.alternative_experience_addition
   cp.safetyConfigs[0].safetyParam |= policy.safety_param_addition
@@ -247,8 +247,8 @@ def braked_main_sample(cp, now, sequence):
   return sm, native
 
 
-def cold_main_baseline():
-  cp, state, _ = baseline()
+def cold_main_baseline(candidate=CAR.SUBARU_IMPREZA_2020):
+  cp, state, _ = baseline(candidate)
   feedback = TransportPauseFeedback(cp)
   sm, _ = sample(cp, NOW, NOW, 1, active=False, requested=False, allowed=False)
   assert not feedback.observe(sm, cp, state, NOW, latched=False, intent_producer_session=PRODUCER)
@@ -256,9 +256,10 @@ def cold_main_baseline():
   return cp, state, feedback
 
 
+@pytest.mark.parametrize('candidate', (CAR.SUBARU_IMPREZA_2020, CAR.SUBARU_IMPREZA_2025))
 @pytest.mark.parametrize('epoch', (0, 1))
-def test_braked_main_retains_only_intent_until_fresh_native_grant(epoch):
-  cp, state, feedback = cold_main_baseline()
+def test_braked_main_retains_only_intent_until_fresh_native_grant(epoch, candidate):
+  cp, state, feedback = cold_main_baseline(candidate)
   before = leases(feedback)
   arm_ns = NOW + 10_000_000
   for tick in range(1, 101):
@@ -282,8 +283,11 @@ def test_braked_main_retains_only_intent_until_fresh_native_grant(epoch):
 @pytest.mark.parametrize('veto', ('permanent', 'temporary', 'invalid_can', 'timeout', 'acc', 'door', 'seatbelt',
   'sensors', 'steering', 'gas', 'regen', 'main_off', 'reverse', 'cancel', 'event_fault', 'initializing',
   'wrong_producer', 'axis_fault', 'expired_axis', 'bad_native', 'missing_native', 'native_heartbeat', 'native_fault'))
-def test_pending_braked_main_preserves_independent_vetoes(veto):
-  cp, state, feedback = cold_main_baseline()
+@pytest.mark.parametrize('candidate', (CAR.SUBARU_IMPREZA_2020, CAR.SUBARU_IMPREZA_2025))
+@pytest.mark.parametrize('prior_active', (False, True))
+def test_pending_braked_main_preserves_independent_vetoes(veto, prior_active, candidate):
+  cp, state, feedback = baseline(candidate) if prior_active else cold_main_baseline(candidate)
+  state.brakePressed = True
   now = NOW + 10_000_000
   sm, native = braked_main_sample(cp, now, 2)
   fields = {'permanent': 'steerFaultPermanent', 'temporary': 'steerFaultTemporary', 'invalid_can': 'canValid',
@@ -349,3 +353,149 @@ def test_pending_braked_main_epoch_and_release_timeout_are_not_renewed():
     if changed == 'epoch':
       change(sm, 'aolAxisState', lambda a: setattr(a, 'intentIntegrityEpoch', 2))
     assert feedback.observe(sm, cp, state, now, latched=True, intent_producer_session=PRODUCER, main_arm_ns=arm)
+
+
+
+def stopped_feedback(epoch=0):
+  cp, state, feedback = baseline()
+  state.standstill = state.brakePressed = True
+  state.vEgo = state.vEgoRaw = 0.
+  stamp = NOW + 10_000_000
+  sm, native = sample(cp, stamp, stamp, 2, active=False, requested=False, allowed=False, event_stamp=stamp)
+  change(sm, 'aolAxisState', lambda axis: setattr(axis, 'intentIntegrityEpoch', epoch))
+  assert not feedback.observe(sm, cp, state, stamp, latched=True, intent_producer_session=PRODUCER)
+  assert not any(feedback.signature[9:13]) and feedback.ever_lateral_active
+  return cp, state, feedback, sm, native, stamp
+
+
+@pytest.mark.parametrize('epoch', (0, 1))
+def test_stopped_feedback_gap_retains_intent_without_renewing_leases(epoch):
+  from openpilot.starpilot.aol.runtime import current_axis
+
+  cp, state, feedback, sm, _, stamp = stopped_feedback(epoch)
+  before = leases(feedback), feedback.signature, feedback.sequence
+  messages = dict(sm.logMonoTime)
+  for age in (33_917_864, 50_000_000, 100_000_000, 190_000_000):
+    assert current_axis(sm, now_ns=stamp + age) is None
+    assert not feedback.observe(sm, cp, state, stamp + age, latched=True, intent_producer_session=PRODUCER)
+    assert not feedback.failed
+    assert (leases(feedback), feedback.signature, feedback.sequence) == before
+    assert sm.logMonoTime == messages
+  # A new source and genuine native grant own recovery after movement, never the retained OFF receipt.
+  state.standstill = state.brakePressed = False
+  state.vEgo = state.vEgoRaw = 15.
+  now = stamp + 195_000_000
+  fresh, native = sample(cp, now, now, 3, event_stamp=now)
+  change(fresh, 'aolAxisState', lambda axis: setattr(axis, 'intentIntegrityEpoch', epoch))
+  assert not feedback.observe(fresh, cp, state, now, latched=True, intent_producer_session=PRODUCER)
+  assert current_axis(fresh, now_ns=now).lateralActive and native.lateralAllowed
+
+
+def test_stopped_feedback_gap_deadline_cannot_be_extended_by_new_native_receipts():
+  cp, state, feedback, old, _, stamp = stopped_feedback()
+  now = stamp + 200_000_001
+  fresh, _ = sample(cp, now, now, 3, active=False, requested=False, allowed=False, event_stamp=now)
+  fresh.messages['aolAxisState'] = old.messages['aolAxisState']
+  fresh.logMonoTime['aolAxisState'] = stamp
+  assert feedback.observe(fresh, cp, state, now, latched=True, intent_producer_session=PRODUCER)
+  assert feedback.failed
+
+
+@pytest.mark.parametrize('fault', ('moving', 'brake_released', 'main_off', 'acc_on', 'gas', 'regen', 'invalid_can',
+  'timeout', 'temporary_eps', 'permanent_eps', 'sensors', 'door', 'belt', 'disengage', 'cancel', 'park',
+  'wrong_producer', 'wrong_epoch', 'changed_source', 'axis_invalid', 'axis_unqualified', 'native_ack',
+  'native_stale', 'native_missing', 'native_fault', 'heartbeat', 'wrong_native_session', 'wrong_inventory',
+  'lateral_requested', 'lateral_allowed', 'long_requested', 'long_allowed', 'hard_event', 'soft_event',
+  'other_event', 'stale_event', 'invalid_event', 'no_prior_active', 'wrong_cp'))
+def test_stopped_feedback_retention_preserves_independent_vetoes(fault):
+  cp, state, feedback, sm, native, stamp = stopped_feedback()
+  now = stamp + 33_917_864
+  physical = {'moving': ('standstill', False), 'brake_released': ('brakePressed', False),
+    'gas': ('gasPressed', True), 'regen': ('regenBraking', True), 'invalid_can': ('canValid', False),
+    'timeout': ('canTimeout', True), 'temporary_eps': ('steerFaultTemporary', True),
+    'permanent_eps': ('steerFaultPermanent', True), 'sensors': ('vehicleSensorsInvalid', True),
+    'door': ('doorOpen', True), 'belt': ('seatbeltUnlatched', True), 'disengage': ('steeringDisengage', True)}
+  if fault in physical:
+    setattr(state, *physical[fault])
+  elif fault == 'main_off':
+    state.cruiseState.available = False
+  elif fault == 'acc_on':
+    state.cruiseState.enabled = True
+  elif fault == 'cancel':
+    state.buttonEvents = [structs.CarState.ButtonEvent(type='cancel', pressed=True)]
+  elif fault == 'park':
+    state.gearShifter = 'park'
+  elif fault in ('wrong_epoch', 'changed_source', 'axis_unqualified', 'native_ack'):
+    field, value = {'wrong_epoch': ('intentIntegrityEpoch', 2), 'changed_source': ('sourceCarStateMonoTime', stamp - 1),
+                    'axis_unqualified': ('qualified', False), 'native_ack': ('nativeAcknowledged', False)}[fault]
+    change(sm, 'aolAxisState', lambda axis: setattr(axis, field, value))
+  elif fault == 'axis_invalid':
+    sm.valid['aolAxisState'] = False
+  elif fault == 'native_stale':
+    native_change(sm, native, validUntilMonoTime=now - 1)
+  elif fault == 'native_missing':
+    sm.seen['aolSafetyWire'] = False
+  elif fault in ('native_fault', 'heartbeat'):
+    native_change(sm, native, pandaInventory=(replace(native.pandaInventory[0],
+      **({'faults': 1} if fault == 'native_fault' else {'heartbeatLost': True})),))
+  elif fault == 'wrong_native_session':
+    native_change(sm, native, axisSessionId='changed')
+  elif fault == 'wrong_inventory':
+    native_change(sm, native, pandaSerial='changed', pandaInventory=(replace(native.pandaInventory[0], hardwareSerial='changed'),))
+  elif fault in ('lateral_requested', 'lateral_allowed', 'long_requested', 'long_allowed'):
+    field = {'lateral_requested': 'requestedLateral', 'lateral_allowed': 'lateralAllowed',
+             'long_requested': 'requestedLongitudinal', 'long_allowed': 'longitudinalAllowed'}[fault]
+    native_change(sm, native, **{field: True})
+  elif fault in ('hard_event', 'soft_event', 'other_event'):
+    change(sm, 'onroadEvents', lambda events: setattr(events[0],
+      'immediateDisable' if fault == 'hard_event' else 'softDisable' if fault == 'soft_event' else 'name',
+      'buttonCancel' if fault == 'other_event' else True))
+  elif fault == 'stale_event':
+    sm.logMonoTime['onroadEvents'] = NOW - 2_000_000_000
+  elif fault == 'invalid_event':
+    sm.valid['onroadEvents'] = False
+  elif fault == 'no_prior_active':
+    feedback.ever_lateral_active = False
+  elif fault == 'wrong_cp':
+    cp.carFingerprint = CAR.SUBARU_OUTBACK_2023
+  assert feedback.observe(sm, cp, state, now, latched=True,
+                          intent_producer_session='changed' if fault == 'wrong_producer' else PRODUCER)
+
+
+@pytest.mark.parametrize('epoch', (0, 1))
+def test_new_main_after_prior_grant_waits_for_brake_without_renewing_leases(epoch):
+  cp, state, feedback = baseline()
+  assert feedback.ever_lateral_active and feedback.subaru_lateral_grant_ns == NOW
+  state.brakePressed = True
+  off = NOW + 10_000_000
+  sm, _ = sample(cp, off, off, 2, active=False, requested=False, allowed=False, event_stamp=off)
+  assert not feedback.observe(sm, cp, state, off, latched=False, intent_producer_session=PRODUCER)
+  before = leases(feedback)
+  arm = off + 10_000_000
+  for tick in range(100):
+    now = arm + tick * 10_000_000
+    sm, native = braked_main_sample(cp, now, tick + 3)
+    change(sm, 'aolAxisState', lambda axis: setattr(axis, 'intentIntegrityEpoch', epoch))
+    assert not feedback.observe(sm, cp, state, now, latched=True, intent_producer_session=PRODUCER, main_arm_ns=arm)
+    assert not feedback.failed and not native.lateralAllowed and leases(feedback) == before
+    assert feedback.subaru_lateral_grant_ns == NOW
+  state.brakePressed = False
+  now += 10_000_000
+  sm, native = sample(cp, now, now, 103, event_stamp=now)
+  change(sm, 'aolAxisState', lambda axis: setattr(axis, 'intentIntegrityEpoch', epoch))
+  assert not feedback.observe(sm, cp, state, now, latched=True, intent_producer_session=PRODUCER, main_arm_ns=arm)
+  assert native.lateralAllowed and feedback.subaru_lateral_grant_ns == now
+
+
+@pytest.mark.parametrize('arm_offset', (-10_000_000, 0))
+def test_braked_main_cannot_reinterpret_granted_gesture_as_first_grant(arm_offset):
+  from openpilot.starpilot.car.subaru.aol import retain_braked_main_intent
+
+  cp, state, feedback = baseline()
+  state.brakePressed = True
+  now = NOW + 10_000_000
+  sm, _ = braked_main_sample(cp, now, 2)
+  before = leases(feedback)
+  assert not retain_braked_main_intent(feedback, sm, cp, state, sm['aolAxisState'], now,
+                                      arm_ns=NOW + arm_offset, producer=PRODUCER)
+  assert feedback.subaru_braked_main is None and leases(feedback) == before

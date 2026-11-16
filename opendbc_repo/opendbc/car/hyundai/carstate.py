@@ -1,4 +1,4 @@
-from opendbc.car.hyundai.canfd_lfa_status import CANFDClusterStatus, CANFDLfaStatus, preserves_stock_lfa
+from opendbc.car.hyundai.canfd_lfa_status import CANFDClusterStatus, CANFDLfaStatus, CANFDLkasDamping, preserves_stock_lfa, preserves_stock_lkas_damping
 from opendbc.car.hyundai.left_paddle import has_left_paddle
 from opendbc.car.hyundai.ioniq5pe_long_profile import qualified as pe_long_qualified
 from opendbc.car.hyundai.ioniq5pe_ready import PEReadySource
@@ -66,6 +66,8 @@ class CarState(CarStateBase):
     preserve_status = preserves_stock_lfa(CP)
     self.stock_lfa_status = CANFDLfaStatus(CanBus(CP).CAM) if preserve_status else None
     self.stock_cluster_status = CANFDClusterStatus(CanBus(CP).CAM) if preserve_status else None
+    self.stock_lkas_damping = (CANFDLkasDamping(CanBus(CP).CAM, bool(CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG_ALT))
+                               if preserves_stock_lkas_damping(CP) else None)
     from opendbc.car.hyundai.daw import DawSource
     self.daw = DawSource(CP)
     self.forte_lkas_sources = NonSccLkasSources() if qualified_non_scc(CP) and CP.flags & HyundaiFlags.HAS_LDA_BUTTON else None
@@ -137,6 +139,7 @@ class CarState(CarStateBase):
     self.ccnc_1b5_ts_ns = 0
     self.dashboard_limit = LimitTracker()
     self.dashboard_stop_sign = None
+    self.drive_mode = None
     self.ioniq6_bsm_sources = (Ioniq6BlindspotSources()
                                if CP.carFingerprint == CAR.HYUNDAI_IONIQ_6 and CP.openpilotLongitudinalControl else None)
     self.ioniq6_bsm_now_ns = 0
@@ -488,8 +491,8 @@ class CarState(CarStateBase):
                                                                       cp.vl["BLINKERS"][right_blinker_sig])
     if self.CP.deprecated.enableBsm:
       rear = cp.vl["ADAS_CMD_50_50ms"]
-      ret.leftBlindspot = bool(rear["BCW_LtIndSta"])
-      ret.rightBlindspot = bool(rear["BCW_RtIndSta"])
+      ret.leftBlindspot = rear["BCW_LtIndSta"] in (1, 2)
+      ret.rightBlindspot = rear["BCW_RtIndSta"] in (1, 2)
       if self.CP.carFingerprint == CAR.KIA_EV9:
         corner_left, corner_right = decode_ioniq_6_corner_bsm(int(cp.vl["BLINDSPOTS_FRONT_CORNER_2"]["SIDE_DETECT_STATE"]))
         if self.ev9_long:
@@ -620,6 +623,10 @@ class CarState(CarStateBase):
     stamp = cp_cam.ts_nanos["ADAS_0x380"]["STOP_SIGN"]
     self.dashboard_stop_sign = (bool(cp_cam.vl["ADAS_0x380"]["STOP_SIGN"]), stamp) if stamp > 0 else None
 
+    if self.CP.carFingerprint == CAR.HYUNDAI_IONIQ_6:
+      stamp = cp.ts_nanos["DRIVE_MODE_EV"]["DRIVE_MODE"]
+      self.drive_mode = (int(cp.vl["DRIVE_MODE_EV"]["DRIVE_MODE"]), stamp) if stamp > 0 else None
+
     return ret
 
   def get_can_parsers_canfd(self, CP):
@@ -634,6 +641,8 @@ class CarState(CarStateBase):
       msgs.extend((("ADAS_CMD_50_50ms", math.nan), ("BLINDSPOTS_FRONT_CORNER_2", math.nan)))
     if CP.flags & HyundaiFlags.EV:
       msgs.append(("MANUAL_SPEED_LIMIT_ASSIST", math.nan))
+    if CP.carFingerprint == CAR.HYUNDAI_IONIQ_6:
+      msgs.append(("DRIVE_MODE_EV", math.nan))
     sign_subscription = ("FR_CMR_02_100ms", math.nan)
     if CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG:
       msgs.append(sign_subscription)

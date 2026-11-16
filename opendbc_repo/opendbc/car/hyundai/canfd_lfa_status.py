@@ -6,6 +6,8 @@ from opendbc.car.hyundai.values import CAR, HyundaiFlags
 
 
 MAX_AGE_NS = 50_000_000
+DISPLAY_FAULT_HOLD_NS = 2_100_000_000
+DISPLAY_RELEASE_NS = 150_000_000
 
 
 def preserves_stock_lfa(cp):
@@ -22,8 +24,25 @@ def preserves_stock_lfa(cp):
           factory not in (CAR.KIA_CARNIVAL_4TH_GEN, CAR.KIA_CARNIVAL_2025, CAR.KIA_CARNIVAL_HEV_4TH_GEN))
 
 
+def preserves_stock_lkas_damping(cp):
+  try:
+    factory = CAR(cp.carFingerprint)
+  except (ValueError, TypeError):
+    return False
+  excluded = HyundaiFlags.CANFD_ANGLE_STEERING | HyundaiFlags.NON_SCC
+  return (cp.brand == 'hyundai' and bool(factory.config.flags & HyundaiFlags.CANFD) and
+          not factory.config.flags & excluded and bool(cp.flags & HyundaiFlags.CANFD) and
+          bool(cp.flags & HyundaiFlags.CANFD_LKA_STEER_MSG) and
+          not cp.flags & excluded and not cp.openpilotLongitudinalControl and
+          cp.steerControlType == structs.CarParams.SteerControlType.torque and
+          not (cp.passive or cp.dashcamOnly or cp.notCar) and factory not in (
+            CAR.KIA_CARNIVAL_4TH_GEN, CAR.KIA_CARNIVAL_2025,
+            CAR.KIA_CARNIVAL_HEV_4TH_GEN, CAR.GENESIS_GV70_ELECTRIFIED_1ST_GEN))
+
+
 class CANFDLfaStatus:
   ADDRESS = 0x12A
+  LENGTH = 16
   MAX_AGE_NS = MAX_AGE_NS
 
   def __init__(self, bus):
@@ -32,6 +51,8 @@ class CANFDLfaStatus:
     self.counter = None
     self.body = None
     self.observed_ns = 0
+    self.display_fault_start_ns = 0
+    self.display_last_active_ns = 0
 
   def update(self, can_packets):
     boot_clock = getattr(time, 'CLOCK_BOOTTIME', None)
@@ -45,7 +66,7 @@ class CANFDLfaStatus:
       if type(stamp) is not int or not self.last_packet_ns < stamp <= now_ns:
         continue
       for address, data, bus in frames:
-        if address != self.ADDRESS or bus != self.bus or len(data) != 16:
+        if address != self.ADDRESS or bus != self.bus or len(data) != self.LENGTH:
           continue
         self.last_packet_ns = stamp
         if int.from_bytes(data[:2], 'little') != hkg_can_fd_checksum(address, None, bytearray(data)):
@@ -62,10 +83,40 @@ class CANFDLfaStatus:
       return self.body
     return None
 
+  def owns_display_status(self, active, now_ns, *, healthy=True):
+    body = self.current(now_ns) if healthy else None
+    matches = (body is not None and ((body[4] >> 6) | ((body[5] & 1) << 2)) == 4 and
+               body[7] >> 4 == 15 and not body[6] & 0xC0)
+    if matches:
+      if active:
+        if not self.display_fault_start_ns:
+          self.display_fault_start_ns = now_ns
+        self.display_last_active_ns = now_ns
+        return True
+      if self.display_last_active_ns and now_ns <= max(self.display_fault_start_ns + DISPLAY_FAULT_HOLD_NS,
+                                                       self.display_last_active_ns + DISPLAY_RELEASE_NS):
+        return True
+    self.display_fault_start_ns = self.display_last_active_ns = 0
+    return False
+
   def last_fault(self):
     body = self.body
     if body is not None and (body[6] & 0xC0 or body[7] & 0xF0 or ((body[4] >> 6) | ((body[5] & 1) << 2)) >= 4):
       return body
+    return None
+
+
+class CANFDLkasDamping(CANFDLfaStatus):
+  def __init__(self, bus, alternate):
+    super().__init__(bus)
+    self.ADDRESS = 0x110 if alternate else 0x50
+    self.LENGTH = 32 if alternate else 16
+
+  def current_damping(self, now_ns):
+    body = self.current(now_ns)
+    return body[8] if body is not None else None
+
+  def last_fault(self):
     return None
 
 

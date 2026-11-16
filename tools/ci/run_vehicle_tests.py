@@ -41,6 +41,7 @@ FORD_BLUEPILOT_NATIVE_TARGETS = tuple(str(path.relative_to(ROOT)) for path in so
 # Representative production callers plus their source/native refusal cases.
 # The emitted selected_test_ids record exact parametrized configurations.
 AOL_LIFECYCLE_TARGETS = (
+  "opendbc_repo/opendbc/car/subaru/tests/test_jacobw_angle.py",
   "openpilot/starpilot/car/subaru/tests/test_high_angle_guard.py",
   "openpilot/starpilot/aol/tests/test_ford_long_only_withdrawal.py",
   'opendbc_repo/opendbc/car/tests/test_isotp_query_interference.py',
@@ -271,6 +272,14 @@ DEBUG_SAFETY_CLASS_TARGETS = {
 
 
 RELEASE_TARGETS = (
+  "openpilot/selfdrive/controls/tests/test_subaru_planner_fcw.py",
+  "opendbc_repo/opendbc/car/subaru/tests/test_supported_firmware.py",
+  "openpilot/starpilot/car/subaru/tests/test_stock_aol_callers.py::test_actual_impreza2025_automatic_full_stack",
+  "openpilot/starpilot/car/subaru/tests/test_stock_aol_callers.py::test_actual_main_during_temporary_eps_waits_for_clear",
+  "openpilot/starpilot/car/subaru/tests/test_stock_aol_callers.py::test_actual_stopped_feedback_gap_retains_only_armed_intent",
+  "openpilot/starpilot/car/subaru/tests/test_stock_aol_callers.py::test_actual_repeat_main_with_brake_and_signal_pause",
+  "openpilot/starpilot/aol/tests/test_subaru_temporary_eps.py",
+  "opendbc_repo/opendbc/car/subaru/tests/test_jacobw_angle.py",
   "opendbc_repo/opendbc/car/rivian/tests/test_radar_reachability.py",
   "opendbc_repo/opendbc/car/tesla/tests/test_radar_pairs.py",
   "openpilot/starpilot/car/subaru/tests/test_stock_aol_callers.py::test_actual_impreza_main_while_braking_waits_for_native_grant",

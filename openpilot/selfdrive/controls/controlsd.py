@@ -18,6 +18,7 @@ from openpilot.common.swaglog import cloudlog
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature
+from openpilot.selfdrive.controls.lib.highway_correction_gain import HighwayCorrectionGain, predicted_lateral_accels, read_gain
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.lateral_controller_factory import create_lateral_controller
@@ -51,7 +52,7 @@ from openpilot.starpilot.lateral.lane_change_preferences import LiveLaneChangePo
 from openpilot.starpilot.lateral.lane_change_smoothing import LaneChangeSmoother, limit_rate
 from openpilot.starpilot.lateral.lane_runtime import LaneCenteringHost, runtime_supported as lane_runtime_supported
 from openpilot.starpilot.lateral.torque_runtime import TorqueHost, runtime_enabled as torque_runtime_enabled
-from openpilot.starpilot.lateral.controller_selection import learning_allowed, read_selection
+from openpilot.starpilot.lateral.controller_selection import learning_allowed, read_selection, turn_assist_supported
 from openpilot.starpilot.lateral.gain_runtime import create_gain_owner
 from openpilot.starpilot.flm.global_runtime import GlobalRuntime
 from openpilot.starpilot.flm.evidence_hooks import control_message
@@ -78,6 +79,8 @@ class Controls:
     from openpilot.starpilot.car.subaru.smoothing import read_frozen
 
     self.subaru_smoothing = read_frozen(self.CP, self.params)
+    from openpilot.starpilot.car.volkswagen.model_smoothing import ControlSmoothing
+    self.volkswagen_smoothing = ControlSmoothing(self.CP)
 
     self.CI = interfaces[self.CP.carFingerprint](self.CP)
     self.hyundai_lateral_fault = LateralFaultLatch(self.CP.carFingerprint)
@@ -127,6 +130,9 @@ class Controls:
     self.curve_guard = self._create_curve_guard()
     self.turn_yield = TurnYield()
     self.turn_yield_log = None
+    self.highway_correction_gain = HighwayCorrectionGain()
+    self.highway_smoothing_supported = turn_assist_supported(self.CP)
+    self.highway_gain = read_gain(self.params) if self.highway_smoothing_supported else 1.0
     self.lateral_pause = LateralPause(read_lateral_pause(self.params), self.params)
     self.lane_change_preferences = LiveLaneChangePolicy(self.params, now_ns=0 if os.getenv('REPLAY') == '1' else time.monotonic_ns())
     self.lane_change_policy = self.lane_change_preferences.applied
@@ -153,7 +159,8 @@ class Controls:
     )
     if isinstance(self.LaC, LatControlTorque):
       # Only the actual startup owner reads configuration; replay clones stay pure.
-      if manual_effects is not None and manual_effects.profile.context[1] != str(self.LaC.controller_mode):
+      if manual_effects is not None and (manual_effects.profile.context[1] != str(self.LaC.controller_mode) or
+                                         not manual_effects.compatible(self.CP, self.CI, self.LaC, self.params)):
         manual_effects, manual_status = None, 'context_changed'
       self.LaC.manual_flm_effects, self.LaC.manual_flm_status = manual_effects, manual_status
       self.lateral_gain_owner = create_gain_owner(self.params, self.CP, self.LaC)
@@ -596,6 +603,28 @@ class Controls:
     elif getattr(self, 'model_turn_assist', None) is not None:
       self.model_turn_assist.reset()
       self.model_turn_assist.twitch_guard_armed = update_twitch_guard(False, CS.vEgo, CS.standstill)
+    if self.highway_smoothing_supported:
+      if self.sm.frame % 100 == 0:
+        self.highway_gain = read_gain(self.params)
+      predicted = None
+      if self.sm.all_checks(['modelV2']):
+        predicted = predicted_lateral_accels(model_v2.position.t, model_v2.velocity.x, model_v2.orientationRate.z)
+      # before lane centering so its guard measures only its own correction against the smoothed base
+      new_desired_curvature = self.highway_correction_gain.update(
+        new_desired_curvature,
+        CS.vEgo,
+        CC.latActive,
+        self.highway_gain,
+        bypass=bool(
+          CS.leftBlinker
+          or CS.rightBlinker
+          or CS.steeringPressed
+          or model_v2.meta.laneChangeState != LaneChangeState.off
+          or self.sm.valid['lateralManeuverPlan']
+        ),
+        predicted=predicted,
+      )
+    # the curve guard checks the final curvature, after the highway smoothing
     if not self.sm.valid['lateralManeuverPlan']:
       new_desired_curvature = self._apply_curve_guard(CS, CC, model_v2, new_desired_curvature)
     lane_base_curvature = new_desired_curvature
@@ -662,6 +691,8 @@ class Controls:
     from openpilot.starpilot.car.subaru.smoothing import seconds as subaru_smooth_seconds, control_maximum
 
     lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS + subaru_smooth_seconds(CS.vEgo, control_maximum(self))
+    if getattr(self, "volkswagen_smoothing", None) is not None:
+      lat_delay += self.volkswagen_smoothing.seconds(int(self.sm.logMonoTime["modelV2"]), time.monotonic_ns())
 
     actuators.curvature = self.desired_curvature
     if cycle_timing is not None:

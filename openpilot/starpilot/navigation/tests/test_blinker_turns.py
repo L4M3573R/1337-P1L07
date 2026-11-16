@@ -238,3 +238,98 @@ def test_queue_creep_behind_a_car_does_not_count_against_the_signal():
     t += 0.1
     d = turn.update(t, 'left', 4.0, 0.0, lookup(t, 190.0 - 4.0 * t), nudged=False, lead=True)
   assert d.reason == 'map: waiting for the road'   # too far at first, in range once the queue has crept up
+
+
+class _Finder:
+  def __init__(self, distance):
+    self.distance, self.t = distance, 0.0
+
+  def request(self, *args):
+    pass
+
+  def latest(self, side):
+    return bt.Lookup(self.t, side, None if self.distance is None else SideRoad(self.distance, 95.0, 'street'), True)
+
+
+def _approach_case(monkeypatch, turn_case, distance, mph=36.0):
+  from types import SimpleNamespace as NS
+  from openpilot.starpilot.gps import source
+  from openpilot.starpilot.navigation import turn_speed
+  from openpilot.starpilot.navigation.intent import TurnIntent
+  params, cp, sm = turn_case
+  monkeypatch.setattr(bt, 'mode', lambda path=None: 'map')
+  gps = NS(latitude=41.6, longitude=-72.9, bearingDeg=170.0, speed=mph * 0.44704)
+  monkeypatch.setattr(source, 'select_source', lambda sm, now_ns: (None, (None, gps)))
+  written = []
+  monkeypatch.setattr(turn_speed, 'write_status', lambda doc, path=None: written.append(doc))
+  sm['carState'].vEgo = mph * 0.44704
+  sm['carState'].steeringPressed, sm['carState'].steeringTorque = False, 0.0
+  owner = TurnIntent(params, cp)
+  owner.map_finder = _Finder(distance)
+  return owner, sm, written
+
+
+def _step(owner, sm, desire, k):
+  from openpilot.starpilot.navigation.tests.test_signal_guidance import NOW
+  owner._turn_status_ns = 0
+  owner.map_finder.t = (NOW + k * 200_000_000) / 1e9   # a fresh answer each step
+  return owner.select(sm, NOW + k * 200_000_000, desire, supported=True, model_stop=False)
+
+
+def test_a_turn_signalled_at_speed_slows_early_when_there_is_no_lane_that_way(monkeypatch, turn_case):
+  # 2026-11-16: signalled left at 36 mph; the turn logic woke below 20 mph with the road 21 m away
+  from openpilot.cereal import log
+  owner, sm, written = _approach_case(monkeypatch, turn_case, 110.0)
+  owner.no_lane_side = -1
+  assert _step(owner, sm, log.Desire.none, 1) == log.Desire.none   # no turn yet above 20 mph
+  assert written[-1]['side'] == 'left' and not written[-1]['turning'] and written[-1]['distance_m'] == pytest.approx(110.0, abs=8)
+  assert owner.approach_reason == 'slowing for the mapped road'
+
+
+def test_a_lane_that_way_means_maybe_a_lane_change_so_no_slowing(monkeypatch, turn_case):
+  from openpilot.cereal import log
+  owner, sm, written = _approach_case(monkeypatch, turn_case, 110.0)
+  _step(owner, sm, log.Desire.none, 1)
+  assert written[-1]['distance_m'] is None and owner.approach_reason == 'a lane on that side: may be a lane change'
+
+
+def test_slowing_waits_out_a_lane_change_into_the_turn_lane_then_counts_from_there(monkeypatch, turn_case):
+  from openpilot.cereal import log
+  owner, sm, written = _approach_case(monkeypatch, turn_case, 140.0)
+  _step(owner, sm, log.Desire.laneChangeLeft, 1)
+  assert written[-1]['distance_m'] is None and owner.approach_reason == 'lane change under way'
+  for k in range(2, 12):
+    _step(owner, sm, log.Desire.laneChangeLeft, k)              # 2 s of lane change: about 32 m driven
+  _step(owner, sm, log.Desire.none, 12)                          # in the turn lane now
+  assert owner.approach_turn_lane and written[-1]['distance_m'] is not None
+
+
+def test_a_far_road_or_no_road_does_not_slow(monkeypatch, turn_case):
+  from openpilot.cereal import log
+  owner, sm, written = _approach_case(monkeypatch, turn_case, 220.0)
+  owner.no_lane_side = -1
+  _step(owner, sm, log.Desire.none, 1)
+  assert written[-1]['distance_m'] is None and owner.approach_reason == 'mapped road too far for this blinker'
+  owner, sm, written = _approach_case(monkeypatch, turn_case, None)
+  owner.no_lane_side = -1
+  _step(owner, sm, log.Desire.none, 1)
+  assert written[-1]['distance_m'] is None and owner.approach_reason == 'no mapped road on that side'
+
+
+def test_above_the_approach_speed_nothing_is_planned(monkeypatch, turn_case):
+  from openpilot.cereal import log
+  owner, sm, written = _approach_case(monkeypatch, turn_case, 110.0, mph=55.0)
+  owner.no_lane_side = -1
+  _step(owner, sm, log.Desire.none, 1)
+  assert written == []
+
+
+def test_a_stale_map_answer_does_not_slow(monkeypatch, turn_case):
+  from openpilot.cereal import log
+  from openpilot.starpilot.navigation.tests.test_signal_guidance import NOW
+  owner, sm, written = _approach_case(monkeypatch, turn_case, 110.0)
+  owner.no_lane_side = -1
+  owner._turn_status_ns = 0
+  owner.map_finder.t = NOW / 1e9 - 10.0   # ten seconds old
+  owner.select(sm, NOW, log.Desire.none, supported=True, model_stop=False)
+  assert written[-1]['distance_m'] is None and owner.approach_reason == 'no mapped road on that side'

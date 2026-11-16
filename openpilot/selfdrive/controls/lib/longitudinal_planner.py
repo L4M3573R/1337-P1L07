@@ -138,6 +138,8 @@ class LongitudinalPlanner:
     self.profile_smoother = ProfileSmoother()
     self.last_profile: AppliedProfile | None = None
     self.force_stop_plan = StopPlan()
+    from openpilot.starpilot.audio.departure_alert import DepartureNotifications
+    self.departure_notifications = DepartureNotifications()
     self.follow_jerk = FollowJerk(CP)
     self.vehicle_cost_owner = planner_cost_owner(CP)
     self.lead_takeoff = LeadTakeoff()
@@ -345,7 +347,7 @@ class LongitudinalPlanner:
 
     # TODO counter is only needed because radar is glitchy, remove once radar is gone
     self.fcw = self.mpc.crash_cnt > 2 and not sm['carState'].standstill
-    if self.CP.carFingerprint == 'SUBARU_CROSSTREK_2025':
+    if self.CP.carFingerprint in ('SUBARU_CROSSTREK_2025', 'SUBARU_IMPREZA_2025'):
       self.fcw = self.fcw and should_trigger_planner_fcw(sm['radarState'].leadOne, float(v_ego))
     if self.fcw:
       cloudlog.info("FCW triggered")
@@ -555,5 +557,6 @@ class LongitudinalPlanner:
     for field, value in stop_log_fields(*getattr(self, 'cem_stop_log', (None, None))).items():
       setattr(hold, field, value)
     pm.send('longitudinalPlan', plan_send)
+    hold.departureAlertKind, hold.departureAlertMonoTime = self.departure_notifications.sample(sm, self.CP, self)
     pm.send('starpilotLongitudinalPlan', companion)
 
