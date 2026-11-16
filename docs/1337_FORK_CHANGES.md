@@ -15,8 +15,13 @@ feature. `scripts/check_1337.py` checks the same list automatically.
      changed `opendbc_repo/opendbc/safety/` or `panda/board/`:
      `T="$(git ls-files 'panda/board/obj/*.bin.signed' | tr '\n' ' ') panda/board/obj/version";
      COMMA_DOCKER_RUN_USER=0:0 scripts/laptop_device_build.sh scons --no-scrub $T` (takes a while).
-   - **pandad / libpanda** (`openpilot/selfdrive/pandad/pandad`, `libpanda.a`): rebuild the same way when either
-     side changed their C++ sources (this fork changed the AOL transport profile in libpanda).
+   - **pandad / libpanda** (`openpilot/selfdrive/pandad/pandad`, `libpanda.a`, the `.o` files): rebuild the same way when
+     either side changed their C++ sources **or any header they compile**, never take upstream's binary because only
+     upstream touched `selfdrive/pandad/`. pandad compiles `starpilot/car/*/aol_policy.h` and the opendbc safety
+     headers; this fork adds the Elantra Hybrid AOL param `0x8C0E` in `starpilot/car/hyundai/aol_policy.h`. The
+     2026-11-16 merge shipped upstream's pandad without it: AOL never started (no `aolSafetyWire`, commIssue on SET)
+     until pandad was rebuilt. Check: `git diff --name-only <base> <ours> | grep -E '\.(c|cc|h)$'`, and run
+     `selfdrive/pandad/tests/test_aol_protocol` (asserts 0x8C0E).
    - **cereal generated C++** (`openpilot/cereal/gen/cpp/custom.capnp.*`): regenerate if `custom.capnp` changed on
      both sides.
 6. Commit the merge, then `.venv/bin/python openpilot/common/prebuilt_manifest.py .`, commit `prebuilt.json`, and
