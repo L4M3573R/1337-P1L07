@@ -1,3 +1,5 @@
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -26,16 +28,20 @@ def load_oob(path, chestnut=False):
     from tinygrad_repo.examples.openpilot.helpers import load_pickle
     return load_pickle(materialize_file_chunked(path), out_of_band=True)
 
-def chestnut_present() -> bool:
+def chestnut_node() -> Path | None:
+  """The Chestnut's /dev/bus/usb node, or None while it is not enumerated."""
   for d in USB_DEVICES_PATH.glob("*"):
     try:
       usb_id = (int((d / "idVendor").read_text(), 16), int((d / "idProduct").read_text(), 16))
       product = (d / "product").read_text().strip()
       if is_chestnut_usb_id(*usb_id) and product == CHESTNUT_USB_PRODUCT:
-        return True
+        return Path(f"/dev/bus/usb/{int((d / 'busnum').read_text()):03d}/{int((d / 'devnum').read_text()):03d}")
     except Exception:
       pass
-  return False
+  return None
+
+def chestnut_present() -> bool:
+  return chestnut_node() is not None
 
 def chestnut_compiled() -> bool:
   path = modeld_pkl_path(chestnut=True)
@@ -44,8 +50,17 @@ def chestnut_compiled() -> bool:
     (MODELS_DIR / f'big_driving_warp_{size}_tinygrad.pkl').is_file() for size in ('1344x760', '1928x1208'))
 
 def wait_for_chestnut(timeout: float = 10.) -> None:
+  # Enumerated is not enough. AGNOS opens /dev/bus/usb to the comma user only once boot reaches multi-user.target
+  # (uevent-helper.service), and until then libusb_open fails with "Access denied". 2026-11-15: a Bluetooth radio
+  # bring-up that failed and retried held that target to 27 s, and the GPU load lost the race by 8 ms. Make the node
+  # writable the same way rather than wait on boot.
   start = time.monotonic()
-  while not chestnut_present():
+  opened = False
+  while (node := chestnut_node()) is None or not os.access(node, os.R_OK | os.W_OK):
+    if node is not None and not opened:
+      opened = True
+      subprocess.run(["sudo", "-n", "chmod", "664", str(node)], capture_output=True, timeout=5)
+      continue
     if time.monotonic() - start > timeout:
-      raise TimeoutError("chestnut did not enumerate")
+      raise TimeoutError("chestnut did not enumerate" if node is None else f"chestnut {node} not accessible")
     time.sleep(0.1)
