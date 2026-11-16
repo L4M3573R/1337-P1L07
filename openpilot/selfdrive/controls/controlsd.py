@@ -29,6 +29,7 @@ from openpilot.starpilot.feature_runtime import enabled as feature_enabled
 from openpilot.starpilot.vehicle_preferences import VehicleStartupPreferences
 from openpilot.starpilot.lateral.pause import LateralPause, read_settings as read_lateral_pause
 from openpilot.starpilot.lateral.model_turn_assist import ModelTurnAssist, update_twitch_guard
+from openpilot.starpilot.lateral.turn_yield import TurnYield
 from openpilot.starpilot.aol.runtime import (
   current_axis,
   current_native,
@@ -124,6 +125,8 @@ class Controls:
       LaneCenteringController(body=interface_dimensions(self.CI, self.CP), body_required=True) if predict_lane_clearance else LaneCenteringController()
     )
     self.curve_guard = self._create_curve_guard()
+    self.turn_yield = TurnYield()
+    self.turn_yield_log = None
     self.lateral_pause = LateralPause(read_lateral_pause(self.params), self.params)
     self.lane_change_preferences = LiveLaneChangePolicy(self.params, now_ns=0 if os.getenv('REPLAY') == '1' else time.monotonic_ns())
     self.lane_change_policy = self.lane_change_preferences.applied
@@ -243,6 +246,22 @@ class Controls:
     except Exception:
       guard.reset()
       return curvature
+
+  def _turn_yielding(self, CS, CC) -> bool:
+    """Turn yield (starpilot/lateral/turn_yield.py): no comma torque while the driver steers a turn toward the blinker."""
+    try:
+      yielding = self.turn_yield.update(time.monotonic(), v_ego=CS.vEgo, left_blinker=bool(CS.leftBlinker),
+                                        right_blinker=bool(CS.rightBlinker), steering_pressed=bool(CS.steeringPressed),
+                                        steering_torque=float(CS.steeringTorque), lat_active=bool(CC.latActive))
+      if self.turn_yield_log is None:
+        from openpilot.starpilot.diagnostics.features import ChangeLog
+        self.turn_yield_log = ChangeLog('turn_yield', min_gap_s=0.5)
+      self.turn_yield_log.observe({'yielding': yielding}, {'v_ego': CS.vEgo, 'driver_torque': CS.steeringTorque,
+                                                           'steering_deg': CS.steeringAngleDeg})
+      return yielding
+    except Exception:
+      self.turn_yield = TurnYield()
+      return False
 
   def _select_nnlc(self) -> bool:
     """Once per drive: does the personal NNLC feedforward steer this drive? Any failure means no."""
@@ -692,7 +711,8 @@ class Controls:
     if nnlc is not None:
       nnlc.set_plan(model_v2)
     steer, lateral_output, lac_log = self.LaC.update(
-      CC.latActive, CS, self.VM, lp, self.steer_limited_by_safety, self.desired_curvature, curvature_limited, lat_delay
+      CC.latActive and not self._turn_yielding(CS, CC), CS, self.VM, lp, self.steer_limited_by_safety, self.desired_curvature,
+      curvature_limited, lat_delay
     )
     actuators.torque = float(steer)
     if self.CP.steerControlType == car.CarParams.SteerControlType.curvature:

@@ -76,7 +76,17 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
 - **Personal NNLC with automatic trial** (`6c339a40be`, `c5e36c122d`): `starpilot/lateral/nnlc/`,
   `latcontrol_torque.py` (NNLC hook after friction), `controlsd.py` (`_select_nnlc`; FLM off on NNLC drives).
   Trained off-car by the DR4L container (see "Outside the repo").
-- **Curve guard (opt-in)** (`9110e41e79`): `starpilot/lateral/curve_guard.py`, `controlsd.py` (`_apply_curve_guard`).
+- **Curve guard (opt-in)** (`9110e41e79`): `starpilot/lateral/curve_guard.py`, `controlsd.py` (`_apply_curve_guard`). Since
+  2026-11-16 a blinker alone no longer stands it down (signalling for a merge kept it off on an on-ramp curve); only a
+  lane change under way does.
+- **No lane change into a lane that is not there** (2026-11-16): `adjacent_lane_evidence.lane_clearly_absent` (far line
+  under 15 %, road edge on that side under 1 m std and within 2.5 m of the lane line over 30 m), `desire_helper.py`
+  (`no_lane`: neither a nudge nor auto starts the change), `modeld.py`. Replayed on the 36 lane changes of 2026-11-14/15:
+  blocks 9, all turns signalled above 20 mph or the on-ramp cut, none of the 27 real lane changes.
+- **Turn yield** (2026-11-16): `starpilot/lateral/turn_yield.py`, `controlsd._turn_yielding`. Below 20 mph with one
+  blinker, while the driver steers toward it, the lateral controller runs inactive (no torque, state reset; latActive
+  stays true) and takes back over 0.3 s after release; logs `turn_yield` changes. The controller had pushed back at full
+  torque in 7 of 37 comma-steered turns; a replay covers 88 % of those samples.
 
 ### Turns
 - **Blinker turn guidance** (`36a3dc1aa9`, `d2ecbfb5c2`, `42de700f0b`, `4f1ebefe17`): `starpilot/navigation/intent.py`,
