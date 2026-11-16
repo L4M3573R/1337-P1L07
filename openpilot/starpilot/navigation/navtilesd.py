@@ -4,8 +4,8 @@ The only process that requests map tiles. The renderer reads tiles from disk
 and never touches the network, so a slow or metered connection can never stall
 a frame. Priorities, highest first:
 
-  1. Tiles around the car and ahead of it, while the map overlay is on a layout (or a smaller patch for blinker
-     turns timed to the road, when those are on).
+  1. Tiles around the car and ahead of it, while the map overlay is on a layout or blinker turns timed to the road
+     are on (the same reach for both since 2026-11-16: a turn should never find its tile missing).
   2. The active route's corridor.
   3. Offline areas, only on Wi-Fi or Ethernet.
 
@@ -36,8 +36,6 @@ from openpilot.starpilot.navigation.road_tiles import (
 
 NEAR_RADIUS_M = 2500.0
 AHEAD_M = 6000.0
-TURN_NEAR_RADIUS_M = 600.0  # blinker turns only need the roads close by
-TURN_AHEAD_M = 1500.0
 REQUEST_TIMEOUT = (4.0, 10.0)
 NETWORK_BACKOFF_S, SERVER_BACKOFF_S, KEY_BACKOFF_S = 15.0, 30.0, 300.0
 AREA_INTERVAL_S = 0.12          # at most ~8 offline-area tiles a second
@@ -234,11 +232,10 @@ class TileDaemon:
     settings = self.state.settings()
     if env.onroad and (env.map_enabled or env.turns_enabled) and env.position is not None:
       lat, lon = env.position
-      cell = (round(lat * 200), round(lon * 200), None if env.bearing is None else round(env.bearing / 30), env.map_enabled)
+      cell = (round(lat * 200), round(lon * 200), None if env.bearing is None else round(env.bearing / 30))
       if cell != self.near_key:
         self.near_key = cell
-        near, ahead = (NEAR_RADIUS_M, AHEAD_M) if env.map_enabled else (TURN_NEAR_RADIUS_M, TURN_AHEAD_M)
-        self.urgent = deque(key for key in ahead_tiles(lat, lon, env.bearing, near, ahead))
+        self.urgent = deque(key for key in ahead_tiles(lat, lon, env.bearing, NEAR_RADIUS_M, AHEAD_M))
     else:
       self.near_key = None
       self.urgent.clear()

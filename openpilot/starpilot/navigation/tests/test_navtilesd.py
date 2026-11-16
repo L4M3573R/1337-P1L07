@@ -106,6 +106,18 @@ def test_near_car_tiles_are_saved_as_you_drive(tmp_path):
   assert any(d.store.has("cache", key) for key in ahead_tiles(36.30, -115.1728, 0.0))
 
 
+def test_blinker_turns_alone_get_the_full_reach_ahead(tmp_path):
+  # 2026-11-16: turns once got a 600 m patch and 1.5 km ahead, about one tile; a short dead zone left no tile for a turn
+  d = daemon(tmp_path)
+  env = Environment(token="pk.test", network="cellular", onroad=True, map_enabled=False, turns_enabled=True,
+                    position=(36.1147, -115.1728), bearing=0.0)
+  run(d, env)
+  keys = ahead_tiles(36.1147, -115.1728, 0.0)
+  assert all(d.store.has("driven", key) for key in keys)
+  north = TileKey(DATA_ZOOM, int(world_xy(36.1147, -115.1728)[0]), int(world_xy(36.1147, -115.1728)[1]) - 3)
+  assert north in keys
+
+
 def test_map_off_or_offroad_fetches_nothing_near_the_car(tmp_path):
   d = daemon(tmp_path)
   for env in (Environment(token="pk.test", network="wifi", onroad=True, map_enabled=False, position=(36.1, -115.1)),

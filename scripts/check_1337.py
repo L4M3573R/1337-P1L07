@@ -55,7 +55,7 @@ FEATURES = [
     (STARPILOT + 'navigation/side_road.py', r'def find\('),
     (STARPILOT + 'navigation/intent.py', r'self\.blinker_turn = BlinkerTurn\(\)'),
     (STARPILOT + 'navigation/intent.py', r"log\.Desire\.laneChangeLeft, log\.Desire\.laneChangeRight\)\)"),
-    (STARPILOT + 'navigation/navtilesd.py', r'TURN_NEAR_RADIUS_M'),
+    (STARPILOT + 'navigation/navtilesd.py', r'env\.map_enabled or env\.turns_enabled'),
     (OP + 'selfdrive/modeld/modeld.py', r'"gpsLocationExternal", "gpsLocation", "starpilotCarState"'),
     (OP + 'selfdrive/ui/mici/onroad/alert_renderer.py', r"'turningLeft'"),
     (STARPILOT + 'ui/onroad_alerts.py', r"'turningLeft', 'turningRight'")],
