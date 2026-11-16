@@ -57,7 +57,9 @@ def test_no_mapped_road_waits_for_a_nudge_and_never_turns_on_its_own():
     assert not d.turning
   assert d.reason == 'map: no road there, waiting for a nudge'
   assert turn.update(5.1, 'left', V, 0.0, None, nudged=True).turning
-  assert bt.BlinkerTurn().update(0.0, 'left', V, 0.0, None, nudged=False).reason == 'no map here, waiting for a nudge'
+  assert bt.BlinkerTurn().update(0.0, 'left', V, 0.0, None, nudged=False).reason == 'map: looking up the road, waiting for a nudge'
+  unknown = bt.Lookup(0.0, 'left', None, False)
+  assert bt.BlinkerTurn().update(0.0, 'left', V, 0.0, unknown, nudged=False).reason == 'no map here, waiting for a nudge'
 
 
 def test_once_turning_it_holds_until_the_car_has_turned():
@@ -132,7 +134,7 @@ def test_shadow_mode_keeps_the_old_turn_and_logs_the_timed_decision(monkeypatch,
   owner = TurnIntent(params, cp)
   assert select(owner, sm) == log.Desire.turnLeft  # the old behavior still steers
   logged = turn_decision(owner, log.Desire.turnLeft)
-  assert logged['timed'] == 'no map here, waiting for a nudge' and not logged['timed_turning']
+  assert logged['timed'] == 'map: looking up the road, waiting for a nudge' and not logged['timed_turning']
   sm['carState'].steeringPressed, sm['carState'].steeringTorque = True, 90.0
   select(owner, sm)
   assert turn_decision(owner, log.Desire.turnLeft)['timed_turning']
@@ -146,7 +148,7 @@ def test_map_mode_waits_instead_of_turning_at_once(monkeypatch, turn_case):
   monkeypatch.setattr(bt, 'mode', lambda path=None: 'map')
   sm['carState'].steeringPressed, sm['carState'].steeringTorque = False, 0.0
   owner = TurnIntent(params, cp)
-  assert select(owner, sm) == log.Desire.none and owner.blocked_by == 'no map here, waiting for a nudge'
+  assert select(owner, sm) == log.Desire.none and owner.blocked_by == 'map: looking up the road, waiting for a nudge'
   sm['carState'].steeringPressed, sm['carState'].steeringTorque = True, 90.0
   assert select(owner, sm) == log.Desire.turnLeft and owner.source == 'nudge'
   sm['carState'].steeringPressed = False

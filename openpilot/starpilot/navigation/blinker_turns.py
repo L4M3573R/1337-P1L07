@@ -282,7 +282,9 @@ class BlinkerTurn:
       return Decision(False, 'map: waiting for the road', distance)
     if nudged:
       return self._start(heading, 'nudge', None)
-    return Decision(False, 'map: no road there, waiting for a nudge' if lookup is not None and lookup.map_known
+    if lookup is None:  # the first moments of a blinker, before sideroadd answers: not yet a missing map
+      return Decision(False, 'map: looking up the road, waiting for a nudge')
+    return Decision(False, 'map: no road there, waiting for a nudge' if lookup.map_known
                     else 'no map here, waiting for a nudge')
 
   def _start(self, heading, reason, distance) -> Decision:
