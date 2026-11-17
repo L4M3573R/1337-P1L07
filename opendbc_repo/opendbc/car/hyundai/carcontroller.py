@@ -361,7 +361,7 @@ class CarController(CarControllerBase):
           _projection.emit('hyundai.BLENDED_LKAS11', apply_torque, apply_steer_req, can_sends[_projection_packet_index])
     elif self.CP.carFingerprint != CAR.KIA_RAY_EV or self._ray_lkas11_active:
       can_sends.append(hyundaican.create_lkas11(self.packer, self.frame, self.CP, apply_torque, apply_steer_req,
-                                              torque_fault, CS.lkas11, sys_warning, sys_state, hud_enabled,
+                                              torque_fault, CS.daw.lkas11(CS.lkas11), sys_warning, sys_state, hud_enabled,
                                               hud_control.leftLaneVisible, hud_control.rightLaneVisible,
                                               left_lane_warning, right_lane_warning,
                                               ray_lka_icon=(self._ray_lfa_icon or 1) if self.CP.carFingerprint == CAR.KIA_RAY_EV else None,
