@@ -205,8 +205,10 @@ def test_one_blinker_takes_one_turn():
     t = 1.0 + i * 0.1
     d = turn.update(t, 'left', V, -80.0, lookup(t, 20.0), nudged=False)
     assert not d.turning, d.reason
-  assert d.reason == 'turn done, waiting for the blinker to go off or a nudge'
-  assert turn.update(7.0, 'left', V, -80.0, lookup(7.0, 20.0), nudged=True).turning   # a nudge still turns
+  assert d.reason == 'turn done, one turn per blinker'
+  # 2026-11-17: the driver steering out of a turn counted as a nudge and started a second one (toward the trees):
+  # after a turn, a nudge on the same blinker does nothing
+  assert not turn.update(7.0, 'left', V, -80.0, lookup(7.0, 20.0), nudged=True).turning
   turn.update(7.1, None, V, -80.0, None, nudged=False)                               # blinker off: a new blinker
   assert turn.update(7.2, 'left', V, -80.0, lookup(7.2, 5.0), nudged=False).turning
 
@@ -333,3 +335,19 @@ def test_a_stale_map_answer_does_not_slow(monkeypatch, turn_case):
   owner.map_finder.t = NOW / 1e9 - 10.0   # ten seconds old
   owner.select(sm, NOW, log.Desire.none, supported=True, model_stop=False)
   assert written[-1]['distance_m'] is None and owner.approach_reason == 'no mapped road on that side'
+
+
+def test_steering_a_turn_by_hand_is_not_a_nudge():
+  # the wheel already well into a turn: the driver is turning, not asking the comma to
+  assert bt.nudged_toward('left', True, 120.0, 10.0)
+  assert not bt.nudged_toward('left', True, 120.0, 72.0)
+  assert not bt.nudged_toward('right', True, -120.0, -60.0)
+  assert bt.nudged_toward('left', True, 120.0)        # callers without the angle keep the old rule
+
+
+def test_turning_without_the_comma_takes_no_turn_on_the_same_blinker():
+  turn = bt.BlinkerTurn()
+  turn.update(0.0, 'left', V, 0.0, lookup(0.0, 120.0), nudged=False)
+  turn.update(0.5, 'left', V, -75.0, lookup(0.5, 5.0), nudged=False)    # the driver turned by hand
+  d = turn.update(1.0, 'left', V, -75.0, lookup(1.0, 5.0), nudged=True)
+  assert not d.turning and d.reason.endswith('one turn per blinker')

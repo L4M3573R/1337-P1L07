@@ -36,7 +36,9 @@ from typing import NamedTuple
 
 import numpy as np
 
-from openpilot.starpilot.efficiency.experiment import CATEGORIES, TIME_BUDGET_S_PER_H
+from openpilot.starpilot.efficiency.dials import (DIALS, Situation, decode, encode, is_dial_variant, load_state, new_situation,
+                                                  state_doc)
+from openpilot.starpilot.efficiency.experiment import CATEGORIES, TIME_BUDGET_S_PER_H, VETO_LIMIT, load_vetoes
 from openpilot.starpilot.efficiency.ledger import BATTERY_KWH, GAL_PER_BATTERY_KWH
 
 METERS_PER_MILE = 1609.344
@@ -152,7 +154,7 @@ def samples(drives: list[list[dict]], corrections: dict | None = None,
       if not isinstance(tag, str) or tag.count('|') != 2:
         continue
       category, context, variant = tag.split('|')
-      if category not in CATEGORIES or variant not in CATEGORIES[category]:
+      if category not in CATEGORIES or (variant not in CATEGORIES[category] and not is_dial_variant(category, variant)):
         continue
       run_season = season_of(s.get('ambient_c'))
       if season is not None and run_season != season:
@@ -340,6 +342,106 @@ def _spend_budget(results: dict, options: dict, miles_per_hour: dict[str, float]
   results['_budget'] = {'budget_min_per_hr': round(budget, 2), 'left_min_per_hr': round(left, 2)}
 
 
+def _pair(category: str, center_rows: list, probe_rows: list, rng: random.Random):
+  """(center gal, center min, probe gal, probe min per 100 mi, confidence the probe uses less) on the roads both drove,
+  or None while either side is short."""
+  if not enough(category, center_rows) or not enough(category, probe_rows):
+    return None
+  rows = {'center': center_rows, 'probe': probe_rows}
+  strata = _common_strata(category, rows)
+  if not strata:
+    return None
+  (cg, cm), (pg, pm) = _rates(center_rows, strata), _rates(probe_rows, strata)
+  wins = sum(_rates(_resample(probe_rows, rng), strata)[0] < _rates(_resample(center_rows, rng), strata)[0]
+             for _ in range(RESAMPLES))
+  return cg, cm, pg, pm, wins / RESAMPLES
+
+
+def judge_dials(data: dict, state: dict[str, Situation], vetoes: dict[str, int], rng: random.Random | None = None, *,
+                situation_miles_per_hour: dict[str, float] | None = None,
+                budget_min_per_hr: float = TIME_BUDGET_S_PER_H / 60.0) -> tuple[dict[str, Situation], dict[str, dict]]:
+  """Move each situation's dials (dials.py): a probe that beats the center becomes it, both sides of a dial losing
+  halves its step. Moves that cost time must fit the budget across every situation's center. Returns the new state
+  and a report per situation."""
+  rng = rng or random.Random(0)
+  share = situation_miles_per_hour or {}
+  keys = sorted({f'{k[0]}|{k[1]}' for k in data if k[0] in DIALS} | set(state))
+  new = {k: Situation(dict(s.center), dict(s.step), s.cost_min_per_100mi, s.moves) for k, s in state.items()}
+  used = sum(max(s.cost_min_per_100mi, 0.0) * share.get(k, 0.0) / 100.0 for k, s in new.items())
+  report: dict[str, dict] = {}
+  pending = []   # (gal per extra minute or inf, key, probe values, saved, extra minutes, gain)
+  for key in keys:
+    category, context = key.split('|')
+    sit = new.setdefault(key, new_situation(category))
+    center = encode(category, sit.center)
+    center_rows = data.get((category, context, center), [])
+    entry = report[key] = {'center': center, 'step': dict(sit.step), 'probes': {}}
+    if vetoes.get(f'{key}|{center}', 0) >= VETO_LIMIT:
+      # the driver kept pressing on at this setting: back one step toward normal on every slower dial
+      for d in DIALS[category]:
+        if d.slower and (sit.center[d.key] - d.start) * d.slower > 1e-9:
+          sit.center[d.key] = d.clamp(sit.center[d.key] - d.slower * sit.step[d.key])
+      entry['status'] = 'vetoed by the driver: stepped back toward normal'
+      continue
+    lost: dict[str, set] = {}
+    best = None
+    for variant, dial, direction in sit.probes(category):
+      result = _pair(category, center_rows, data.get((category, context, variant), []), rng)
+      if result is None:
+        entry['probes'][variant] = 'collecting'
+        continue
+      cg, cm, pg, pm, confidence = result
+      gain = 1.0 - pg / cg if cg > 0 else 0.0
+      extra = pm - cm
+      ratio = (cg - pg) / extra if extra > 0 else math.inf   # gallons saved per extra minute (inf: costs no time)
+      entry['probes'][variant] = (f'{100 * gain:+.1f}% fuel, {extra:+.2f} min/100 mi'
+                                  + (f', {ratio:.3f} gal per extra minute' if extra > 0 else '') + f', {confidence:.0%} sure')
+      if gain >= MIN_GAIN and confidence >= CONFIDENCE:
+        if ratio < MIN_GAL_PER_MINUTE:
+          entry['probes'][variant] += ': not worth the time'
+        # time-free savings first, then the most fuel per extra minute (the fuel-to-time ratio), then the most fuel
+        elif best is None or (ratio, cg - pg) > (best[0], best[3]):
+          best = (ratio, key, variant, cg - pg, extra, gain)
+      elif confidence < 1.0 - CONFIDENCE or gain < MIN_GAIN:
+        lost.setdefault(dial, set()).add(direction)
+    if best is not None:
+      pending.append(best)
+      continue
+    for d in DIALS[category]:
+      sides = {direction for _, dial, direction in sit.probes(category) if dial == d.key}
+      if sides and lost.get(d.key, set()) >= sides:
+        sit.step[d.key] = max(d.finest, sit.step[d.key] / 2.0)
+    settled = all(sit.step[d.key] <= d.finest + 1e-9 for d in DIALS[category])
+    entry['status'] = ('settled' if settled and not any(v == 'collecting' for v in entry['probes'].values())
+                       else 'collecting' if not center_rows else 'searching')
+  # time-free moves first, then the budget on the moves that save the most fuel per extra minute
+  for _ratio, key, variant, _saved, extra, gain in sorted(pending, key=lambda p: (p[4] > 0, -p[0])):
+    category = key.split('|')[0]
+    per_hr = max(extra, 0.0) * share.get(key, 0.0) / 100.0
+    if extra > 0 and used + per_hr > budget_min_per_hr + 1e-9:
+      report[key]['status'] = f'{variant} saves {100 * gain:.1f}% but the time budget is used'
+      continue
+    sit = new[key]
+    sit.center = dict(decode(category, variant))
+    sit.cost_min_per_100mi += extra
+    sit.moves += 1
+    used += per_hr
+    report[key]['status'] = (f'moved to {variant}: {100 * gain:.1f}% less fuel'
+                             + (f', {extra:+.2f} min/100 mi, {_ratio:.3f} gal per extra minute' if extra > 0 else ', no extra time'))
+  report['_budget'] = {'budget_min_per_hr': round(budget_min_per_hr, 2), 'used_min_per_hr': round(used, 2)}
+  return new, report
+
+
+def engine(root: Path) -> str:
+  """experiment.json "engine": 'dials' (the dials drive), 'shadow' (fixed variants drive, the dials only log what
+  they would try: the default until the driver has checked them), or 'presets'."""
+  try:
+    value = json.loads((root / 'experiment.json').read_text()).get('engine')
+  except (OSError, ValueError, TypeError, AttributeError):
+    return 'shadow'
+  return value if value in ('dials', 'shadow', 'presets') else 'shadow'
+
+
 def situation_miles(drives: list[list[dict]], season: str | None = None) -> dict[str, float]:
   """'category|context' -> miles per engaged hour spent in it (comma-driven stretches of the same season)."""
   miles: dict[str, float] = {}
@@ -376,10 +478,17 @@ def update(root: Path) -> dict:
   corrections = fit_corrections(load_drives(root))   # the road and speed costs: every drive is physics
   drives = load_drives(root, since=JUDGE_FROM)        # the road tests: only drives under the current variants
   season = current_season(drives)
-  results = judge(samples(drives, corrections, season), situation_miles_per_hour=situation_miles(drives, season))
+  data = samples(drives, corrections, season)
+  miles_per_hour = situation_miles(drives, season)
+  results = judge(data, situation_miles_per_hour=miles_per_hour)
   budget = results.pop('_budget', None)
+  state = load_state(root / 'experiments.json')
+  dial_report = {}
+  if engine(root) == 'dials':
+    state, dial_report = judge_dials(data, state, load_vetoes(root / 'vetoes.json'), situation_miles_per_hour=miles_per_hour)
   doc = {'version': 1, 'winners': {k: r['winner'] for k, r in results.items() if r['winner']}, 'results': results,
-         'corrections': corrections, 'season': season, 'budget': budget}
+         'corrections': corrections, 'season': season, 'budget': budget, 'dials': state_doc(state),
+         'dial_results': dial_report}
   path = root / 'experiments.json'
   tmp = path.with_suffix('.tmp')
   tmp.write_text(json.dumps(doc, indent=1))
@@ -396,6 +505,9 @@ def report_lines(doc: dict) -> list[str]:
   b = doc.get('budget') or {}
   if b:
     lines.append(f"  time budget: {b.get('budget_min_per_hr', 0):g} min/hr, {b.get('left_min_per_hr', 0):g} left after the chosen variants")
+  for key, r in sorted((doc.get('dial_results') or {}).items()):
+    if not key.startswith('_'):
+      lines.append(f"  dials {key:16s} {r.get('status', '?')}  [center {r.get('center')}]")
   for key, r in sorted(doc.get('results', {}).items()):
     scores = ', '.join(f'{v} {x:.2f}' for v, x in r['gal_per_100mi'].items())
     lines.append(f"  {key:22s} {r['status']}  [gal/100mi: {scores}]")

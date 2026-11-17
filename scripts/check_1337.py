@@ -79,7 +79,7 @@ FEATURES = [
     (OP + 'selfdrive/controls/lib/desire_helper.py', r'not no_lane and'),
     (OP + 'selfdrive/modeld/modeld.py', r'no_lane = direction != 0 and lane_clearly_absent\(modelv2_send\.modelV2, direction\)')],
    [STARPILOT + 'lateral/tests/test_auto_lane_change.py', OP + 'selfdrive/controls/tests/test_desire_helper_preferences.py']),
-  ('Settings: "L4 custom" tile (personal steering, curve guard, BlueDriver fuel, comma vs you, P&G band)',
+  ('Settings: "L4 custom" tile (NNLC, curve guard, BlueDriver fuel, comma vs you, P&G band)',
    [(OP + 'selfdrive/ui/mici/layouts/settings/settings.py', r'L4 custom'),
     (STARPILOT + 'ui/settings_state.py', r'Destination\.L4_CUSTOM, "L4 Custom"'),
     (STARPILOT + 'ui/runtime_compact.py', r'if destination == runtime\.Destination\.L4_CUSTOM:'),  # moved there by upstream 2026-11-14

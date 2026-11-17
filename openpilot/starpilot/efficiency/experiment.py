@@ -121,6 +121,7 @@ class Plan:
   accel_max: float | None = None           # cap the cruise acceleration
   pulse_glide: bool | None = None          # turn Pulse and Glide on / off (None: leave it)
   tag: str | None = None                   # 'category|context|variant' for the fuel ledger
+  pulse_glide_tuning: tuple[float, float, float] | None = None   # dials: band (m/s), pulse scale, glide extra regen
 
 
 @dataclass
@@ -216,6 +217,7 @@ class Experimenter:
   cruise_turn: int = 0           # rotates the cruising experiments: Pulse and Glide, cruise speed, holding flat
   vetoes: dict[str, int] = field(default_factory=dict)   # 'category|context|variant' -> driver gas presses (all drives)
   vetoed_episode: int = 0        # the episode a veto was already counted for
+  pulse_glide_max_mps: float = PULSE_GLIDE_MAX_MPS   # Pulse and Glide is only tried below this
 
   # ---------- budget ----------
   def budget_left_s(self) -> float:
@@ -294,7 +296,7 @@ class Experimenter:
     # level cruising: the experiments take turns
     options = []
     if f.v_ego >= CRUISE_MIN_MPS and f.v_set >= CRUISE_MIN_MPS:
-      if not f.pulse_glide_by_driver and f.v_ego < PULSE_GLIDE_MAX_MPS:
+      if not f.pulse_glide_by_driver and f.v_ego < self.pulse_glide_max_mps:
         options.append(('pulse_glide', band(f.v_ego)))
       options.append(('cruise', band(f.v_ego)))
       options.append(('hold', band(f.v_ego)))
@@ -334,7 +336,7 @@ class Experimenter:
     dt = 0.0 if self.last_t is None else min(max(f.t - self.last_t, 0.0), 0.5)
     self.last_t = f.t
     ep = self.episode
-    if f.gas and ep is not None and ep.variant in SLOWER_VARIANTS and self.vetoed_episode != ep.number:
+    if f.gas and ep is not None and self._is_slower(ep) and self.vetoed_episode != ep.number:
       # the driver pressed on during a slower variant: it was not acceptable here
       self.vetoed_episode = ep.number
       key = ep.tag()
@@ -353,17 +355,24 @@ class Experimenter:
         variant = self.draw(*where)
         self.episodes += 1
         self.episode = ep = Episode(where[0], where[1], variant, f.t, self.distance_m, self.episodes)
-        if ep.category == 'stop':
-          self.stop_decel = max(STOP_REGEN_DECEL, self._stop_decel_needed(f) or STOP_REGEN_DECEL)
         key = ep.tag()
         self.tried[key] = self.tried.get(key, 0) + 1
-        if ep.category in ('launch', 'accelerate') and variant in ACCEL_VARIANTS:
-          # speeding up by dv at a takes dv / (2 a) longer than being at speed: the extra over the normal rate
-          dv = max(min(f.v_set, LAUNCH_END_MPS) if ep.category == 'launch' else f.v_set - f.v_ego, 0.0)
-          normal = normal_accel(f.v_ego + dv / 2.0)
-          self.spent_s += dv / 2.0 * (1.0 / (ACCEL_VARIANTS[variant] * normal) - 1.0 / normal)
+        self._started(ep, f)
     self.was_standstill = f.standstill
     return self._plan(f, ep, dt)
+
+  def _is_slower(self, ep: Episode) -> bool:
+    """The episode drives slower than normal (a gas press during it counts as the driver's veto)."""
+    return ep.variant in SLOWER_VARIANTS
+
+  def _started(self, ep: Episode, f: Frame) -> None:
+    if ep.category == 'stop':
+      self.stop_decel = max(STOP_REGEN_DECEL, self._stop_decel_needed(f) or STOP_REGEN_DECEL)
+    if ep.category in ('launch', 'accelerate') and ep.variant in ACCEL_VARIANTS:
+      # speeding up by dv at a takes dv / (2 a) longer than being at speed: the extra over the normal rate
+      dv = max(min(f.v_set, LAUNCH_END_MPS) if ep.category == 'launch' else f.v_set - f.v_ego, 0.0)
+      normal = normal_accel(f.v_ego + dv / 2.0)
+      self.spent_s += dv / 2.0 * (1.0 / (ACCEL_VARIANTS[ep.variant] * normal) - 1.0 / normal)
 
   def _plan(self, f: Frame, ep: Episode | None, dt: float) -> Plan:
     target_offset = 0.0
@@ -412,3 +421,75 @@ class Experimenter:
     return {'tag': ep.tag() if ep is not None else None, 'episode': ep.number if ep is not None else 0,
             'spent_s': round(self.spent_s, 1), 'budget_left_s': round(self.budget_left_s(), 1),
             'engaged_min': round(self.engaged_s / 60.0, 1)}
+
+
+@dataclass
+class DialExperimenter(Experimenter):
+  """The same situations and safety rules, but each draws a dial setting (dials.py): the learned center, or one dial
+  moved a step from it. The time budget, the driver's vetoes and the pedals work as for the fixed variants."""
+  state: dict = field(default_factory=dict)   # 'category|context' -> dials.Situation
+  # Pulse and Glide is tried at every speed (band 0 = off is where it starts): the dials find where it pays
+  pulse_glide_max_mps: float = math.inf
+
+  def situation_state(self, category: str, context: str):
+    from openpilot.starpilot.efficiency.dials import new_situation
+    return self.state.get(f'{category}|{context}') or new_situation(category)
+
+  def draw(self, category: str, context: str) -> str:
+    from openpilot.starpilot.efficiency.dials import EXPLOIT, costs_time, decode, encode, slower_than, start_values
+    key = f'{category}|{context}'
+    sit = self.situation_state(category, context)
+    budget_ok = self.budget_left_s() > 0
+    center = encode(category, sit.center)
+    center_ok = (budget_ok or not costs_time(category, sit.center)) and self.vetoes.get(f'{key}|{center}', 0) < VETO_LIMIT
+    if not center_ok:
+      center = encode(category, start_values(category))   # out of minutes (or vetoed here): normal driving
+    probes = [v for v, _, _ in sit.probes(category)
+              if self.vetoes.get(f'{key}|{v}', 0) < VETO_LIMIT and
+              (budget_ok or not slower_than(category, decode(category, v), decode(category, center)))]
+    if probes and self.rng.random() >= EXPLOIT:
+      fewest = min(self.tried.get(f'{key}|{v}', 0) for v in probes)
+      return self.rng.choice([v for v in probes if self.tried.get(f'{key}|{v}', 0) == fewest])
+    return center
+
+  def _is_slower(self, ep: Episode) -> bool:
+    from openpilot.starpilot.efficiency.dials import costs_time, decode
+    values = decode(ep.category, ep.variant)
+    return values is not None and costs_time(ep.category, values)
+
+  def _started(self, ep: Episode, f: Frame) -> None:
+    from openpilot.starpilot.efficiency.dials import decode, episode_time_s
+    values = decode(ep.category, ep.variant)
+    if values is None:
+      return
+    if ep.category == 'stop':
+      self.stop_decel = max(values['r'], self._stop_decel_needed(f) or 0.0)   # the gentlest steady slowdown that makes it
+    target = min(f.v_set, LAUNCH_END_MPS) if ep.category == 'launch' else f.v_set
+    self.spent_s += episode_time_s(ep.category, values, v_ego=f.v_ego, v_target=target, normal_at=normal_accel)
+
+  def _plan(self, f: Frame, ep: Episode | None, dt: float) -> Plan:
+    from openpilot.starpilot.efficiency.dials import Effect, decode, effect, ongoing_time_s
+    values = decode(ep.category, ep.variant) if ep is not None else None
+    own_target = f.v_set + min(self.offset_mps, 0.0)
+    eff = Effect()
+    if values is not None:
+      eff = effect(ep.category, values, v_ego=f.v_ego, v_target=f.v_set, normal=normal_accel(f.v_ego),
+                   below_target_mps=own_target - f.v_ego)
+    step = RAMP_MPS2 * dt
+    self.offset_mps = min(max(eff.target_offset_mps, self.offset_mps - step), self.offset_mps + step)
+    if f.gas or f.brake or not f.long_active:
+      self.offset_mps = 0.0
+    if values is not None and f.long_active:
+      self.spent_s += ongoing_time_s(ep.category, values, f.v_set, dt)
+    ceiling = f.v_set + self.offset_mps if self.offset_mps < 0 else None
+    if eff.stop_rate is not None and f.stop_distance_m is not None:
+      stop_ceiling = math.sqrt(2.0 * self.stop_decel * max(f.stop_distance_m, 0.0))
+      ceiling = stop_ceiling if ceiling is None else min(ceiling, stop_ceiling)
+      if stop_ceiling < f.v_ego:
+        self.spent_s += dt * min(1.0, f.v_ego / max(stop_ceiling, 1.0) - 1.0)   # slowing earlier than the planner would
+    bonus = self.offset_mps if self.offset_mps > 0 else 0.0
+    pulse_glide = tuning = None
+    if ep is not None and ep.category == 'pulse_glide' and not f.pulse_glide_by_driver and values is not None:
+      pulse_glide = eff.pulse_glide is not None
+      tuning = eff.pulse_glide
+    return Plan(ceiling, bonus, eff.accel_max, pulse_glide, ep.tag() if ep is not None else None, tuning)

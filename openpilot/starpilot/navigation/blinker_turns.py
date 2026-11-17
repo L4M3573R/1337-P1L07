@@ -39,6 +39,9 @@ LOOKUP_MAX_AGE_S = 3.0
 TILE_RADIUS_M = 320.0
 TILE_CACHE = 24
 NUDGE_NM = 0.0  # any driver torque toward the blinker while steeringPressed counts as the nudge
+# ...but only while the wheel is still near straight: steering a turn by hand is the driver turning, not a request for
+# the comma to turn (2026-11-17: steering through a turn started a second turn, which steered toward the trees after it)
+NUDGE_MAX_ANGLE_DEG = 45.0
 MODES = ('shadow', 'map', 'speed')
 MAX_CONFIG_BYTES = 4096
 REQUEST_PATH = Path('/dev/shm/starpilot_side_road_request.json')
@@ -292,7 +295,9 @@ class BlinkerTurn:
         return self._start(heading, 'map: pulling away from the stop', distance)
       return Decision(False, 'map: waiting for the road', distance)
     if self.map_done is not None:
-      return self._nudge_or_wait(heading, nudged, f'{self.map_done}, waiting for the blinker to go off or a nudge')
+      # one blinker, one turn: after a turn (the comma's or the driver's) nothing more until the blinker goes off;
+      # the driver still steering out of it used to count as a nudge and start a second turn (2026-11-17)
+      return Decision(False, f'{self.map_done}, one turn per blinker')
     if nudged:
       return self._start(heading, 'nudge', None)
     if lookup is None:  # the first moments of a blinker, before sideroadd answers: not yet a missing map
@@ -312,8 +317,12 @@ class BlinkerTurn:
     return Decision(True, reason, distance)
 
 
-def nudged_toward(side: str | None, steering_pressed: bool, steering_torque: float) -> bool:
-  """The driver pushing the wheel toward the blinker (positive torque is to the left, as in the lane-change helper)."""
+def nudged_toward(side: str | None, steering_pressed: bool, steering_torque: float,
+                  steering_angle_deg: float | None = None) -> bool:
+  """The driver pushing the wheel toward the blinker (positive torque is to the left, as in the lane-change helper),
+  with the wheel still near straight."""
   if side is None or not steering_pressed:
+    return False
+  if steering_angle_deg is not None and not abs(steering_angle_deg) < NUDGE_MAX_ANGLE_DEG:
     return False
   return steering_torque > NUDGE_NM if side == 'left' else steering_torque < -NUDGE_NM

@@ -9,15 +9,15 @@ def _fmt_delta(value: float, metric: bool) -> str:
 
 
 class L4CustomLayoutMici(NavScroller):
-  """One tile per L4 setting. Personal steering and curve guard apply from the next drive; BlueDriver logging and the
+  """One tile per L4 setting. NNLC and curve guard apply from the next drive; BlueDriver logging and the
   P&G band apply live."""
 
   def __init__(self):
     super().__init__()
     params = ui_state.params
 
-    self._nnlc = BigMultiToggle("personal steering", list(settings.NNLC_MODES), select_callback=self._on_nnlc,
-                                description="Your own steering model, trained on your drives.\n" +
+    self._nnlc = BigMultiToggle("nnlc", list(settings.NNLC_MODES), select_callback=self._on_nnlc,
+                                description="Neural net lateral control: your own steering model, trained on your drives.\n" +
                                             "auto: the trainer's on-road trial decides.\n" +
                                             "off: always standard steering. on: always your model.\n" +
                                             "Applies from the next drive.")

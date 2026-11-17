@@ -97,6 +97,12 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
 - **Curve guard (opt-in)** (`9110e41e79`): `starpilot/lateral/curve_guard.py`, `controlsd.py` (`_apply_curve_guard`). Since
   2026-11-16 a blinker alone no longer stands it down (signalling for a merge kept it off on an on-ramp curve); only a
   lane change under way does.
+- **Lane centering v2** (2026-11-17): `starpilot/lateral/lane_centering_v2.py`, steering by default: sticky line
+  trust (stays to 45 % / 0.4 m), a 1 s memory through brief loss of both lines, 0.8-2.0 s lookahead with a soft dead
+  zone, worked out once per model frame, and never a push toward a line the body is within 30 cm of (camera offset
+  -0.23, car width). `controlsd` shadows the old controller beside it (`LaneShadow`, `lane_centering_shadow` each
+  minute); `lane_centering_v2.json` mode on (default) / shadow / off. Held-out replay: drop-outs 6.5 -> 4.4/min,
+  near-line pushes toward 7 % -> 0 %.
 - **No lane change into a lane that is not there** (2026-11-16): `adjacent_lane_evidence.lane_clearly_absent` (far line
   under 15 %, road edge on that side under 1 m std and within 2.5 m of the lane line over 30 m), `desire_helper.py`
   (`no_lane`: neither a nudge nor auto starts the change), `modeld.py`. Replayed on the 36 lane changes of 2026-11-14/15:
@@ -138,7 +144,8 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
 - **BlueDriver Pro logger** (`eb47adb2ca`): `starpilot/obd/` (bluedriverd, opt-in, ancillary), measured fuel and
   battery in the ledger, tank level, read-only health check.
 - **Comma vs driver and PC reports** (`575dc06820`, `835eb17fa5`): `efficiency/compare.py`, `trend.py`, `trips.py`,
-  `pc_summary.py`.
+  `pc_summary.py`. The settings tile is per tank (`41cbb04cc1`, `compare.tank_headline`): the comma since the last fill-up
+  (`tank.json` `fill_drive`) against all of the driver's drives; finished tanks in `tank_history.json`.
 - **Self-learning fuel efficiency (shadow)**: `efficiency/learner.py`, shown by `pc_summary.py` (`learner`). From
   BlueDriver measured, battery-adjusted fuel only: learns the EV cut-off speed for feather glides (fixed 63 mph in
   `coast.py`), relearned every run from the last 14 days (`EV_WINDOW_DAYS`, it moves with the weather) by the BlueDriver's
@@ -225,6 +232,11 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   road tests count drives from `JUDGE_FROM` 2026-11-15 on (the corrections still fit every drive), and vetoes saved
   before `VETO_EPOCH` 2 are ignored once (the accelerate/launch variants were redefined on 2026-11-14); writes `<efficiency>/experiments.json` (winners, season, budget) at the end of each drive). Tests in
   `starpilot/efficiency/tests/test_experiment*.py`.
+- **Self-tuning fuel dials** (`51af51e4f8`, 2026-11-17): `efficiency/dials.py` replaces the fixed variants with dials per
+  situation that start at normal and move toward the savings (`DialExperimenter`, `experiment_learn.judge_dials`;
+  center vs one-step probes, a win moves the center, both sides losing halves the step, 4 min/hr across centers,
+  vetoed centers step back). Pulse and Glide band / pulse / glide regen via `coast.PulseGlideTuning`, tried at every
+  speed. `experiment.json` `engine`: shadow (default), dials, presets. Tests `efficiency/tests/test_dials.py`.
 - **Turn speed for signalled turns** (2026-11-14): `starpilot/navigation/turn_speed.py`. modeld's blinker-turn logic
   (`intent._timed_turn`) publishes side / turning / distance to the side road / its map angle to
   /dev/shm/starpilot_turn_status.json; plannerd's `TurnSpeedHost` caps the cruise target (`longitudinal_planner.update(

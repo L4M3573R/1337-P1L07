@@ -89,7 +89,7 @@ def say(msg: str) -> None:
 
 
 def remote(host: str, code: str, env: dict | None = None, timeout: float = 60) -> dict:
-  prefix = f"COMMA_UPDATE='{json.dumps(env)}' " if env is not None else ''
+  prefix = f"export COMMA_UPDATE='{json.dumps(env)}'; " if env is not None else ''   # export: REMOTE_PY starts with cd
   r = subprocess.run(SSH + [f'comma@{host}', prefix + REMOTE_PY], input=code, capture_output=True, text=True, timeout=timeout)
   lines = [l for l in r.stdout.splitlines() if l.startswith('{')]
   if r.returncode != 0 or not lines:
@@ -166,7 +166,9 @@ def main() -> int:
     if now['updater_state'] != last_state:
       say(f"updater: {now['updater_state']}")
       last_state = now['updater_state']
-    if now['commit'] == tip:
+    # The fast updater puts the new files in place first and reboots after, so the tip alone is not done: it counts
+    # only once the comma has rebooted since the request (uptime shorter than the time since then).
+    if now['commit'] == tip and now['uptime'] < time.monotonic() - start:
       if now['uptime'] < 60:
         time.sleep(30)   # let pandad, the model and AOL come up
         now = remote(host, STATUS)

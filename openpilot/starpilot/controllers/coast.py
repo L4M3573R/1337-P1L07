@@ -116,6 +116,13 @@ def pulse_accel(speed_mps):
 
 
 @dataclass(frozen=True)
+class PulseGlideTuning:
+  band_mps: float      # dash-speed band (capped at MAX_BAND_MPS like the driver's)
+  pulse_scale: float   # share of the normal pulse acceleration
+  glide_extra: float   # m/s^2 of regen beyond the plain glide (0: the plain glide)
+
+
+@dataclass(frozen=True)
 class CoastPlan:
   force_decel: bool = False
   brake_floor: float | None = None
@@ -138,6 +145,9 @@ class CoastOwner:
     self.hill_paused = False
     self.last_target = None
     self.change_reason = 'start'  # decision log: why the modes last changed
+    # The fuel learner's Pulse and Glide settings while it has Pulse and Glide on (efficiency/dials.py), set every
+    # cycle by the experiment host; None: the driver's band, the normal pulse and the plain glide.
+    self.tuning: PulseGlideTuning | None = None
 
   def reset(self, reason: str = 'reset'):
     self.__init__()
@@ -201,10 +211,12 @@ class CoastOwner:
         if speed_mps + carry_mps(gaining) >= target_mps - GLIDE_START_MARGIN:
           self.coasting = True
       if available and self.coasting:
-        accel_target = min(glide_accel(speed_mps, pitch), GLIDE_SET_SPEED_GAIN * (target_mps - speed_mps))
+        extra = self.tuning.glide_extra if self.tuning is not None else 0.0
+        accel_target = min(glide_accel(speed_mps, pitch) - extra, GLIDE_SET_SPEED_GAIN * (target_mps - speed_mps))
       elif available and speed_mps >= lower - PULSE_ENTRY_MARGIN:
         pulsing = True
-        accel_target = min(pulse_accel(speed_mps), PULSE_ARRIVAL_GAIN * max(0.0, target_mps - speed_mps))
+        scale = self.tuning.pulse_scale if self.tuning is not None else 1.0
+        accel_target = min(scale * pulse_accel(speed_mps), PULSE_ARRIVAL_GAIN * max(0.0, target_mps - speed_mps))
       if accel_target is not None and self.last_target is not None:
         step = TRANSITION_JERK * DT
         accel_target = min(max(accel_target, self.last_target - step), self.last_target + step)
@@ -304,6 +316,9 @@ class CoastRuntime:
     ratio_filter = getattr(self, 'ratio_filter', None)
     ratio = ratio_filter.update(state) if ratio_filter is not None else cluster_ratio(state)
     self.cluster_ratio = ratio
+    tuning = getattr(self.owner, 'tuning', None)
+    if tuning is not None and math.isfinite(tuning.band_mps) and tuning.band_mps > 0:
+      delta, units = tuning.band_mps / 0.44704, b"0"   # the learner's band, in mph like the dash setting
     plan = self.owner.sample(admitted=admitted, active=bool(control.enabled and control.longActive),
                              gas=bool(state.gasPressed), brake=bool(state.brakePressed), speed_mps=float(state.vEgo),
                              target_mps=target_mps / ratio,

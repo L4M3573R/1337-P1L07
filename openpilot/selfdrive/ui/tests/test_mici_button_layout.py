@@ -48,7 +48,7 @@ def drawn(monkeypatch):
   lambda: button.GreyBigButton("", "A full explanation that must retain enough room for several lines of readable text."),
   lambda: button.BigButton("driving\ncontrols"),
   lambda: button.BigButton("L4 custom"),
-  lambda: button.BigMultiToggle("personal steering", ["auto", "off", "on"]),
+  lambda: button.BigMultiToggle("nnlc", ["auto", "off", "on"]),
   lambda: button.BigToggle("curve guard"),
   lambda: button.BigToggle("bluedriver fuel"),
   lambda: button.GreyBigButton("comma vs you", "collecting: 0.0 of 5 matched mi"),

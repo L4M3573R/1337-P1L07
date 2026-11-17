@@ -52,7 +52,8 @@ from openpilot.starpilot.lateral.lane_change_preferences import LiveLaneChangePo
 from openpilot.starpilot.lateral.lane_change_smoothing import LaneChangeSmoother, limit_rate
 from openpilot.starpilot.lateral.lane_runtime import LaneCenteringHost, runtime_supported as lane_runtime_supported
 from openpilot.starpilot.lateral.torque_runtime import TorqueHost, runtime_enabled as torque_runtime_enabled
-from openpilot.starpilot.lateral.controller_selection import learning_allowed, read_selection, turn_assist_supported
+from openpilot.starpilot.feature_capabilities import lateral_supported
+from openpilot.starpilot.lateral.controller_selection import learning_allowed, read_selection
 from openpilot.starpilot.lateral.gain_runtime import create_gain_owner
 from openpilot.starpilot.flm.global_runtime import GlobalRuntime
 from openpilot.starpilot.flm.evidence_hooks import control_message
@@ -145,11 +146,12 @@ class Controls:
     self.lane_centering_controller = (
       LaneCenteringController(body=interface_dimensions(self.CI, self.CP), body_required=True) if predict_lane_clearance else LaneCenteringController()
     )
+    self.lane_shadow = self._create_lane_shadow(predict_lane_clearance)
     self.curve_guard = self._create_curve_guard()
     self.turn_yield = TurnYield()
     self.turn_yield_log = None
     self.highway_correction_gain = HighwayCorrectionGain()
-    self.highway_smoothing_supported = turn_assist_supported(self.CP)
+    self.highway_smoothing_supported = lateral_supported(self.CP)
     self.highway_gain = read_gain(self.params) if self.highway_smoothing_supported else 1.0
     self.lateral_pause = LateralPause(read_lateral_pause(self.params), self.params)
     self.lane_change_preferences = LiveLaneChangePolicy(self.params, now_ns=0 if os.getenv('REPLAY') == '1' else time.monotonic_ns())
@@ -272,6 +274,20 @@ class Controls:
       guard.reset()
       return curvature
 
+  def _turn_no_push_back(self, CS, CC, torque: float) -> float:
+    """During a slow signalled turn the comma never pushes the wheel back against it (starpilot/lateral/turn_yield.py)."""
+    try:
+      from openpilot.starpilot.lateral.turn_yield import no_push_back
+      limited = no_push_back(torque, v_ego=CS.vEgo, left_blinker=bool(CS.leftBlinker), right_blinker=bool(CS.rightBlinker),
+                             steering_angle_deg=float(CS.steeringAngleDeg), lat_active=bool(CC.latActive))
+      if getattr(self, 'turn_hold_log', None) is None:
+        from openpilot.starpilot.diagnostics.features import ChangeLog
+        self.turn_hold_log = ChangeLog('turn_no_push_back', min_gap_s=0.5)
+      self.turn_hold_log.observe({'holding': limited != torque}, {'v_ego': CS.vEgo, 'steering_deg': CS.steeringAngleDeg})
+      return limited
+    except Exception:
+      return torque
+
   def _turn_yielding(self, CS, CC) -> bool:
     """Turn yield (starpilot/lateral/turn_yield.py): no comma torque while the driver steers a turn toward the blinker."""
     try:
@@ -287,6 +303,26 @@ class Controls:
     except Exception:
       self.turn_yield = TurnYield()
       return False
+
+  def _create_lane_shadow(self, predict_lane_clearance: bool):
+    """Lane centering v2 (starpilot/lateral/lane_centering_v2.py) steers by default with the current controller shadowed
+    beside it; lane_centering_v2.json mode 'shadow' swaps them, 'off' keeps only the current one. A failure leaves the
+    current controller steering."""
+    try:
+      from openpilot.starpilot.lateral.lane_centering_v2 import LaneCenteringControllerV2, LaneShadow, read_mode
+      mode = read_mode()
+      if mode == 'off':
+        return None
+      body = interface_dimensions(self.CI, self.CP) if predict_lane_clearance else None
+      kwargs = {'body': body, 'body_required': True} if predict_lane_clearance else {}
+      width = float(body.width) if body is not None and getattr(body, 'width', None) else 1.83
+      if mode == 'on':
+        self.lane_centering_controller = LaneCenteringControllerV2(**kwargs)
+        return LaneShadow(LaneCenteringController(**kwargs), 'current', 'v2', width)
+      return LaneShadow(LaneCenteringControllerV2(**kwargs), 'v2', 'current', width)
+    except Exception:
+      cloudlog.exception('lane centering shadow setup failed; current controller only')
+      return None
 
   def _select_nnlc(self) -> bool:
     """Once per drive: does the personal NNLC feedforward steer this drive? Any failure means no."""
@@ -660,14 +696,17 @@ class Controls:
         self.lane_centering_inactive_reason = self.lane_centering_host.last_refusal
     if lane_centering is None:
       self.lane_centering_controller.reset()
+      if getattr(self, 'lane_shadow', None) is not None:
+        self.lane_shadow.controller.reset()
     elif not isinstance(lane_centering, LaneCenteringRequest):
       self.lane_centering_controller.reset()
+      if getattr(self, 'lane_shadow', None) is not None:
+        self.lane_shadow.controller.reset()
       self.last_lane_centering_result = LaneCenteringResult(None, 0.0, 0, "invalid_request")
     else:
       lane_now_ns = int(self.sm.logMonoTime['carState']) if os.getenv('REPLAY') == '1' else time.monotonic_ns()
       lane_delay = current_delay(self.sm, lane_now_ns)
-      result = self.lane_centering_controller.update(
-        LaneCenteringInput(
+      lane_input = LaneCenteringInput(
           model=model_v2,
           model_sample_id=self.sm.logMonoTime['modelV2'],
           model_valid=bool(self.sm.all_checks(['modelV2'])),
@@ -683,7 +722,10 @@ class Controls:
           measured_curvature=self.curvature,
           lateral_delay_s=lane_delay,
         )
-      )
+      result = self.lane_centering_controller.update(lane_input)
+      shadow = getattr(self, 'lane_shadow', None)
+      if shadow is not None:
+        shadow.observe(lane_input, result)   # logs only; what steers is result
       self.last_lane_centering_result = result
       if result.candidate_curvature is not None:
         new_desired_curvature = result.candidate_curvature
@@ -767,6 +809,7 @@ class Controls:
       curvature_limited, lat_delay
     )
     actuators.torque = float(steer)
+    actuators.torque = self._turn_no_push_back(CS, CC, actuators.torque)
     # Parking-lot EPS limit test (eps-lab branch only): with /data/starpilot/eps_test.json {"steer_from_test": true}
     # (re-read each second) the normal controller steers with fresh scripted testJoystick torque instead of the model,
     # so AOL and its safety acknowledgements run as in normal driving (joystickd cannot engage under AOL).
@@ -961,6 +1004,8 @@ class Controls:
       valid=bool(CS.canValid and self.sm.all_checks(['modelV2'])),
       inactive_reason=getattr(self, 'lane_centering_inactive_reason', 'inactive'),
     )
+    from openpilot.starpilot.lateral.applied_tuning import write_applied_tuning
+    write_applied_tuning(feedback.starpilotLateralState, self.LaC, getattr(self, 'torque_host', None))
     automatic = getattr(self, 'global_learning', None)
     if automatic is not None:
       try:
