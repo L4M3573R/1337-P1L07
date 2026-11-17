@@ -12,8 +12,8 @@ import math
 import time
 from pathlib import Path
 
-from openpilot.starpilot.efficiency.experiment import (STATUS_PATH, STOP_GAP_M, Experimenter, Frame, Plan, load_vetoes, load_winners,
-                                                       save_vetoes, write_status)
+from openpilot.starpilot.efficiency.experiment import (STATUS_PATH, STOP_GAP_M, DialExperimenter, Experimenter, Frame, Plan,
+                                                       load_vetoes, load_winners, save_vetoes, write_status)
 
 KPH_TO_MS = 1 / 3.6
 SOC_READ_S = 1.0
@@ -50,6 +50,7 @@ class ExperimentHost:
     self.drive = None
     self.enabled = False
     self.exp = Experimenter()
+    self.shadow: DialExperimenter | None = None   # engine 'shadow': the dials decide and log, the fixed variants drive
     self.driver_pulse_glide = False
     self.we_turned_pulse_glide_on = False
     self.soc: float | None = None
@@ -63,7 +64,18 @@ class ExperimentHost:
     self.drive = drive
     self.enabled = mode(root) == 'on'
     self.root_now = root
-    self.exp = Experimenter(winners=load_winners(root / 'experiments.json'), vetoes=load_vetoes(root / 'vetoes.json'))
+    from openpilot.starpilot.efficiency.dials import load_state
+    from openpilot.starpilot.efficiency.experiment_learn import engine
+    which = engine(root)
+    vetoes = load_vetoes(root / 'vetoes.json')
+    dials = load_state(root / 'experiments.json')
+    if which == 'dials':
+      self.exp = DialExperimenter(vetoes=vetoes, state=dials)
+      self.shadow = None
+    else:
+      self.exp = Experimenter(winners=load_winners(root / 'experiments.json'), vetoes=vetoes)
+      self.shadow = DialExperimenter(vetoes=dict(vetoes), state=dials) if which == 'shadow' else None
+    self.shadow_tag: str | None = None
     self.saved_vetoes = dict(self.exp.vetoes)
     self.driver_pulse_glide = False
     self.we_turned_pulse_glide_on = False
@@ -107,6 +119,14 @@ class ExperimentHost:
                     float(cs.aEgo), bool(cs.leftBlinker or cs.rightBlinker),
                     stop_distance_m=stop_distance(stop_distance_m, lead))
       plan = self.exp.sample(frame)
+      if self.shadow is not None:
+        shadow_plan = self.shadow.sample(frame)   # decides and logs only; its vetoes and time are never saved
+        if shadow_plan.tag != self.shadow_tag:
+          self.shadow_tag = shadow_plan.tag
+          from openpilot.starpilot.diagnostics.features import EVENT
+          from openpilot.common.swaglog import cloudlog
+          cloudlog.event(EVENT, feature='efficiency_dials_shadow', tag=shadow_plan.tag, driving=plan.tag,
+                         budget_left_s=round(self.shadow.budget_left_s(), 1))
       if self.exp.vetoes != self.saved_vetoes:   # the driver pressed on during a slower variant: remember it
         # merge with the file (it may have gained entries since the drive began), keeping the higher count
         path = self.root_now / 'vetoes.json'
@@ -132,13 +152,23 @@ class ExperimentHost:
       return None
 
   def _apply_pulse_glide(self, plan: Plan, owner) -> None:
-    if owner is None or self.driver_pulse_glide:
+    if owner is None:
+      return
+    if self.driver_pulse_glide:
+      if getattr(owner, 'tuning', None) is not None:
+        owner.tuning = None   # the driver took Pulse and Glide over: their band and the normal pulse and glide
       return
     if plan.pulse_glide is True and not owner.pulse_glide:
       owner.pulse_glide = True
       owner.change_reason = 'efficiency experiment'
       self.we_turned_pulse_glide_on = True
-    elif plan.pulse_glide is not True and self.we_turned_pulse_glide_on:
+    if plan.pulse_glide is True and self.we_turned_pulse_glide_on:
+      from openpilot.starpilot.controllers.coast import PulseGlideTuning
+      tuning = plan.pulse_glide_tuning
+      owner.tuning = PulseGlideTuning(*tuning) if tuning is not None else None
+    elif hasattr(owner, 'tuning'):
+      owner.tuning = None   # the driver's own Pulse and Glide, or none: their band, the normal pulse and glide
+    if plan.pulse_glide is not True and self.we_turned_pulse_glide_on:
       # the experiment ended: hand back what the driver had (off) unless they took it over meanwhile
       if owner.pulse_glide:
         owner.pulse_glide = False
