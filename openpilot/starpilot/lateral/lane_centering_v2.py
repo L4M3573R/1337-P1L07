@@ -39,6 +39,7 @@ DEAD_M, SOFT_M = 0.04, 0.12
 MODES = ('shadow', 'on', 'off')
 NEAR_LINE_M = 0.30      # the body this close to a lane line: never push toward that line (the driver's rule)
 NEAR_LINE_AT_M = 2.0    # measured this far ahead of the camera (about the front of the car)
+NEAR_LINE_MIN_PROB = 0.25   # a faint line still counts as a line to keep off (2026-11-17: faint-line road)
 DEFAULT_WIDTH_M = 1.83  # 2024-26 Elantra
 
 
@@ -100,10 +101,12 @@ class PreviewReading:
     self.reset()
 
   def reset(self):
-    self.memory = None   # (errors per lookahead, age in s)
+    self.memory = None   # (errors per lookahead, controller clock when seen)
 
-  def raw(self, model, speed, offset, authority, *, paths=None, single_target=None, dt=0.01, update=True,
+  def raw(self, model, speed, offset, authority, *, paths=None, single_target=None, now=0.0, update=True,
           trusted=(False, False)) -> float | None:
+    """now: the controller's clock, which runs whether centering is active or paused, so a remembered lane ages in
+    real time (paused through a turn, it must not come back afterwards as fresh)."""
     try:
       if speed < lc.MIN_SPEED:
         return None
@@ -132,12 +135,10 @@ class PreviewReading:
           return single
       if errors is not None:
         if update:
-          self.memory = (errors, 0.0)
-      elif self.memory is not None and self.memory[1] < MEMORY_S:
-        fade = 1.0 - self.memory[1] / MEMORY_S
+          self.memory = (errors, now)
+      elif self.memory is not None and 0.0 <= now - self.memory[1] < MEMORY_S:
+        fade = 1.0 - (now - self.memory[1]) / MEMORY_S
         errors = [None if e is None else e * fade for e in self.memory[0]]
-        if update:
-          self.memory = (self.memory[0], self.memory[1] + dt)
       else:
         return None
       std_path = _path_xy(model.position.x, model.position.yStd)
@@ -176,8 +177,14 @@ class LaneCenteringControllerV2(LaneCenteringController):
     self._tracker = HoldingTracker(self.sticky)
     self._clear_frame()
 
+  def _forget_lane(self) -> None:
+    """A turn or lane change ahead: the lane seen so far belongs to the road being left."""
+    self.sticky.reset()
+    self.preview.reset()
+
   def _clear_frame(self) -> None:
     self._frame, self._view, self._cache, self._since_frame, self._frame_dt, self._fresh = None, None, {}, 0.0, 0.01, False
+    self._clock = getattr(self, '_clock', 0.0)
 
   def reset(self) -> None:
     super().reset()
@@ -191,7 +198,7 @@ class LaneCenteringControllerV2(LaneCenteringController):
     if key not in self._cache:
       # only the first reading of a new frame moves the memory (the controller also asks without the path preference)
       raw = self.preview.raw(model, speed, offset, authority, paths=_paths, single_target=_single_target,
-                             dt=self._frame_dt, update=self._fresh, trusted=tuple(self.sticky.trusted))
+                             now=self._clock, update=self._fresh, trusted=tuple(self.sticky.trusted))
       self._cache[key] = self._keep_off_lines(model, offset, raw)
       self._fresh = False
     return self._cache[key]
@@ -204,7 +211,7 @@ class LaneCenteringControllerV2(LaneCenteringController):
     try:
       car = -float(offset)
       for index, toward_right in ((1, False), (2, True)):
-        if (raw > 0) != toward_right or float(model.laneLineProbs[index]) < 0.5:
+        if (raw > 0) != toward_right or float(model.laneLineProbs[index]) < NEAR_LINE_MIN_PROB:
           continue
         line = _path(model.laneLines[index])
         y = _at(line, NEAR_LINE_AT_M) if line is not None else None
@@ -221,6 +228,9 @@ class LaneCenteringControllerV2(LaneCenteringController):
     if isinstance(observation, LaneCenteringInput):
       dt = lc._finite_number(observation.elapsed_seconds)
       self._since_frame += dt if dt is not None and dt > 0 else 0.0
+      self._clock += dt if dt is not None and dt > 0 else 0.0
+      if observation.turn_signal_active:
+        self._forget_lane()
       frame = (observation.model_sample_id, id(observation.model))
       if frame != self._frame or self._view is None:
         self._frame, self._frame_dt, self._since_frame = frame, max(self._since_frame, 0.01), 0.0

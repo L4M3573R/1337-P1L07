@@ -111,3 +111,23 @@ def test_away_from_a_close_line_it_still_pushes():
       sample += 1
     result = v2.update(observation(close_right, model_sample_id=sample, settings=LaneCenteringSettings(True, -0.23, 0.0, True)))
   assert result.correction < 0
+
+
+def test_the_remembered_lane_never_survives_a_turn():
+  # good lines, then a 6 s signalled turn with no lines, then the blinker off on a road with no lines:
+  # the lane remembered before the turn belongs to the old road and must not steer the new one
+  strong, gone = model(right=2.3, prob=0.9), model(right=2.3, prob=0.05)
+  v2, sample, results = LaneCenteringControllerV2(), 0, []
+  for m, seconds, blinker in ((strong, 2.0, False), (gone, 6.0, True), (gone, 0.5, False)):
+    for tick in range(int(round(seconds / 0.01))):
+      if tick % 5 == 0:
+        sample += 1
+      results.append(v2.update(observation(m, model_sample_id=sample, turn_signal_active=blinker)))
+  assert results[-1].reason == 'unqualified_model' and abs(results[-1].correction) < 1e-6
+  assert v2.preview.memory is None and v2.sticky.trusted == [False, False]
+
+
+def test_a_faint_close_line_is_still_kept_off():
+  close_right = model(left=-2.1, right=1.30, path=-0.6, prob=0.3)   # a faint right line, the body 0.155 m from it
+  v2 = LaneCenteringControllerV2()
+  assert v2._keep_off_lines(close_right, -0.23, 0.001) == 0.0
