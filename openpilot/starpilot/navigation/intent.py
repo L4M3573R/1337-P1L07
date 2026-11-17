@@ -203,7 +203,8 @@ class TurnIntent:
       lookup = self.map_finder.latest(side)
     was_turning = self.blinker_turn.turning
     decision = self.blinker_turn.update(now_ns / 1e9, side, cs.vEgo, heading, lookup,
-                                        nudged_toward(side, cs.steeringPressed, cs.steeringTorque), lead=_following(sm))
+                                        nudged_toward(side, cs.steeringPressed, cs.steeringTorque, getattr(cs, 'steeringAngleDeg', None)),
+                                        lead=_following(sm))
     self.turn_distance = decision.distance_m
     self.shadow_turning, self.shadow_reason = decision.turning, decision.reason
     # for plannerd's turn speed (turn_speed.py): side, turn under way, distance to the side road and its angle

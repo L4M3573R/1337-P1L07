@@ -47,3 +47,15 @@ def test_blinker_off_or_speeding_up_ends_it_at_once():
 def test_left_turns_use_positive_torque():
   y = TurnYield()
   assert step(y, 0.0, left_blinker=True, right_blinker=False, steering_pressed=True, steering_torque=300)
+
+
+def test_in_a_slow_turn_the_comma_never_pushes_the_wheel_back():
+  from openpilot.starpilot.lateral.turn_yield import no_push_back
+  kw = {'v_ego': 3.0, 'left_blinker': True, 'right_blinker': False, 'lat_active': True}
+  assert no_push_back(-1.0, steering_angle_deg=200.0, **kw) == 0.0      # 2026-11-17: full torque back against the left turn
+  assert no_push_back(0.6, steering_angle_deg=200.0, **kw) == 0.6       # helping the turn is fine
+  assert no_push_back(-1.0, steering_angle_deg=10.0, **kw) == -1.0      # wheel near straight: no limit
+  assert no_push_back(-1.0, steering_angle_deg=200.0, **{**kw, 'left_blinker': False}) == -1.0   # blinker off
+  assert no_push_back(-1.0, steering_angle_deg=200.0, **{**kw, 'v_ego': 15.0}) == -1.0           # above the turn cutoff
+  right = {'v_ego': 3.0, 'left_blinker': False, 'right_blinker': True, 'lat_active': True}
+  assert no_push_back(1.0, steering_angle_deg=-150.0, **right) == 0.0   # right turn: no push to the left

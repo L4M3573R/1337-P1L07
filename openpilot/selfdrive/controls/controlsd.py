@@ -256,6 +256,20 @@ class Controls:
       guard.reset()
       return curvature
 
+  def _turn_no_push_back(self, CS, CC, torque: float) -> float:
+    """During a slow signalled turn the comma never pushes the wheel back against it (starpilot/lateral/turn_yield.py)."""
+    try:
+      from openpilot.starpilot.lateral.turn_yield import no_push_back
+      limited = no_push_back(torque, v_ego=CS.vEgo, left_blinker=bool(CS.leftBlinker), right_blinker=bool(CS.rightBlinker),
+                             steering_angle_deg=float(CS.steeringAngleDeg), lat_active=bool(CC.latActive))
+      if getattr(self, 'turn_hold_log', None) is None:
+        from openpilot.starpilot.diagnostics.features import ChangeLog
+        self.turn_hold_log = ChangeLog('turn_no_push_back', min_gap_s=0.5)
+      self.turn_hold_log.observe({'holding': limited != torque}, {'v_ego': CS.vEgo, 'steering_deg': CS.steeringAngleDeg})
+      return limited
+    except Exception:
+      return torque
+
   def _turn_yielding(self, CS, CC) -> bool:
     """Turn yield (starpilot/lateral/turn_yield.py): no comma torque while the driver steers a turn toward the blinker."""
     try:
@@ -774,6 +788,7 @@ class Controls:
       curvature_limited, lat_delay
     )
     actuators.torque = float(steer)
+    actuators.torque = self._turn_no_push_back(CS, CC, actuators.torque)
     if self.CP.steerControlType == car.CarParams.SteerControlType.curvature:
       actuators.curvature = float(lateral_output)
     else:
