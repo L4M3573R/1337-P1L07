@@ -97,6 +97,10 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
 - **Curve guard (opt-in)** (`9110e41e79`): `starpilot/lateral/curve_guard.py`, `controlsd.py` (`_apply_curve_guard`). Since
   2026-11-16 a blinker alone no longer stands it down (signalling for a merge kept it off on an on-ramp curve); only a
   lane change under way does.
+- **Lane centering v2 (shadow)** (`7976893be4`, 2026-11-17): `starpilot/lateral/lane_centering_v2.py`: sticky line trust
+  (stays to 45 % / 0.4 m), a 1 s memory through brief loss of both lines, 0.8-2.0 s lookahead with a soft dead zone.
+  `controlsd` runs it as `LaneShadow` beside the current controller and logs `lane_centering_shadow` each minute;
+  `lane_centering_v2.json` mode shadow (default) / on / off. Replay: drop-outs 4.7 -> 3.1/min (held out 6.5 -> 3.8).
 - **No lane change into a lane that is not there** (2026-11-16): `adjacent_lane_evidence.lane_clearly_absent` (far line
   under 15 %, road edge on that side under 1 m std and within 2.5 m of the lane line over 30 m), `desire_helper.py`
   (`no_lane`: neither a nudge nor auto starts the change), `modeld.py`. Replayed on the 36 lane changes of 2026-11-14/15:
