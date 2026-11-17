@@ -226,6 +226,11 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   road tests count drives from `JUDGE_FROM` 2026-11-15 on (the corrections still fit every drive), and vetoes saved
   before `VETO_EPOCH` 2 are ignored once (the accelerate/launch variants were redefined on 2026-11-14); writes `<efficiency>/experiments.json` (winners, season, budget) at the end of each drive). Tests in
   `starpilot/efficiency/tests/test_experiment*.py`.
+- **Self-tuning fuel dials** (`51af51e4f8`, 2026-11-17): `efficiency/dials.py` replaces the fixed variants with dials per
+  situation that start at normal and move toward the savings (`DialExperimenter`, `experiment_learn.judge_dials`;
+  center vs one-step probes, a win moves the center, both sides losing halves the step, 4 min/hr across centers,
+  vetoed centers step back). Pulse and Glide band / pulse / glide regen via `coast.PulseGlideTuning`, tried at every
+  speed. `experiment.json` `engine`: shadow (default), dials, presets. Tests `efficiency/tests/test_dials.py`.
 - **Turn speed for signalled turns** (2026-11-14): `starpilot/navigation/turn_speed.py`. modeld's blinker-turn logic
   (`intent._timed_turn`) publishes side / turning / distance to the side road / its map angle to
   /dev/shm/starpilot_turn_status.json; plannerd's `TurnSpeedHost` caps the cruise target (`longitudinal_planner.update(
