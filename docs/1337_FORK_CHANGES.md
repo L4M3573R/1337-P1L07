@@ -138,7 +138,8 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
 - **BlueDriver Pro logger** (`eb47adb2ca`): `starpilot/obd/` (bluedriverd, opt-in, ancillary), measured fuel and
   battery in the ledger, tank level, read-only health check.
 - **Comma vs driver and PC reports** (`575dc06820`, `835eb17fa5`): `efficiency/compare.py`, `trend.py`, `trips.py`,
-  `pc_summary.py`.
+  `pc_summary.py`. The settings tile is per tank (`41cbb04cc1`, `compare.tank_headline`): the comma since the last fill-up
+  (`tank.json` `fill_drive`) against all of the driver's drives; finished tanks in `tank_history.json`.
 - **Self-learning fuel efficiency (shadow)**: `efficiency/learner.py`, shown by `pc_summary.py` (`learner`). From
   BlueDriver measured, battery-adjusted fuel only: learns the EV cut-off speed for feather glides (fixed 63 mph in
   `coast.py`), relearned every run from the last 14 days (`EV_WINDOW_DAYS`, it moves with the weather) by the BlueDriver's
