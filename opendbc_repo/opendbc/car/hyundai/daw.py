@@ -12,6 +12,13 @@ CANFD_DAW_WORDS = frozenset((0x11, 0x91, 0x811, 0x891, 0x8015, 0x8095, 0x8815, 0
 CLASSIC_LENGTHS = (6, 8)
 METER_FULL = 5
 METER_MASK = 0x17
+# With the 8-byte meter the camera also raises LKAS11 bit 15 (DBC name CF_Lkas_FcwBasReq) for the ~4 s of "take a
+# break", and openpilot's LKAS11 copies that field from the camera: that is what sounds the cluster chime (Elantra
+# Hybrid 2024 rlog 000000a8--7ded11e1f4, 2026-11-16: camera bit 15 on 18:28:42.94-46.94, exactly the break popup,
+# ours on bus 0 6 ms later, no collision warning). Drop it unless a forward collision warning is up, so a real
+# FCW brake-assist request still reaches the car.
+LKAS11_DAW_CHIME = 'CF_Lkas_FcwBasReq'
+LKAS11_FCW_WARNING = 'CF_Lkas_FcwCollisionWarning'
 
 
 def classic_transform(data: bytearray) -> None:
@@ -37,6 +44,7 @@ class DawSource:
     self.lengths = (16,) if self.canfd else CLASSIC_LENGTHS
     self.data = None
     self.stamp = 0
+    self.meter_layout = False
 
   def update(self, packets):
     if not self.enabled:
@@ -50,6 +58,13 @@ class DawSource:
           self.data = None
           continue
         self.data, self.stamp = bytes(data), stamp
+        self.meter_layout = self.meter_layout or (not self.canfd and len(data) == 8)
+
+  def lkas11(self, lkas11: dict) -> dict:
+    """The camera's LKAS11 values for openpilot's LKAS11, without the take-a-break chime bit (8-byte meter cars)."""
+    if not (self.enabled and self.meter_layout and lkas11.get(LKAS11_DAW_CHIME) and not lkas11.get(LKAS11_FCW_WARNING)):
+      return lkas11
+    return {**lkas11, LKAS11_DAW_CHIME: 0}
 
   def command(self, now_ns):
     if (not self.enabled or self.source_bus == self.target_bus or self.data is None or

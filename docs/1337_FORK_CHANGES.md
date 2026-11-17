@@ -69,6 +69,8 @@ Each entry: what it does, where it lives, the commits, and what must survive a m
   Watch upstream radar changes (e.g. the lateral sign fix) against the fusion code.
 - **Take-a-break popup blocked** (`1ec07d8d02`, `f70946c34e`): `opendbc/car/hyundai/daw.py` (8-byte LKAS12 meter
   held full), `safety/modes/hyundai_daw.h` (`HYUNDAI_DAW_CLASSIC_SOURCE_MAX_AGE_US 250000U`). Firmware rebuild.
+  The chime itself rode on LKAS11 bit 15 (`cf37b24136`): `daw.py` `DawSource.lkas11` clears the camera's
+  `CF_Lkas_FcwBasReq` before `create_lkas11` copies it, unless a forward collision warning is up.
 - **Cruise engages down to 7 mph** (`810b0428c5`): `selfdrive/car/cruise.py`.
 
 ### Longitudinal

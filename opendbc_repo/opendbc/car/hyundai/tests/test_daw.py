@@ -158,3 +158,48 @@ def test_eight_byte_meter_is_held_full_and_break_popup_cleared(status, flag):
   expected = meter(5) if 1 <= status <= 6 else data
   assert command == CanData(owner.address, expected, owner.target_bus)
   assert owner.data == data  # the source is kept unmodified
+
+
+CAMERA_LKAS11 = {'CF_Lkas_FcwBasReq': 1, 'CF_Lkas_FcwCollisionWarning': 0, 'CF_Lkas_FcwSysState': 0, 'CF_Lkas_HbaLamp': 0}
+
+
+def test_take_a_break_chime_bit_is_dropped_from_our_lkas11_on_meter_cars():
+  owner = DawSource(params(False))
+  assert owner.lkas11(CAMERA_LKAS11) is CAMERA_LKAS11   # no source seen yet: layout unknown, untouched
+  owner.update([(BASE, [CanData(owner.address, meter(6, True), owner.source_bus)])])
+  values = owner.lkas11(CAMERA_LKAS11)
+  assert values['CF_Lkas_FcwBasReq'] == 0 and CAMERA_LKAS11['CF_Lkas_FcwBasReq'] == 1   # the camera's copy is kept
+  assert {k: v for k, v in values.items() if k != 'CF_Lkas_FcwBasReq'} == \
+         {k: v for k, v in CAMERA_LKAS11.items() if k != 'CF_Lkas_FcwBasReq'}
+
+
+def test_a_real_collision_warning_keeps_the_brake_assist_bit():
+  owner = DawSource(params(False))
+  owner.update([(BASE, [CanData(owner.address, meter(6, True), owner.source_bus)])])
+  fcw = {**CAMERA_LKAS11, 'CF_Lkas_FcwCollisionWarning': 2}
+  assert owner.lkas11(fcw)['CF_Lkas_FcwBasReq'] == 1
+
+
+def test_six_byte_layout_cars_keep_the_bit():
+  owner = DawSource(params(False))
+  owner.update([(BASE, [CanData(owner.address, source(False, 2), owner.source_bus)])])
+  assert owner.lkas11(CAMERA_LKAS11)['CF_Lkas_FcwBasReq'] == 1
+
+
+def test_the_bit_never_reaches_the_lkas11_frame():
+  from opendbc.can import CANPacker
+  from opendbc.car.hyundai import hyundaican
+  from opendbc.car.hyundai.values import DBC
+  from opendbc.car import Bus
+  cp = params(False)
+  owner = DawSource(cp)
+  owner.update([(BASE, [CanData(owner.address, meter(6, True), owner.source_bus)])])
+  packer = CANPacker(DBC[cp.carFingerprint][Bus.pt])
+  camera = {s: 0 for s in ('CF_Lkas_LdwsActivemode', 'CF_Lkas_LdwsSysState', 'CF_Lkas_SysWarning', 'CF_Lkas_LdwsLHWarning',
+                           'CF_Lkas_LdwsRHWarning', 'CF_Lkas_HbaLamp', 'CF_Lkas_HbaSysState', 'CF_Lkas_FcwOpt', 'CF_Lkas_HbaOpt',
+                           'CF_Lkas_FcwSysState', 'CF_Lkas_FcwCollisionWarning', 'CF_Lkas_FusionState', 'CF_Lkas_FcwOpt_USM',
+                           'CF_Lkas_LdwsOpt_USM')}
+  camera['CF_Lkas_FcwBasReq'] = 1
+  for values, bit in ((camera, 0x80), (owner.lkas11(camera), 0)):
+    frame = hyundaican.create_lkas11(packer, 0, cp, 0, False, False, values, False, 0, True, False, False, 0, 0)
+    assert frame[1][1] & 0x80 == bit   # (address, data, bus)
