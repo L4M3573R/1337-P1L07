@@ -5,6 +5,8 @@ On the comma (eps-lab installed, car engaged in an empty lot):
   python3 scripts/eps_lab.py plan --list           # the steps
   python3 scripts/eps_lab.py plan                  # run every step in order (resumes where it stopped)
   python3 scripts/eps_lab.py plan --from 11        # start at step 11;  --only 5,6,7  just those;  --redo  ignore saved state
+  (after the torque steps, the plan narrows the gap between the highest clean torque and the first faulting one to
+  16, then repeats the winner the other way: the true limit, not just the nearest 64)
   python3 scripts/eps_lab.py push 1.0 6 --steer-max 512 --delta-up 12     # one ad-hoc run (also: hold, reverse)
   python3 scripts/eps_lab.py reset                 # stock values, scripted steering off
 On the PC:
@@ -315,6 +317,60 @@ def one(car: Car, name: str, cfg: dict, kind: str, args: tuple, note: str) -> di
   return summary
 
 
+# ---------------------------------------------------------------- torque refinement
+REFINE_STEP = 16          # stop narrowing when the clean / faulting gap is this small (16 = 0.125 Nm)
+REFINE_MAX_RUNS = 4       # 64 -> 32 -> 16 (+ spare)
+LAST_TQ_STEP = max(i for i, step in enumerate(PLAN, 1) if step[0].startswith('tq-'))
+
+
+def fault_kind(summary: dict) -> str:
+  angle = summary.get('fault_angle')
+  return 'past the cut-out angle (angle / time rule)' if angle is not None and abs(angle) >= STOCK['max_angle'] else \
+         'below the cut-out angle (the torque or ramp itself)'
+
+
+def refine_torque(car, state: dict) -> str:
+  """Halve the gap between the highest clean torque and the lowest faulting one, then repeat the winner on the
+  other side. Returns 'done', 'skipped' (no blinker / stopped early) or 'perm'."""
+  good, bad = state['best'].get('steer_max', STOCK['steer_max']), state['tq_fault']
+  say(f'--- torque refinement: {good} ran clean, {bad} faulted; narrowing to within {REFINE_STEP}')
+  runs = 0
+  while bad - good > REFINE_STEP and runs < REFINE_MAX_RUNS:
+    mid = good + max(REFINE_STEP, (bad - good) // 2 // 8 * 8)
+    runs += 1
+    summary = one(car, f'tq-refine-{mid}', resolve_cfg({'steer_max': mid, 'ramp': 'best'}, state['best']), 'push', (1.0, 6.0),
+                  'roll ~3 mph')
+    if summary is None or summary['stop'] not in ('done', 'fault', 'PERMANENT FAULT'):
+      return 'skipped'
+    if summary['stop'] == 'done':
+      good = mid
+    else:
+      bad = mid
+      say(f'{mid} faulted {fault_kind(summary)}')
+    state['best']['steer_max'], state['tq_fault'] = good, bad
+    save_state(state)
+    if summary['stop'] == 'PERMANENT FAULT':
+      return 'perm'
+  # One clean run can be luck: repeat the winner, ideally turning the other way. A fault steps it down once.
+  for _attempt in range(2):
+    summary = one(car, f'tq-confirm-{good}', resolve_cfg({'steer_max': good, 'ramp': 'best'}, state['best']), 'push', (1.0, 6.0),
+                  'roll ~3 mph, signal the OTHER side from last run')
+    if summary is None or summary['stop'] not in ('done', 'fault', 'PERMANENT FAULT'):
+      return 'skipped'
+    if summary['stop'] == 'done':
+      break
+    say(f'{good} faulted on the repeat {fault_kind(summary)}')
+    bad, good = good, max(STOCK['steer_max'], good - REFINE_STEP)
+    state['best']['steer_max'], state['tq_fault'] = good, bad
+    save_state(state)
+    if summary['stop'] == 'PERMANENT FAULT':
+      return 'perm'
+  state['refined'] = True
+  save_state(state)
+  say(f'torque limit: {good} works (twice), {bad} faults')
+  return 'done'
+
+
 # ---------------------------------------------------------------- commands
 def cmd_plan(a) -> int:
   if a.list:
@@ -331,6 +387,14 @@ def cmd_plan(a) -> int:
       if name.startswith('tq-') and state.get('tq_fault'):
         say(f"--- step {i}: {name} skipped (torque {state['tq_fault']} already faulted)")
         continue
+      if i > LAST_TQ_STEP and state.get('tq_fault') and not state.get('refined'):
+        result = refine_torque(car, state)
+        if result == 'perm':
+          say(f'PERMANENT steering fault: turn the car off and on, then resume with: plan --from {i}')
+          return 2
+        if result == 'skipped':
+          say(f'refinement stopped; resume with: plan --from {i}')
+          return 1
       say(f'--- step {i}/{len(PLAN)}: {name} - {what}')
       resolved = resolve_cfg(cfg, state['best'])
       summary = one(car, name, resolved, kind, args, note)
@@ -353,6 +417,9 @@ def cmd_plan(a) -> int:
       if not clean and summary['stop'] != 'fault':
         say(f"run stopped early ({summary['stop']}); resume with: plan --from {i}")
         return 1
+    if state.get('tq_fault') and not state.get('refined') and refine_torque(car, state) != 'done':
+      say('refinement stopped; run the plan again to finish it')
+      return 1
     say(f"plan finished. best: {state['best']}. Pull the results to the PC with: scripts/eps_lab.py report --pull")
     return 0
   finally:
@@ -408,6 +475,27 @@ def cmd_report(a) -> int:
     quick = min((r for r in clean if r['summary'].get('t90')), key=lambda r: r['summary']['t90'], default=None)
     print(f"\nfastest wheel: {fast['summary']['peak_rate']} deg/s ({fast['name']}); farthest: {far['summary']['peak_angle']} deg = "
           + f"{far['summary']['turns']} turns ({far['name']})" + (f"; quickest to 90 deg: {quick['summary']['t90']} s ({quick['name']})" if quick else ''))
+  # More command only helps while the motor gives more back: show what each clean torque level delivered.
+  tiers = {}
+  for r in clean:
+    if r['name'].startswith(('base', 'tq-', 'ramp-12', 'lock')):
+      tiers.setdefault(r['cfg']['steer_max'], []).append(r['summary'])
+  prev = None
+  for tq in sorted(tiers):
+    eps = max(x.get('peak_eps', 0) for x in tiers[tq])
+    rate = max(x.get('peak_rate', 0) for x in tiers[tq])
+    far = max(x.get('peak_angle', 0) for x in tiers[tq])
+    gain = '' if prev is None or not prev[0] else f'  (+{(eps - prev[0]) / prev[0] * 100:.0f}% motor torque vs {prev[1]})'
+    # Maxed out: less than a third of the extra torque we asked for came back (motor torque, wheel speed).
+    flat = ''
+    if prev and prev[0] and prev[2]:
+      asked = (tq - prev[1]) / prev[1]
+      if (eps - prev[0]) / prev[0] < 0.33 * asked:
+        flat += '  <- motor torque maxed out'
+      if (rate - prev[2]) / prev[2] < 0.33 * asked:
+        flat += '  <- wheel no faster'
+    print(f'torque {tq}: motor gave up to {eps}, wheel {rate} deg/s, reached {far} deg{gain}{flat}')
+    prev = (eps, tq, rate)
   faults = [r for r in runs if r['summary'].get('stop', '').endswith('FAULT') or r['summary'].get('stop') == 'fault']
   for r in faults:
     s = r['summary']
