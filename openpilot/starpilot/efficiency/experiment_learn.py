@@ -392,12 +392,16 @@ def judge_dials(data: dict, state: dict[str, Situation], vetoes: dict[str, int],
         continue
       cg, cm, pg, pm, confidence = result
       gain = 1.0 - pg / cg if cg > 0 else 0.0
-      entry['probes'][variant] = f'{100 * gain:+.1f}% fuel, {pm - cm:+.2f} min/100 mi, {confidence:.0%} sure'
+      extra = pm - cm
+      ratio = (cg - pg) / extra if extra > 0 else math.inf   # gallons saved per extra minute (inf: costs no time)
+      entry['probes'][variant] = (f'{100 * gain:+.1f}% fuel, {extra:+.2f} min/100 mi'
+                                  + (f', {ratio:.3f} gal per extra minute' if extra > 0 else '') + f', {confidence:.0%} sure')
       if gain >= MIN_GAIN and confidence >= CONFIDENCE:
-        extra = pm - cm
-        if extra <= 0 or (cg - pg) / extra >= MIN_GAL_PER_MINUTE:
-          if best is None or cg - pg > best[3]:
-            best = ((cg - pg) / extra if extra > 0 else math.inf, key, variant, cg - pg, extra, gain)
+        if ratio < MIN_GAL_PER_MINUTE:
+          entry['probes'][variant] += ': not worth the time'
+        # time-free savings first, then the most fuel per extra minute (the fuel-to-time ratio), then the most fuel
+        elif best is None or (ratio, cg - pg) > (best[0], best[3]):
+          best = (ratio, key, variant, cg - pg, extra, gain)
       elif confidence < 1.0 - CONFIDENCE or gain < MIN_GAIN:
         lost.setdefault(dial, set()).add(direction)
     if best is not None:
@@ -422,7 +426,8 @@ def judge_dials(data: dict, state: dict[str, Situation], vetoes: dict[str, int],
     sit.cost_min_per_100mi += extra
     sit.moves += 1
     used += per_hr
-    report[key]['status'] = f'moved to {variant}: {100 * gain:.1f}% less fuel' + (f', {extra:+.2f} min/100 mi' if extra else '')
+    report[key]['status'] = (f'moved to {variant}: {100 * gain:.1f}% less fuel'
+                             + (f', {extra:+.2f} min/100 mi, {_ratio:.3f} gal per extra minute' if extra > 0 else ', no extra time'))
   report['_budget'] = {'budget_min_per_hr': round(budget_min_per_hr, 2), 'used_min_per_hr': round(used, 2)}
   return new, report
 

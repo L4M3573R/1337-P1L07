@@ -211,3 +211,19 @@ def test_with_pulse_and_glide_off_only_its_band_is_probed():
   assert off == {'b2.0p1.00g0.00'}
   on = {k for _, k, _ in dl.Situation({'b': 2.0, 'p': 1.0, 'g': 0.0}, {'b': 2.0, 'p': 0.2, 'g': 0.2}).probes('pulse_glide')}
   assert on == {'b', 'p', 'g'}
+
+
+def test_a_saving_below_the_fuel_per_minute_floor_is_not_worth_the_time():
+  # 2 mph under saves 4 % but costs 6 min/100 mi: 0.016 gal/100 mi over 6 min/100 mi is far under 0.02 gal per minute
+  data = _data(random.Random(14), 'u0.00', {'u1.00': (0.0384, 61.0)})
+  state, report = el.judge_dials(data, {}, {}, situation_miles_per_hour={'cruise|60+': 40.0})
+  assert state['cruise|60+'].center == {'u': 0.0}
+  assert 'not worth the time' in report['cruise|60+']['probes']['u1.00']
+
+
+def test_with_two_winners_the_better_fuel_per_minute_is_taken():
+  # hold: a deeper dip saves a bit more fuel but costs much more time; the gentler recovery saves less, for no time
+  data = _data(random.Random(15), 'd0.00k1.00', {'d1.00k1.00': (0.0360, 56.5), 'd0.00k0.75': (0.0372, 55.0)},
+               category='hold')
+  state, report = el.judge_dials(data, {}, {}, situation_miles_per_hour={'hold|60+': 40.0})
+  assert state['hold|60+'].center == {'d': 0.0, 'k': 0.75} and 'no extra time' in report['hold|60+']['status']
