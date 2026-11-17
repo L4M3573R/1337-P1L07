@@ -86,6 +86,24 @@ def load_totals(root: Path | None = None) -> tuple[Totals, dict[str, Totals], in
   return overall, contexts, count
 
 
+def load_drives(root: Path | None = None) -> list[tuple[str, float, dict[str, Totals]]]:
+  """Every stored drive as (drive id, distance in m, per-context totals), oldest name first. Unreadable files are skipped."""
+  root = default_root() if root is None else root
+  drives = []
+  for path in sorted((root / "drives").glob("*.json")):
+    try:
+      doc = json.loads(path.read_text())
+      if doc.get("version") != VERSION:
+        continue
+      contexts = {}
+      for key, values in doc["contexts"].items():
+        _add(contexts.setdefault(key, Totals()), values)
+      drives.append((str(doc.get("drive") or path.stem), float(doc["total"].get("distance", 0.0)), contexts))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+      continue
+  return drives
+
+
 def _add(target: Totals, values: dict) -> None:
   for name in asdict(target):
     setattr(target, name, getattr(target, name) + float(values.get(name, 0.0)))

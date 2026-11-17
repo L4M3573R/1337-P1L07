@@ -86,10 +86,12 @@ def set_bluedriver(enabled: bool, root: Path | None = None) -> None:
 
 
 def fuel_comparison(root: Path | None = None) -> str:
-  """The comma's fuel against the driver's on matching driving, from the stored ledger (BlueDriver fuel)."""
-  from openpilot.starpilot.efficiency.compare import headline, stored_comparison
+  """This tank's comma against all of the driver's driving on matching roads (BlueDriver fuel); resets at each fill-up."""
+  from openpilot.starpilot.efficiency import tank as tank_store
+  from openpilot.starpilot.efficiency.compare import tank_headline
   try:
-    return headline(stored_comparison(None if root is None else root / 'efficiency'))
+    base = None if root is None else root / 'efficiency'
+    return tank_headline(base, tank_store.load(None if base is None else base / 'tank.json'))
   except Exception:  # a settings page must never fail on a damaged ledger
     return "unavailable"
 

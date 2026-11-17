@@ -28,6 +28,7 @@ class TankState:
   miles_since_fill: float | None = None  # None until a fill-up is seen or seeded
   last_range_mi: int | None = None
   fills_seen: int = 0
+  fill_drive: str | None = None  # the efficiency drive id the last fill-up was seen in (None: unknown, older state)
 
   def drive(self, miles: float) -> None:
     if self.miles_since_fill is not None and math.isfinite(miles) and miles > 0:
@@ -62,8 +63,9 @@ def load(path: Path | None = None) -> TankState:
       return TankState()
     miles = doc.get("miles_since_fill")
     rng = doc.get("last_range_mi")
+    fill_drive = doc.get("fill_drive")
     return TankState(VERSION, float(miles) if miles is not None else None, int(rng) if rng is not None else None,
-                     int(doc.get("fills_seen", 0)))
+                     int(doc.get("fills_seen", 0)), fill_drive if isinstance(fill_drive, str) else None)
   except (OSError, ValueError, TypeError, AttributeError):
     return TankState()
 

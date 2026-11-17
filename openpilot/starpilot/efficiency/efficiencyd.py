@@ -14,6 +14,7 @@ import math
 import os
 import signal
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from openpilot.starpilot.diagnostics.features import EVENT, ChangeLog, log_error
@@ -41,6 +42,7 @@ class Recorder:
     self.tank_path = tank_path if tank_path is not None else (root / "tank.json" if root is not None else None)
     self.ledger = Ledger()
     self.tank = tank_store.load(self.tank_path)
+    self._fill_pending = False  # a fill-up seen before this drive had its id: stamped at the first save
     self.flow: PowerFlow | None = None
     self.last_avg_mpg: float | None = None
     self.fuel_gal: float | None = None
@@ -82,12 +84,24 @@ class Recorder:
     if flow is not None:
       self.flow = flow
     if cluster is not None:
+      before = replace(self.tank)
       if self.tank.observe_range(cluster.range_mi):
         self.last_avg_mpg = None  # a fill-up: the dash average starts over
+        self._filled(before)
       # Gallons so far = miles since the fill-up / dash average. The dash refreshes its average about
       # every 10 s; between refreshes this advances at the current average, and each refresh corrects it.
       self.last_avg_mpg = cluster.avg_mpg
       self.fuel_gal = self.tank.gallons_used(cluster.avg_mpg)
+
+  def _filled(self, before) -> None:
+    """A fill-up: keep the tank that ended ("comma vs you" per tank), and start the new one at this drive."""
+    try:
+      from openpilot.starpilot.efficiency.compare import record_finished_tank
+      record_finished_tank(self.root, before)
+    except Exception as e:   # the history is a nicety; it must never cost the drive's ledger
+      log_error('efficiency', e, where='tank history')
+    self.tank.fill_drive = self.drive_id
+    self._fill_pending = self.drive_id is None
 
   def observe_gps(self, gps) -> None:
     ok = (gps is not None and gps.hasFix and 0.0 < gps.horizontalAccuracy <= GPS_MAX_ACCURACY_M and
@@ -118,6 +132,8 @@ class Recorder:
         # named at the first save (a minute in), once the clock has synced: at process start it can still read the
         # previous boot's date (drives on 2026-11-14 were named 20261012)
         self.drive_id = drive_id()
+      if self._fill_pending:
+        self.tank.fill_drive, self._fill_pending = self.drive_id, False
       if self.ledger.stretches:
         store.save_drive(self.drive_id, list(self.ledger.stretches), self.root, self.ledger.flow_hist)
       tank_store.save(self.tank, self.tank_path)
