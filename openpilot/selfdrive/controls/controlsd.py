@@ -66,6 +66,17 @@ LaneChangeDirection = log.LaneChangeDirection
 
 ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 NNLC_RELOG_S = 55.0  # just under a log segment
+EPS_TEST_PATH = '/data/starpilot/eps_test.json'
+
+
+def _eps_test_steer(path: str = EPS_TEST_PATH) -> bool:
+  try:
+    import json
+    with open(path) as f:
+      doc = json.load(f)
+    return isinstance(doc, dict) and doc.get('steer_from_test') is True
+  except (OSError, ValueError):
+    return False
 
 
 class Controls:
@@ -111,8 +122,10 @@ class Controls:
     optional = list(
       dict.fromkeys(
         self.longitudinal_inputs.optional_services + ['starpilotCarState', 'deviceState', 'autoSteeringLearning', 'starpilotSteeringTracking', 'pandaStates']
+        + ['testJoystick']
       )
     )
+    self.eps_test_steer = _eps_test_steer()
     if optional:
       ignore = set(optional)
       self.sm = messaging.SubMaster(services + optional, poll='selfdriveState', ignore_alive=ignore, ignore_valid=ignore, ignore_avg_freq=ignore)
@@ -746,6 +759,15 @@ class Controls:
       curvature_limited, lat_delay
     )
     actuators.torque = float(steer)
+    # Parking-lot EPS limit test (eps-lab branch only): with /data/starpilot/eps_test.json {"steer_from_test": true}
+    # (re-read each second) the normal controller steers with fresh scripted testJoystick torque instead of the model,
+    # so AOL and its safety acknowledgements run as in normal driving (joystickd cannot engage under AOL).
+    if self.sm.frame % 100 == 0:
+      self.eps_test_steer = _eps_test_steer()
+    if self.eps_test_steer and CC.latActive and self.sm.recv_frame['testJoystick'] > 0 and \
+       (self.sm.frame - self.sm.recv_frame['testJoystick']) * DT_CTRL <= 0.2:
+      axes = list(self.sm['testJoystick'].axes)
+      actuators.torque = float(min(1.0, max(-1.0, axes[1]))) if len(axes) > 1 and math.isfinite(axes[1]) else 0.0
     if self.CP.steerControlType == car.CarParams.SteerControlType.curvature:
       actuators.curvature = float(lateral_output)
     else:

@@ -280,10 +280,10 @@ class TestHyundaiSafety(HyundaiButtonBase, common.CarSafetyTest, common.DriverTo
   RELAY_MALFUNCTION_ADDRS = {0: (0x340, 0x485)}  # LKAS11
   FWD_BLACKLISTED_ADDRS = {2: [0x340, 0x485]}
 
-  MAX_RATE_UP = 3
-  MAX_RATE_DOWN = 7
-  MAX_TORQUE_LOOKUP = [0], [384]
-  MAX_RT_DELTA = 112
+  MAX_RATE_UP = 12  # 1337 eps-lab: firmware ceiling for the parking-lot EPS test (openpilot still requests 3 / 7 / 384)
+  MAX_RATE_DOWN = 15
+  MAX_TORQUE_LOOKUP = [0], [768]
+  MAX_RT_DELTA = 400
   DRIVER_TORQUE_ALLOWANCE = 50
   DRIVER_TORQUE_FACTOR = 2
 
@@ -341,6 +341,7 @@ class TestHyundaiSafetyAltLimits(TestHyundaiSafety):
   MAX_RATE_UP = 2
   MAX_RATE_DOWN = 3
   MAX_TORQUE_LOOKUP = [0], [270]
+  MAX_RT_DELTA = 112  # only the default limit set was raised for the eps-lab test
 
 class TestHyundaiSafetyAltLimits2(TestHyundaiSafety):
   SAFETY_PARAM = HyundaiSafetyFlags.ALT_LIMITS_2
@@ -348,6 +349,7 @@ class TestHyundaiSafetyAltLimits2(TestHyundaiSafety):
   MAX_RATE_UP = 2
   MAX_RATE_DOWN = 3
   MAX_TORQUE_LOOKUP = [0], [170]
+  MAX_RT_DELTA = 112  # only the default limit set was raised for the eps-lab test
 
 class TestHyundaiSafetyCameraSCC(TestHyundaiSafety):
   SAFETY_PARAM = HyundaiSafetyFlags.CAMERA_SCC

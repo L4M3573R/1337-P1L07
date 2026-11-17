@@ -53,19 +53,68 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 MAX_ANGLE = 85
 MAX_ANGLE_FRAMES = 89
 MAX_ANGLE_CONSECUTIVE_FRAMES = 2
-# Parking-lot EPS test (2026-11-16): /data/starpilot/eps_test.json {"max_angle": degrees} moves that cut-out angle for
-# the drive (read once when the car starts) to find where this car's EPS really faults. No file: the stock 85.
+# Parking-lot EPS limit test (eps-lab branch only, 2026-11-16): /data/starpilot/eps_test.json changes, live (re-read
+# within a second of being written), the >90 deg cut-out and, for cars on the default 384 / 3 / 7 limits, the torque
+# and ramp, each clamped to the eps-lab firmware ceiling (safety/modes/hyundai.h: 768 / 12 / 15). No file, a bad value
+# or a missing key: the stock value. max_angle_frames stays >= 89, the panda's min_valid_request_frames.
 EPS_TEST_PATH = '/data/starpilot/eps_test.json'
+EPS_TEST_RANGES = {
+  'max_angle': (MAX_ANGLE, 720),
+  'max_angle_frames': (MAX_ANGLE_FRAMES, 1000),
+  'steer_max': (384, 768),
+  'delta_up': (3, 12),
+  'delta_down': (7, 15),
+}
+EPS_TEST_DEFAULTS = {'max_angle': MAX_ANGLE, 'max_angle_frames': MAX_ANGLE_FRAMES, 'steer_max': 384, 'delta_up': 3, 'delta_down': 7}
+EPS_TEST_RELOAD_FRAMES = 100
 
 
-def eps_test_max_angle(path: str = EPS_TEST_PATH) -> float:
+def eps_test_values(path: str = EPS_TEST_PATH) -> dict:
   try:
     import json
     with open(path) as f:
-      value = json.load(f).get('max_angle')
-    return float(value) if isinstance(value, (int, float)) and MAX_ANGLE <= value <= 720 else MAX_ANGLE
-  except (OSError, ValueError, AttributeError):
-    return MAX_ANGLE
+      doc = json.load(f)
+  except (OSError, ValueError):
+    doc = {}
+  doc = doc if isinstance(doc, dict) else {}
+  out = dict(EPS_TEST_DEFAULTS)
+  for key, (low, high) in EPS_TEST_RANGES.items():
+    value = doc.get(key)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and low <= value <= high:
+      out[key] = float(value) if key == 'max_angle' else int(value)
+  return out
+
+
+def eps_test_max_angle(path: str = EPS_TEST_PATH) -> float:
+  return eps_test_values(path)['max_angle']
+
+
+class EpsTestConfig:
+  """Live eps_test.json values; torque / ramp apply only when the car's own limits are the default 384 / 3 / 7."""
+  def __init__(self, params, path: str = EPS_TEST_PATH):
+    self.path = path
+    self.default_limits = (params.STEER_MAX, params.STEER_DELTA_UP, params.STEER_DELTA_DOWN) == (384, 3, 7)
+    self.mtime = None
+    self.values = dict(EPS_TEST_DEFAULTS)
+    self.reload()
+
+  def reload(self) -> None:
+    import os
+    try:
+      mtime = os.stat(self.path).st_mtime_ns
+    except OSError:
+      mtime = None
+    if mtime != self.mtime:
+      self.mtime = mtime
+      self.values = eps_test_values(self.path)
+
+  def step(self, frame: int, params) -> None:
+    if frame % EPS_TEST_RELOAD_FRAMES == 0:
+      self.reload()
+    if self.default_limits:
+      params.STEER_MAX = self.values['steer_max']
+      params.STEER_DELTA_UP = self.values['delta_up']
+      params.STEER_DELTA_DOWN = self.values['delta_down']
 
 # On some HKG CAN and CAN FD non-CANFD_ALT_BUTTONS, the cancel button (CF_Clu_CruiseSwState / CRUISE_BUTTONS = 4) is
 # a pause/resume toggle, not a dedicated cancel. Firing it mid-brake inadvertently can cause a re-enable attempt
@@ -128,7 +177,7 @@ class CarController(CarControllerBase):
     self.CAN = CanBus(CP)
     self.params = CarControllerParams(CP)
     self.packer = CANPacker(dbc_names[Bus.pt])
-    self.max_angle = eps_test_max_angle()
+    self.eps_test = EpsTestConfig(self.params)
     self.angle_limit_counter = 0
     self.angle_vm = VehicleModel(CP) if CP.flags & HyundaiFlags.CANFD_ANGLE_STEERING else None
     self.apply_angle_last = 0.0
@@ -225,6 +274,7 @@ class CarController(CarControllerBase):
     # steering torque
     if self.CP.flags & HyundaiFlags.CANFD and self.angle_vm is None:
       self.params = CarControllerParams(self.CP, CS.out.vEgoRaw)
+    self.eps_test.step(self.frame, self.params)
     new_torque = int(round(actuators.torque * self.params.STEER_MAX))
     if _projection is not None:
       _projection.input(new_torque, self.params.STEER_MAX, self.apply_torque_last, CS.out.steeringTorque, self.params, limiter='driver')
@@ -232,8 +282,8 @@ class CarController(CarControllerBase):
                     apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, self.params))
 
     # >90 degree steering fault prevention
-    self.angle_limit_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringAngleDeg) >= self.max_angle, CC.latActive,
-                                                                       self.angle_limit_counter, MAX_ANGLE_FRAMES,
+    self.angle_limit_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringAngleDeg) >= self.eps_test.values['max_angle'], CC.latActive,
+                                                                       self.angle_limit_counter, self.eps_test.values['max_angle_frames'],
                                                                        MAX_ANGLE_CONSECUTIVE_FRAMES)
 
     if not CC.latActive:

@@ -6,11 +6,11 @@
 #include "opendbc/safety/modes/hyundai_classic_non_scc_aol.h"
 #include "opendbc/safety/modes/hyundai_blended_stock_aol.h"
 
-#define HYUNDAI_LIMITS(steer, rate_up, rate_down) { \
+#define HYUNDAI_LIMITS_RT(steer, rate_up, rate_down, rt_delta) { \
   .max_torque = (steer), \
   .max_rate_up = (rate_up), \
   .max_rate_down = (rate_down), \
-  .max_rt_delta = 112, \
+  .max_rt_delta = (rt_delta), \
   .driver_torque_allowance = 50, \
   .driver_torque_multiplier = 2, \
   .type = TorqueDriverLimited, \
@@ -21,6 +21,7 @@
   .min_valid_request_rt_interval = 810000,  /* 810ms; a ~10% buffer on cutting every 90 frames */ \
   .has_steer_req_tolerance = true, \
 }
+#define HYUNDAI_LIMITS(steer, rate_up, rate_down) HYUNDAI_LIMITS_RT(steer, rate_up, rate_down, 112)
 
 extern const LongitudinalLimits HYUNDAI_LONG_LIMITS;
 const LongitudinalLimits HYUNDAI_LONG_LIMITS = {
@@ -346,7 +347,11 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
   static bool hyundai_blended_mirror_request = false;
   static uint32_t hyundai_blended_mirror_ts = 0U;
   hyundai_blended_cancel_check();
-  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS = HYUNDAI_LIMITS(384, 3, 7);
+  // 1337 eps-lab branch ONLY (parking-lot EPS limit test, 2026-11-16): ceiling raised from 384 / 3 / 7 / rt 112 to
+  // 768 (6 Nm, the 11-bit field allows 1023) / 12 / 15 / rt 400. openpilot still requests 384 / 3 / 7 unless
+  // /data/starpilot/eps_test.json raises them (opendbc/car/hyundai/carcontroller.py EpsTestConfig).
+  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS = HYUNDAI_LIMITS_RT(768, 12, 15, 400);
+  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_HDA2 = HYUNDAI_LIMITS(384, 3, 7);   // blended HDA2 0x50: not raised
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_BLENDED = HYUNDAI_LIMITS(404, 2, 3);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT = HYUNDAI_LIMITS(270, 2, 3);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT_2 = HYUNDAI_LIMITS(170, 2, 3);
@@ -500,7 +505,7 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
     uint32_t raw_torque = ((((uint32_t)msg->data[6] & 0xFU) << 7U) | ((uint32_t)msg->data[5] >> 1U));
     int desired_torque = (int)raw_torque - 1024;
     bool steer_req = GET_BIT(msg, 52U);
-    if (steer_torque_cmd_checks(desired_torque, steer_req, HYUNDAI_STEERING_LIMITS)) {
+    if (steer_torque_cmd_checks(desired_torque, steer_req, HYUNDAI_STEERING_LIMITS_HDA2)) {
       tx = false;
     }
   }
