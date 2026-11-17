@@ -10,9 +10,13 @@ lane line passes 60 % / 0.3 m for one frame, and its correction fades out and ba
 Replay (current vs v2): drop-outs 4.7 -> 3.1 and, held out, 6.5 -> 3.8 per minute; time lost to line doubt 7.0 -> 4.7 %;
 pushes toward the car's center 99 % for both; near a line both push away the same share; jitter unchanged.
 
+v2 also never pushes toward a lane line the car's body is already within NEAR_LINE_M of (the asked-for and the applied
+correction): the current controller did that in ~7 % of near-line moments (the planned path bending past the center).
+
 LaneShadow runs one controller beside the one that steers and logs, once a minute, how each did (feature
-'lane_centering_shadow'). lane_centering_v2.json {"mode": "shadow" | "on" | "off"} (default shadow): shadow steers
-with the current controller and shadows v2; on steers with v2 and shadows the current one.
+'lane_centering_shadow'). lane_centering_v2.json {"mode": "on" | "shadow" | "off"}: on (default since 2026-11-17, the
+driver's call) steers with v2 and shadows the current controller; shadow steers with the current one and shadows v2;
+off: the current controller only.
 """
 from __future__ import annotations
 
@@ -33,6 +37,9 @@ TIMES = (0.8, 1.2, 1.6, 2.0)
 WEIGHTS = (0.4, 0.3, 0.2, 0.1)
 DEAD_M, SOFT_M = 0.04, 0.12
 MODES = ('shadow', 'on', 'off')
+NEAR_LINE_M = 0.30      # the body this close to a lane line: never push toward that line (the driver's rule)
+NEAR_LINE_AT_M = 2.0    # measured this far ahead of the camera (about the front of the car)
+DEFAULT_WIDTH_M = 1.83  # 2024-26 Elantra
 
 
 class StickyModel:
@@ -162,6 +169,9 @@ class LaneCenteringControllerV2(LaneCenteringController):
   def __init__(self, **kwargs):
     self.sticky = StickyTrust()
     self.preview = PreviewReading()
+    body = kwargs.get('body')
+    width = getattr(body, 'width', None) if body is not None else None
+    self.half_width = (float(width) if isinstance(width, (int, float)) and 1.0 < width < 3.0 else DEFAULT_WIDTH_M) / 2.0
     super().__init__(**kwargs)
     self._tracker = HoldingTracker(self.sticky)
     self._clear_frame()
@@ -180,10 +190,32 @@ class LaneCenteringControllerV2(LaneCenteringController):
     key = (authority == 0.0, _single_target is None, offset)
     if key not in self._cache:
       # only the first reading of a new frame moves the memory (the controller also asks without the path preference)
-      self._cache[key] = self.preview.raw(model, speed, offset, authority, paths=_paths, single_target=_single_target,
-                                          dt=self._frame_dt, update=self._fresh, trusted=tuple(self.sticky.trusted))
+      raw = self.preview.raw(model, speed, offset, authority, paths=_paths, single_target=_single_target,
+                             dt=self._frame_dt, update=self._fresh, trusted=tuple(self.sticky.trusted))
+      self._cache[key] = self._keep_off_lines(model, offset, raw)
       self._fresh = False
     return self._cache[key]
+
+  def _keep_off_lines(self, model, offset, raw):
+    """Never push toward a confidently seen line the car's body is already within NEAR_LINE_M of. The model frame is
+    right-positive (y and curvature) and its origin is the lens; the car's center is -offset from it (the camera offset)."""
+    if raw is None or raw == 0.0:
+      return raw
+    try:
+      car = -float(offset)
+      for index, toward_right in ((1, False), (2, True)):
+        if (raw > 0) != toward_right or float(model.laneLineProbs[index]) < 0.5:
+          continue
+        line = _path(model.laneLines[index])
+        y = _at(line, NEAR_LINE_AT_M) if line is not None else None
+        if y is None:
+          continue
+        room = (y - (car + self.half_width)) if toward_right else ((car - self.half_width) - y)
+        if room < NEAR_LINE_M:
+          return 0.0
+    except (AttributeError, IndexError, TypeError, ValueError, OverflowError):
+      return raw
+    return raw
 
   def update(self, observation: LaneCenteringInput) -> LaneCenteringResult:
     if isinstance(observation, LaneCenteringInput):
@@ -198,7 +230,18 @@ class LaneCenteringControllerV2(LaneCenteringController):
         except (AttributeError, TypeError, ValueError):
           self._view = observation.model
       observation = replace(observation, model=self._view)
-    return super().update(observation)
+    result = super().update(observation)
+    try:
+      if (result.candidate_curvature is not None and result.correction != 0.0 and
+          self._keep_off_lines(observation.model, observation.settings.offset_m, result.correction) == 0.0):
+        # what is applied, not only what is asked for: a correction already under way, or the position hold, must not
+        # lean into a close line either (controlsd's curvature rate limit smooths the release)
+        base = result.candidate_curvature - result.correction
+        self._correction, self._position_trim = 0.0, 0.0
+        return self._result(base, 'near_line')
+    except (AttributeError, TypeError, ValueError):
+      pass
+    return result
 
 
 def read_mode(path: Path | None = None) -> str:
@@ -208,8 +251,8 @@ def read_mode(path: Path | None = None) -> str:
   try:
     value = json.loads(path.read_bytes()[:4096]).get('mode')
   except (OSError, ValueError, AttributeError):
-    return 'shadow'
-  return value if value in MODES else 'shadow'
+    return 'on'
+  return value if value in MODES else 'on'
 
 
 class LaneShadow:
@@ -259,7 +302,7 @@ class LaneShadow:
       self.samples += 1
       room = self._room(observation)
       for key, result in (('steering', steering), ('shadow', shadow)):
-        on = result.reason in ('qualified', 'clearance_limited')
+        on = result.reason in ('qualified', 'clearance_limited', 'near_line')
         self.centering[key] += on
         if self.was[key] is True and not on:
           self.dropouts[key] += 1

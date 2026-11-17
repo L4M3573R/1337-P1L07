@@ -2,7 +2,7 @@
 import json
 
 
-from openpilot.starpilot.lateral.lane_centering import LaneCenteringController
+from openpilot.starpilot.lateral.lane_centering import LaneCenteringController, LaneCenteringSettings
 from openpilot.starpilot.lateral.lane_centering_v2 import HOLD_S, LaneCenteringControllerV2, LaneShadow, read_mode
 from openpilot.starpilot.lateral.tests.test_lane_centering import model, observation
 
@@ -77,9 +77,37 @@ def test_a_broken_shadow_is_silent():
 
 def test_the_mode_file(tmp_path):
   path = tmp_path / 'lane_centering_v2.json'
-  assert read_mode(path) == 'shadow'
+  assert read_mode(path) == 'on'   # v2 steers by default (the driver, 2026-11-17)
   for mode in ('on', 'off', 'shadow'):
     path.write_text(json.dumps({'mode': mode}))
     assert read_mode(path) == mode
   path.write_text('{"mode": "bogus"}')
-  assert read_mode(path) == 'shadow'
+  assert read_mode(path) == 'on'
+
+
+def test_it_never_pushes_toward_a_line_the_body_is_already_close_to():
+  # lens 0.23 m left of the car center, car 1.83 m wide: a right line 1.30 m right of the lens leaves 0.155 m of room;
+  # the path sits left of the lane center, so the plain reading would push right, toward that close line
+  close_right = model(left=-2.1, right=1.30, path=-0.6)
+  cur = drive(LaneCenteringController(), [(close_right, 3.0)])[-1]
+  v2 = LaneCenteringControllerV2()
+  results = []
+  sample = 0
+  for tick in range(300):
+    if tick % 5 == 0:
+      sample += 1
+    results.append(v2.update(observation(close_right, model_sample_id=sample,
+                                         settings=LaneCenteringSettings(True, -0.23, 0.0, True))))
+  assert cur.correction > 0                     # the current controller pushes toward the close right line
+  assert results[-1].correction <= 1e-9        # v2 does not
+
+
+def test_away_from_a_close_line_it_still_pushes():
+  close_right = model(left=-2.1, right=1.30, path=0.6)   # the path is right of center: push left, away from the line
+  v2 = LaneCenteringControllerV2()
+  sample, result = 0, None
+  for tick in range(300):
+    if tick % 5 == 0:
+      sample += 1
+    result = v2.update(observation(close_right, model_sample_id=sample, settings=LaneCenteringSettings(True, -0.23, 0.0, True)))
+  assert result.correction < 0

@@ -272,8 +272,9 @@ class Controls:
       return False
 
   def _create_lane_shadow(self, predict_lane_clearance: bool):
-    """Lane centering v2 (starpilot/lateral/lane_centering_v2.py): shadowed beside the current controller by default,
-    or steering with the current one shadowed (lane_centering_v2.json mode 'on'). A failure leaves the current one alone."""
+    """Lane centering v2 (starpilot/lateral/lane_centering_v2.py) steers by default with the current controller shadowed
+    beside it; lane_centering_v2.json mode 'shadow' swaps them, 'off' keeps only the current one. A failure leaves the
+    current controller steering."""
     try:
       from openpilot.starpilot.lateral.lane_centering_v2 import LaneCenteringControllerV2, LaneShadow, read_mode
       mode = read_mode()
