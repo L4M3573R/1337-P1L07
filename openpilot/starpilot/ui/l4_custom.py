@@ -1,8 +1,8 @@
-"""Settings behind the "L4 custom" tile: personal steering (NNLC), curve guard, BlueDriver logging and Pulse and Glide band.
+"""Settings behind the "L4 custom" tile: NNLC (personal steering), curve guard, BlueDriver logging and Pulse and Glide band.
 (Conditional Experimental and lane offset keep their own selectors; the curve guard reads the lane offset.)
 
 Each read falls back to the default when its source is missing or malformed; each write is atomic.
-Personal steering and the curve guard take effect at the start of the next drive; the rest apply live.
+NNLC and the curve guard take effect at the start of the next drive; the rest apply live.
 """
 from __future__ import annotations
 
