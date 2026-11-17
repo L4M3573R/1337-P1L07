@@ -80,6 +80,11 @@ def _eps_test_steer(path: str = EPS_TEST_PATH) -> bool:
 
 
 class Controls:
+  def _eps_test_fresh(self) -> bool:
+    """eps-lab: scripted steering is on and its testJoystick torque is fresh (<= 0.2 s)."""
+    return bool(self.eps_test_steer and self.sm.recv_frame['testJoystick'] > 0 and
+                (self.sm.frame - self.sm.recv_frame['testJoystick']) * DT_CTRL <= 0.2)
+
   def __init__(self, *, predict_lane_clearance: bool = False) -> None:
     if type(predict_lane_clearance) is not bool:
       raise TypeError("Invalid lane-clearance selection")
@@ -433,7 +438,10 @@ class Controls:
     # Check which actuators can be enabled
     standstill = abs(CS.vEgo) <= max(self.CP.minSteerSpeed, 0.3) or CS.standstill
     lateral_requested = self.sm['selfdriveState'].enabled and self.sm['selfdriveState'].active
-    CC.latActive = ordinary_lateral_requested(self.sm['selfdriveState'].active, CS, self.CP)
+    # eps-lab: while the test script is steering (fresh testJoystick), steering may run at a standstill too, to see
+    # whether this car's EPS takes torque there (CP.steerAtStandstill is False for it). Model steering keeps the gate.
+    eps_test_standstill = self._eps_test_fresh()
+    CC.latActive = ordinary_lateral_requested(self.sm['selfdriveState'].active, CS, self.CP, allow_standstill=eps_test_standstill)
     CC.longActive = CC.enabled and not any(e.overrideLongitudinal for e in self.sm['onroadEvents']) and self.CP.openpilotLongitudinalControl
     CC.longActive = self.longitudinal_inputs.qualify_active(CC.longActive)
     if self.aol_replay:
@@ -463,7 +471,7 @@ class Controls:
         and native.lateralAllowed
         and not CS.steerFaultTemporary
         and not CS.steerFaultPermanent
-        and (not standstill or self.CP.steerAtStandstill)
+        and (not standstill or self.CP.steerAtStandstill or eps_test_standstill)
       )
       CC.longActive = bool(
         acknowledged
@@ -764,8 +772,7 @@ class Controls:
     # so AOL and its safety acknowledgements run as in normal driving (joystickd cannot engage under AOL).
     if self.sm.frame % 100 == 0:
       self.eps_test_steer = _eps_test_steer()
-    if self.eps_test_steer and CC.latActive and self.sm.recv_frame['testJoystick'] > 0 and \
-       (self.sm.frame - self.sm.recv_frame['testJoystick']) * DT_CTRL <= 0.2:
+    if CC.latActive and self._eps_test_fresh():
       axes = list(self.sm['testJoystick'].axes)
       actuators.torque = float(min(1.0, max(-1.0, axes[1]))) if len(axes) > 1 and math.isfinite(axes[1]) else 0.0
     if self.CP.steerControlType == car.CarParams.SteerControlType.curvature:

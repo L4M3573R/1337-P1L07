@@ -5,8 +5,8 @@ On the comma (eps-lab installed, car engaged in an empty lot):
   python3 scripts/eps_lab.py plan --list           # the steps
   python3 scripts/eps_lab.py plan                  # run every step in order (resumes where it stopped)
   python3 scripts/eps_lab.py plan --from 11        # start at step 11;  --only 5,6,7  just those;  --redo  ignore saved state
-  (after the torque steps, the plan narrows the gap between the highest clean torque and the first faulting one to
-  16, then repeats the winner the other way: the true limit, not just the nearest 64)
+  (after the torque climb and the time-between-sags climb, the plan narrows the gap between the highest clean value
+  and the first faulting one, then repeats the winner the other way: the true limit, not just the nearest step)
   python3 scripts/eps_lab.py push 1.0 6 --steer-max 512 --delta-up 12     # one ad-hoc run (also: hold, reverse)
   python3 scripts/eps_lab.py reset                 # stock values, scripted steering off
 On the PC:
@@ -34,7 +34,8 @@ CFG_PATH = Path('/data/starpilot/eps_test.json')
 LAB = Path('/data/eps_lab')
 RUNS = LAB / 'runs'
 STATE = LAB / 'state.json'
-STOCK = {'steer_max': 384, 'delta_up': 3, 'delta_down': 7, 'max_angle': 85, 'max_angle_frames': 89}
+STOCK = {'steer_max': 384, 'delta_up': 3, 'delta_down': 7, 'max_angle': 85, 'max_angle_frames': 89, 'cut_frames': 2,
+         'cut_boost': 0, 'cut_boost_max': 0, 'cut_boost_frames': 0, 'cut_preload_frames': 0, 'cut_early_pct': 0}
 CEILING = {'steer_max': 768, 'delta_up': 12, 'delta_down': 15}
 MAX_MPH = 12.0
 ARM_TIMEOUT_S = 240.0
@@ -58,14 +59,32 @@ PLAN = [
   ('hold-90', 'hold 90 deg (the EPS limit angle)', {'best': True}, ('hold', (90.0, 8.0)), 'roll ~3 mph'),
   ('hold-180', 'hold 180 deg (half a turn)', {'best': True}, ('hold', (180.0, 8.0)), 'roll ~3 mph'),
   ('hold-270', 'hold 270 deg', {'best': True}, ('hold', (270.0, 8.0)), 'roll ~3 mph'),
-  ('cut-angle-90', 'cut-out at 90 instead of 85 deg', {'best': True, 'max_angle': 90}, ('hold', (135.0, 8.0)), 'roll ~3 mph'),
-  ('cut-frames-95', 'cut-out every 0.95 s instead of 0.89', {'best': True, 'max_angle_frames': 95}, ('hold', (135.0, 8.0)), 'roll ~3 mph'),
-  ('cut-frames-110', 'cut-out every 1.1 s', {'best': True, 'max_angle_frames': 110}, ('hold', (135.0, 8.0)), 'roll ~3 mph'),
-  ('cut-frames-150', 'cut-out every 1.5 s (expect a fault: measures recovery)', {'best': True, 'max_angle_frames': 150},
-   ('hold', (135.0, 8.0)), 'roll ~3 mph'),
+  ('sag-base', 'the sag at each stock cut-out (2 frames dropped every 0.89 s past 85 deg)', {'best': True},
+   ('hold', (135.0, 10.0)), 'roll ~3 mph'),
+  ('sag-1frame', 'drop 1 frame instead of 2: half the sag, if the EPS still resets its timer', {'best': True, 'cut_frames': 1},
+   ('hold', (135.0, 10.0)), 'roll ~3 mph'),
+  ('cut-angle-90', 'start counting at 90 deg instead of 85', {'best': True, 'max_angle': 90}, ('hold', (135.0, 10.0)), 'roll ~3 mph'),
+  ('cut-every-1.0s', 'longest time between sags: 1.0 s', {'best': True, 'max_angle_frames': 100}, ('hold', (135.0, 10.0)), 'roll ~3 mph'),
+  ('cut-every-1.2s', 'longest time between sags: 1.2 s', {'best': True, 'max_angle_frames': 120}, ('hold', (135.0, 10.0)), 'roll ~3 mph'),
+  ('cut-every-1.5s', 'longest time between sags: 1.5 s', {'best': True, 'max_angle_frames': 150}, ('hold', (135.0, 10.0)), 'roll ~3 mph'),
+  # Sag shaping, compared on the same turn (in to 180 deg over 1.2 s, hold 3 s, back out): tracking error and sag.
+  ('turn-stock', 'turn profile with plain sags', {'best': True}, ('turn', (180.0, 3.0)), 'roll ~3 mph'),
+  ('turn-boost', 'sag boost: +128 for 0.15 s after each cut', {'best': True, 'cut_boost': 128, 'cut_boost_frames': 15},
+   ('turn', (180.0, 3.0)), 'roll ~3 mph'),
+  ('turn-preload', 'preload: +96 for 0.1 s before each cut, 0.05 s after', {'best': True, 'cut_boost': 96, 'cut_preload_frames': 10,
+   'cut_boost_frames': 5}, ('turn', (180.0, 3.0)), 'roll ~3 mph'),
+  ('turn-early', 'early sag: cut when demand is under 60% of max', {'best': True, 'cut_early_pct': 60}, ('turn', (180.0, 3.0)),
+   'roll ~3 mph'),
+  ('turn-all', 'early sag + boost together', {'best': True, 'cut_early_pct': 60, 'cut_boost': 128, 'cut_boost_frames': 15},
+   ('turn', (180.0, 3.0)), 'roll ~3 mph'),
+  ('turn-boost-over', 'boost may briefly pass the proven torque (to 768): does a short burst fault?',
+   {'best': True, 'cut_boost': 128, 'cut_boost_frames': 15, 'cut_boost_max': 768}, ('turn', (180.0, 3.0)), 'roll ~3 mph'),
   ('reverse', 'fast reversal: full one way, then full the other', {'best': True}, ('reverse', (2.0, 4.0)), 'roll ~3 mph'),
   ('lock-rolling', 'how far it can turn the wheel, rolling', {'best': True}, ('push', (1.0, 10.0)), 'roll ~3 mph'),
   ('lock-crawl', 'how far it can turn the wheel, barely moving', {'best': True}, ('push', (1.0, 8.0)), 'creep, as slow as possible'),
+  ('stopped-push', 'does the EPS take torque at a standstill?', {'best': True}, ('push', (1.0, 5.0)),
+   'STOPPED in Drive, foot on the brake'),
+  ('stopped-hold-90', 'hold 90 deg at a standstill', {'best': True}, ('hold', (90.0, 6.0)), 'STOPPED in Drive, foot on the brake'),
   ('speed-8', 'hold 90 deg at ~8 mph: torque needed with speed', {'best': True}, ('hold', (90.0, 5.0)), 'roll ~8 mph, room to circle'),
 ]
 
@@ -84,7 +103,7 @@ def resolve_cfg(cfg: dict, best: dict) -> dict:
   if cfg.get('best') or cfg.get('ramp') == 'best':
     out.update({k: best[k] for k in ('delta_up', 'delta_down') if k in best})
   if cfg.get('best'):
-    out.update({k: best[k] for k in ('steer_max',) if k in best})
+    out.update({k: best[k] for k in ('steer_max', 'cut_frames', 'max_angle', 'max_angle_frames') if k in best})
   out.update({k: v for k, v in cfg.items() if k in STOCK})
   for k, high in CEILING.items():
     out[k] = min(out[k], high)
@@ -121,12 +140,15 @@ class Car:
 
   def update(self, timeout_ms: int = 0) -> None:
     self.sm.update(timeout_ms)
+    reqs = []
     for evt in self.messaging.drain_sock(self.can):
       for c in evt.sendcan:
         if c.address == 0x340 and len(c.dat) >= 4:   # LKAS11: what actually goes to the EPS
           word = int.from_bytes(bytes(c.dat[:4]), 'little')
           self.lkas_raw = ((word >> 16) & 0x7FF) - 1024
-          self.lkas_req = bool((word >> 27) & 1)
+          reqs.append(bool((word >> 27) & 1))
+    if reqs:
+      self.lkas_req = all(reqs)   # a 1-frame cut-out between two samples still shows
 
   def sample(self, t0: float, cmd: float) -> dict:
     cs, cc = self.sm['carState'], self.sm['carControl']
@@ -187,6 +209,17 @@ def execute(car: Car, kind: str, args: tuple, side: int) -> dict:
     def hold_cmd(s):   # PD on the wheel angle: full torque at 40 deg error, damped by the wheel speed
       return (target - s['angle']) / 40.0 - s['rate'] / 300.0
     segments = [(secs, hold_cmd)]
+  elif kind == 'turn':
+    peak, hold_s = args
+    peak *= side
+
+    def turn_target(t):
+      return peak * (min(1.0, t / 1.2) if t < 1.2 + hold_s else max(0.0, 1.0 - (t - 1.2 - hold_s) / 1.2))
+
+    def turn_cmd(s):
+      s['target'] = round(turn_target(s['t']), 1)
+      return (s['target'] - s['angle']) / 40.0 - s['rate'] / 300.0
+    segments = [(2.4 + hold_s, turn_cmd)]
   else:
     raise ValueError(kind)
 
@@ -264,6 +297,7 @@ def summarize(kind: str, args: tuple, run: dict) -> dict:
   # Ramp: time from the start to full commanded torque on the bus.
   full = next((s['t'] for s in act if abs(s['sent']) >= 0.98 * max(1, out['peak_sent'])), None)
   out['t_full_torque'] = full
+  out.update(sag_stats(act))
   if kind == 'hold':
     target = args[0]
     reached = next((s['t'] for s in act if abs(abs(s['angle']) - target) <= 5), None)
@@ -275,6 +309,13 @@ def summarize(kind: str, args: tuple, run: dict) -> dict:
         out['hold_cmd'] = round(sum(abs(s['cmd']) for s in settled) / len(settled), 2)
         out['hold_sent'] = round(sum(abs(s['sent']) for s in settled) / len(settled))
         out['held_s'] = round(settled[-1]['t'] - reached, 1)
+  if kind == 'turn':
+    tracked = [s for s in act if 'target' in s]
+    if tracked:
+      out['track_err'] = round(sum(abs(s['target'] - s['angle']) for s in tracked) / len(tracked), 1)
+      held = [s for s in tracked if 1.5 <= s['t'] <= 1.2 + args[1]]
+      if held:
+        out['track_err_hold'] = round(sum(abs(s['target'] - s['angle']) for s in held) / len(held), 1)
   if kind == 'reverse':
     at = run['marks'].get('reverse_at')
     after = [s for s in act if at is not None and s['t'] >= at]
@@ -286,9 +327,42 @@ def summarize(kind: str, args: tuple, run: dict) -> dict:
   return out
 
 
+def sag_stats(act: list) -> dict:
+  """Per cut-out (request bit dropped): how far the wheel falls back, how long until it is back, and how far and for
+  how long the motor torque drops. Averages and worst case over the run."""
+  sags, backs, dips, eps_backs, gaps = [], [], [], [], []
+  cuts = [k for k in range(1, len(act)) if act[k - 1]['req'] and not act[k]['req']]
+  for n, k in enumerate(cuts):
+    t0, a0, e0 = act[k]['t'], abs(act[k]['angle']), abs(act[k - 1]['eps'])
+    if n:
+      gaps.append(t0 - act[cuts[n - 1]]['t'])
+    win = [x for x in act[k:] if x['t'] - t0 <= 0.6]
+    if not win or win[-1]['t'] - t0 < 0.5:
+      continue
+    low = min(win, key=lambda x: abs(x['angle']))
+    sags.append(a0 - abs(low['angle']))
+    back = next((x['t'] for x in win if x['t'] >= low['t'] and abs(x['angle']) >= a0 - 0.5), None)
+    backs.append((back if back is not None else win[-1]['t']) - t0)
+    if e0 >= 20:
+      e_low = min(win[:40], key=lambda x: abs(x['eps']))
+      dips.append(1 - abs(e_low['eps']) / e0)
+      e_back = next((x['t'] for x in win if x['t'] >= e_low['t'] and abs(x['eps']) >= 0.9 * e0), None)
+      eps_backs.append((e_back if e_back is not None else win[-1]['t']) - t0)
+  out = {}
+  if sags:
+    out.update({'sag_deg': round(sum(sags) / len(sags), 1), 'sag_deg_max': round(max(sags), 1),
+                'sag_back_s': round(sum(backs) / len(backs), 2)})
+  if dips:
+    out.update({'eps_drop_pct': round(100 * sum(dips) / len(dips)), 'eps_back_s': round(sum(eps_backs) / len(eps_backs), 2)})
+  if gaps:
+    out['s_between_sags'] = round(sum(gaps) / len(gaps), 2)
+  return out
+
+
 def line(name: str, summary: dict) -> str:
   keys = ('stop', 'peak_angle', 'turns', 'peak_rate', 't90', 't180', 't270', 't_full_torque', 'stall_angle', 'peak_sent',
-          'peak_eps', 'cutouts', 't_reach', 'hold_err', 'hold_sent', 'held_s', 'reverse_to_center_s', 'fault_angle',
+          'peak_eps', 'cutouts', 's_between_sags', 'sag_deg', 'sag_deg_max', 'sag_back_s', 'eps_drop_pct', 'eps_back_s',
+          't_reach', 'hold_err', 'hold_sent', 'held_s', 'track_err', 'track_err_hold', 'reverse_to_center_s', 'fault_angle',
           'recovered_s', 'mph')
   return f'{name}: ' + ', '.join(f'{k} {summary[k]}' for k in keys if summary.get(k) is not None)
 
@@ -303,8 +377,8 @@ def save(name: str, cfg: dict, kind: str, args: tuple, side: int, run: dict, sum
 
 def one(car: Car, name: str, cfg: dict, kind: str, args: tuple, note: str) -> dict | None:
   write_cfg(cfg)
-  say(f"{name}: torque {cfg['steer_max']}, ramp {cfg['delta_up']}/{cfg['delta_down']}, cut-out {cfg['max_angle']} deg / "
-      + f"{cfg['max_angle_frames']} frames; {kind} {args}")
+  say(f"{name}: torque {cfg['steer_max']}, ramp {cfg['delta_up']}/{cfg['delta_down']}, cut-out past {cfg['max_angle']} deg every "
+      + f"{cfg['max_angle_frames'] / 100:.2f} s for {cfg['cut_frames']} frame(s); {kind} {args}")
   time.sleep(1.3)   # the controller re-reads the file each second
   side = arm(car, note)
   if side is None:
@@ -317,10 +391,20 @@ def one(car: Car, name: str, cfg: dict, kind: str, args: tuple, note: str) -> di
   return summary
 
 
-# ---------------------------------------------------------------- torque refinement
-REFINE_STEP = 16          # stop narrowing when the clean / faulting gap is this small (16 = 0.125 Nm)
-REFINE_MAX_RUNS = 4       # 64 -> 32 -> 16 (+ spare)
-LAST_TQ_STEP = max(i for i, step in enumerate(PLAN, 1) if step[0].startswith('tq-'))
+# ---------------------------------------------------------------- narrowing a limit
+# After a climb faults, halve the gap between the highest clean value and the lowest faulting one, then repeat the
+# winner the other way (one clean run can be luck; a fault on the repeat steps it down once).
+SEARCHES = {
+  'tq-': {'what': 'torque', 'key': 'steer_max', 'fault': 'tq_fault', 'done': 'refined', 'step': 16, 'floor': 384,
+          'label': 'tq-refine', 'cfg': lambda v: {'steer_max': v, 'ramp': 'best'}, 'run': ('push', (1.0, 6.0)),
+          'unit': lambda v: str(v)},
+  'cut-every-': {'what': 'time between sags', 'key': 'max_angle_frames', 'fault': 'interval_fault', 'done': 'interval_refined',
+                 'step': 3, 'floor': 89, 'label': 'cut-interval', 'cfg': lambda v: {'best': True, 'max_angle_frames': v},
+                 'run': ('hold', (135.0, 10.0)), 'unit': lambda v: f'{v / 100:.2f} s'},
+}
+NARROW_MAX_RUNS = 4
+for _prefix, _search in SEARCHES.items():
+  _search['last_step'] = max(i for i, step in enumerate(PLAN, 1) if step[0].startswith(_prefix))
 
 
 def fault_kind(summary: dict) -> str:
@@ -329,46 +413,54 @@ def fault_kind(summary: dict) -> str:
          'below the cut-out angle (the torque or ramp itself)'
 
 
-def refine_torque(car, state: dict) -> str:
-  """Halve the gap between the highest clean torque and the lowest faulting one, then repeat the winner on the
-  other side. Returns 'done', 'skipped' (no blinker / stopped early) or 'perm'."""
-  good, bad = state['best'].get('steer_max', STOCK['steer_max']), state['tq_fault']
-  say(f'--- torque refinement: {good} ran clean, {bad} faulted; narrowing to within {REFINE_STEP}')
+def narrow(car, state: dict, search: dict) -> str:
+  """Returns 'done', 'skipped' (no blinker / stopped early) or 'perm'."""
+  key, unit = search['key'], search['unit']
+  good, bad = state['best'].get(key, STOCK[key]), state[search['fault']]
+  say(f"--- narrowing the {search['what']}: {unit(good)} ran clean, {unit(bad)} faulted; to within {unit(search['step'])}")
+
+  def attempt(value, label, note='roll ~3 mph'):
+    summary = one(car, label, resolve_cfg(search['cfg'](value), state['best']), *search['run'], note)
+    return summary if summary is not None and summary['stop'] in ('done', 'fault', 'PERMANENT FAULT') else None
+
+  def record(new_good, new_bad):
+    state['best'][key], state[search['fault']] = new_good, new_bad
+    save_state(state)
+
   runs = 0
-  while bad - good > REFINE_STEP and runs < REFINE_MAX_RUNS:
-    mid = good + max(REFINE_STEP, (bad - good) // 2 // 8 * 8)
+  while bad - good > search['step'] and runs < NARROW_MAX_RUNS:
     runs += 1
-    summary = one(car, f'tq-refine-{mid}', resolve_cfg({'steer_max': mid, 'ramp': 'best'}, state['best']), 'push', (1.0, 6.0),
-                  'roll ~3 mph')
-    if summary is None or summary['stop'] not in ('done', 'fault', 'PERMANENT FAULT'):
+    mid = good + max(search['step'], (bad - good) // 2 // search['step'] * search['step'])
+    summary = attempt(mid, f"{search['label']}-{mid}")
+    if summary is None:
       return 'skipped'
     if summary['stop'] == 'done':
       good = mid
     else:
       bad = mid
-      say(f'{mid} faulted {fault_kind(summary)}')
-    state['best']['steer_max'], state['tq_fault'] = good, bad
-    save_state(state)
+      say(f'{unit(mid)} faulted {fault_kind(summary)}')
+    record(good, bad)
     if summary['stop'] == 'PERMANENT FAULT':
       return 'perm'
-  # One clean run can be luck: repeat the winner, ideally turning the other way. A fault steps it down once.
-  for _attempt in range(2):
-    summary = one(car, f'tq-confirm-{good}', resolve_cfg({'steer_max': good, 'ramp': 'best'}, state['best']), 'push', (1.0, 6.0),
-                  'roll ~3 mph, signal the OTHER side from last run')
-    if summary is None or summary['stop'] not in ('done', 'fault', 'PERMANENT FAULT'):
+  for _repeat in range(2):
+    summary = attempt(good, f"{search['label']}-confirm-{good}", 'roll ~3 mph, signal the OTHER side from last run')
+    if summary is None:
       return 'skipped'
     if summary['stop'] == 'done':
       break
-    say(f'{good} faulted on the repeat {fault_kind(summary)}')
-    bad, good = good, max(STOCK['steer_max'], good - REFINE_STEP)
-    state['best']['steer_max'], state['tq_fault'] = good, bad
-    save_state(state)
+    say(f'{unit(good)} faulted on the repeat {fault_kind(summary)}')
+    good, bad = max(search['floor'], good - search['step']), good
+    record(good, bad)
     if summary['stop'] == 'PERMANENT FAULT':
       return 'perm'
-  state['refined'] = True
+  state[search['done']] = True
   save_state(state)
-  say(f'torque limit: {good} works (twice), {bad} faults')
+  say(f"{search['what']} limit: {unit(good)} works (twice), {unit(bad)} faults")
   return 'done'
+
+
+def pending_narrowing(state: dict, step_index: int) -> list:
+  return [x for x in SEARCHES.values() if step_index > x['last_step'] and state.get(x['fault']) and not state.get(x['done'])]
 
 
 # ---------------------------------------------------------------- commands
@@ -384,16 +476,17 @@ def cmd_plan(a) -> int:
     for i, (name, what, cfg, (kind, args), note) in enumerate(PLAN, 1):
       if i < a.from_ or (only and i not in only) or (not only and not a.from_ > 1 and name in state['done']):
         continue
-      if name.startswith('tq-') and state.get('tq_fault'):
-        say(f"--- step {i}: {name} skipped (torque {state['tq_fault']} already faulted)")
+      search = next((x for p, x in SEARCHES.items() if name.startswith(p)), None)
+      if search and state.get(search['fault']):
+        say(f"--- step {i}: {name} skipped ({search['what']} {search['unit'](state[search['fault']])} already faulted)")
         continue
-      if i > LAST_TQ_STEP and state.get('tq_fault') and not state.get('refined'):
-        result = refine_torque(car, state)
+      for pending in pending_narrowing(state, i):
+        result = narrow(car, state, pending)
         if result == 'perm':
           say(f'PERMANENT steering fault: turn the car off and on, then resume with: plan --from {i}')
           return 2
         if result == 'skipped':
-          say(f'refinement stopped; resume with: plan --from {i}')
+          say(f'narrowing stopped; resume with: plan --from {i}')
           return 1
       say(f'--- step {i}/{len(PLAN)}: {name} - {what}')
       resolved = resolve_cfg(cfg, state['best'])
@@ -403,13 +496,20 @@ def cmd_plan(a) -> int:
         return 1
       state['done'].append(name)
       clean = summary['stop'] == 'done'
-      # 'best' = the highest ramp / torque that ran clean (no fault, not stopped early).
+      # 'best' = every value that ran clean (no fault, not stopped early): fastest ramp, highest torque, the shorter
+      # cut, the later cut angle, the longest time between sags. Later 'best' steps run with all of them together.
       if clean and name.startswith('ramp-'):
         state['best'].update({k: resolved[k] for k in ('delta_up', 'delta_down')})
       if clean and (name.startswith('tq-') or name == 'base'):
         state['best']['steer_max'] = max(state['best'].get('steer_max', 0), resolved['steer_max'])
-      if name.startswith('tq-') and not clean and summary['stop'] in ('fault', 'PERMANENT FAULT'):
-        state['tq_fault'] = resolved['steer_max']   # higher torque steps are skipped from here
+      if clean and name == 'sag-1frame':
+        state['best']['cut_frames'] = 1
+      if clean and name == 'cut-angle-90':
+        state['best']['max_angle'] = 90
+      if clean and name.startswith('cut-every-'):
+        state['best']['max_angle_frames'] = max(state['best'].get('max_angle_frames', 0), resolved['max_angle_frames'])
+      if search and not clean and summary['stop'] in ('fault', 'PERMANENT FAULT'):
+        state[search['fault']] = resolved[search['key']]   # higher steps of this climb are skipped from here
       save_state(state)
       if summary['stop'] == 'PERMANENT FAULT':
         say(f'PERMANENT steering fault: turn the car off and on, then resume with: plan --from {i + 1}')
@@ -417,9 +517,10 @@ def cmd_plan(a) -> int:
       if not clean and summary['stop'] != 'fault':
         say(f"run stopped early ({summary['stop']}); resume with: plan --from {i}")
         return 1
-    if state.get('tq_fault') and not state.get('refined') and refine_torque(car, state) != 'done':
-      say('refinement stopped; run the plan again to finish it')
-      return 1
+    for pending in pending_narrowing(state, len(PLAN) + 1):
+      if narrow(car, state, pending) != 'done':
+        say('narrowing stopped; run the plan again to finish it')
+        return 1
     say(f"plan finished. best: {state['best']}. Pull the results to the PC with: scripts/eps_lab.py report --pull")
     return 0
   finally:
@@ -429,7 +530,10 @@ def cmd_plan(a) -> int:
 
 def cmd_single(a) -> int:
   cfg = resolve_cfg({k: v for k, v in (('steer_max', a.steer_max), ('delta_up', a.delta_up), ('delta_down', a.delta_down),
-                                       ('max_angle', a.max_angle), ('max_angle_frames', a.max_angle_frames)) if v is not None}, {})
+                                       ('max_angle', a.max_angle), ('max_angle_frames', a.max_angle_frames),
+                                       ('cut_frames', a.cut_frames), ('cut_boost', a.cut_boost), ('cut_boost_max', a.cut_boost_max),
+                                       ('cut_boost_frames', a.cut_boost_frames),
+                                       ('cut_preload_frames', a.cut_preload_frames), ('cut_early_pct', a.cut_early_pct)) if v is not None}, {})
   car = Car()
   try:
     return 0 if one(car, f'{a.cmd}-adhoc', cfg, a.cmd, (a.x, a.seconds), 'ad-hoc') else 1
@@ -496,6 +600,13 @@ def cmd_report(a) -> int:
         flat += '  <- wheel no faster'
     print(f'torque {tq}: motor gave up to {eps}, wheel {rate} deg/s, reached {far} deg{gain}{flat}')
     prev = (eps, tq, rate)
+  turns = [r for r in runs if r['kind'] == 'turn' and r['summary'].get('stop') == 'done']
+  if turns:
+    print('\nsag shaping on the same turn (lower is better):')
+    for r in sorted(turns, key=lambda r: r['summary'].get('track_err_hold', 99)):
+      x = r['summary']
+      print(f"  {r['name']:14} off target {x.get('track_err_hold')} deg while held ({x.get('track_err')} whole turn), "
+            + f"sag {x.get('sag_deg')} deg (worst {x.get('sag_deg_max')}), back in {x.get('sag_back_s')} s")
   faults = [r for r in runs if r['summary'].get('stop', '').endswith('FAULT') or r['summary'].get('stop') == 'fault']
   for r in faults:
     s = r['summary']
@@ -511,11 +622,13 @@ def main() -> int:
   p.add_argument('--from', dest='from_', type=int, default=1)
   p.add_argument('--only')
   p.add_argument('--redo', action='store_true')
-  for kind, x_help in (('push', 'command level 0..1'), ('hold', 'angle in degrees'), ('reverse', 'seconds the first way')):
+  for kind, x_help in (('push', 'command level 0..1'), ('hold', 'angle in degrees'), ('reverse', 'seconds the first way'),
+                       ('turn', 'peak angle in degrees')):
     p = sub.add_parser(kind)
     p.add_argument('x', type=float, help=x_help)
     p.add_argument('seconds', type=float)
-    for opt in ('steer-max', 'delta-up', 'delta-down', 'max-angle-frames'):
+    for opt in ('steer-max', 'delta-up', 'delta-down', 'max-angle-frames', 'cut-frames', 'cut-boost', 'cut-boost-max', 'cut-boost-frames',
+                'cut-preload-frames', 'cut-early-pct'):
       p.add_argument(f'--{opt}', type=int)
     p.add_argument('--max-angle', type=float)
   sub.add_parser('reset')
@@ -523,7 +636,7 @@ def main() -> int:
   p.add_argument('--pull', action='store_true')
   p.add_argument('--dir', default=str(Path.home() / 'eps_lab_runs'))
   a = ap.parse_args()
-  return {'plan': cmd_plan, 'push': cmd_single, 'hold': cmd_single, 'reverse': cmd_single,
+  return {'plan': cmd_plan, 'push': cmd_single, 'hold': cmd_single, 'reverse': cmd_single, 'turn': cmd_single,
           'reset': cmd_reset, 'report': cmd_report}[a.cmd](a)
 
 

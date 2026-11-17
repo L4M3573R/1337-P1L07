@@ -251,11 +251,11 @@ def monitoring_lateral_engaged(sm, *, now_ns: int) -> bool:
               native.requestedLateral and native.lateralAllowed)
 
 
-def ordinary_lateral_requested(active: bool, CS, CP) -> bool:
-  """The standard lateral output gate, shared by request and actuation owners."""
+def ordinary_lateral_requested(active: bool, CS, CP, allow_standstill: bool = False) -> bool:
+  """The standard lateral output gate, shared by request and actuation owners. allow_standstill: eps-lab test only."""
   standstill = abs(CS.vEgo) <= max(CP.minSteerSpeed, 0.3) or CS.standstill
   return bool(active and not CS.steerFaultTemporary and not CS.steerFaultPermanent and
-              (not standstill or CP.steerAtStandstill))
+              (not standstill or CP.steerAtStandstill or allow_standstill))
 
 
 def decide_ordinary_axis(*, requested: bool, native) -> AxisDecision:

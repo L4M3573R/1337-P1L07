@@ -19,7 +19,7 @@ import numpy as np
 from opendbc.car import ACCEL_MAX_TAKEOFF
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, rate_limit, structs
-from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance
+from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_steer_angle_limits_vm
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.hyundai import hyundaicanfd, hyundaican
 from opendbc.car.hyundai.hyundaicanfd import CanBus
@@ -61,11 +61,26 @@ EPS_TEST_PATH = '/data/starpilot/eps_test.json'
 EPS_TEST_RANGES = {
   'max_angle': (MAX_ANGLE, 720),
   'max_angle_frames': (MAX_ANGLE_FRAMES, 1000),
+  'cut_frames': (1, MAX_ANGLE_CONSECUTIVE_FRAMES),   # how long the request bit drops; the panda allows 1-2
+  # Sag shaping (all 0 = stock): extra torque for a few frames after each cut (boost) and/or just before a scheduled
+  # cut (preload), within steer_max unless cut_boost_max lets it go higher (up to the firmware ceiling); and an early
+  # cut taken when the torque demand is at or below cut_early_pct of steer_max, so the sag lands where the turn needs
+  # the least torque.
+  'cut_boost': (0, 256),
+  'cut_boost_max': (0, 768),
+  'cut_boost_frames': (0, 50),
+  'cut_preload_frames': (0, 30),
+  'cut_early_pct': (0, 100),
   'steer_max': (384, 768),
   'delta_up': (3, 12),
   'delta_down': (7, 15),
 }
-EPS_TEST_DEFAULTS = {'max_angle': MAX_ANGLE, 'max_angle_frames': MAX_ANGLE_FRAMES, 'steer_max': 384, 'delta_up': 3, 'delta_down': 7}
+EPS_TEST_DEFAULTS = {'max_angle': MAX_ANGLE, 'max_angle_frames': MAX_ANGLE_FRAMES, 'cut_frames': MAX_ANGLE_CONSECUTIVE_FRAMES,
+                     'steer_max': 384, 'delta_up': 3, 'delta_down': 7,
+                     'cut_boost': 0, 'cut_boost_max': 0, 'cut_boost_frames': 0, 'cut_preload_frames': 0, 'cut_early_pct': 0}
+EPS_TEST_TORQUE_CEILING = 768      # safety/modes/hyundai.h eps-lab HYUNDAI_STEERING_LIMITS
+PANDA_MIN_VALID_FRAMES = 89        # the panda's min_valid_request_frames (and 0.89 s > its 0.81 s cut interval)
+EARLY_CUT_MIN_ABOVE_FRAMES = 20    # an early cut needs the wheel past the cut-out angle for at least 0.2 s
 EPS_TEST_RELOAD_FRAMES = 100
 
 
@@ -96,6 +111,11 @@ class EpsTestConfig:
     self.default_limits = (params.STEER_MAX, params.STEER_DELTA_UP, params.STEER_DELTA_DOWN) == (384, 3, 7)
     self.mtime = None
     self.values = dict(EPS_TEST_DEFAULTS)
+    self.base_steer_max = params.STEER_MAX
+    self.counter = 0          # frames past the cut-out angle since the last cut
+    self.cutting = 0          # request-bit-low frames left in the current cut
+    self.valid = 0            # consecutive request-high frames (the panda's valid_steer_req_count)
+    self.boost_left = 0
     self.reload()
 
   def reload(self) -> None:
@@ -115,6 +135,40 @@ class EpsTestConfig:
       params.STEER_MAX = self.values['steer_max']
       params.STEER_DELTA_UP = self.values['delta_up']
       params.STEER_DELTA_DOWN = self.values['delta_down']
+    self.base_steer_max = params.STEER_MAX
+
+  def boost(self, new_torque: int, params) -> int:
+    """Add the sag boost / preload to the requested torque, capped at steer_max or the higher cut_boost_max."""
+    v = self.values
+    preload = v['cut_preload_frames'] and self.counter >= v['max_angle_frames'] - v['cut_preload_frames']
+    if not (self.default_limits and v['cut_boost'] and new_torque and (self.boost_left > 0 or preload)):
+      return new_torque
+    params.STEER_MAX = min(EPS_TEST_TORQUE_CEILING, max(self.base_steer_max, v['cut_boost_max']))
+    return int(max(-params.STEER_MAX, min(params.STEER_MAX, new_torque + (v['cut_boost'] if new_torque > 0 else -v['cut_boost']))))
+
+  def cut_out(self, above: bool, active: bool, torque: int) -> bool:
+    """The >90 deg fault avoidance; with the defaults it matches common_fault_avoidance(above, active, counter,
+    max_angle_frames, cut_frames). Returns the steer request bit."""
+    v = self.values
+    if self.boost_left > 0:
+      self.boost_left -= 1
+    self.counter = self.counter + 1 if active and above else 0
+    if not active:
+      self.cutting, self.valid = 0, 0
+      return active
+    due = self.counter > v['max_angle_frames']
+    early = (v['cut_early_pct'] > 0 and self.counter >= EARLY_CUT_MIN_ABOVE_FRAMES and
+             abs(torque) <= v['cut_early_pct'] / 100 * self.base_steer_max)
+    if self.cutting == 0 and (due or early) and self.valid >= PANDA_MIN_VALID_FRAMES:
+      self.cutting = v['cut_frames']
+    if self.cutting > 0:
+      self.cutting -= 1
+      if self.cutting == 0:
+        self.counter, self.boost_left = 0, v['cut_boost_frames']
+      self.valid = 0
+      return False
+    self.valid += 1
+    return True
 
 # On some HKG CAN and CAN FD non-CANFD_ALT_BUTTONS, the cancel button (CF_Clu_CruiseSwState / CRUISE_BUTTONS = 4) is
 # a pause/resume toggle, not a dedicated cancel. Firing it mid-brake inadvertently can cause a re-enable attempt
@@ -275,16 +329,15 @@ class CarController(CarControllerBase):
     if self.CP.flags & HyundaiFlags.CANFD and self.angle_vm is None:
       self.params = CarControllerParams(self.CP, CS.out.vEgoRaw)
     self.eps_test.step(self.frame, self.params)
-    new_torque = int(round(actuators.torque * self.params.STEER_MAX))
+    new_torque = self.eps_test.boost(int(round(actuators.torque * self.params.STEER_MAX)), self.params)
     if _projection is not None:
       _projection.input(new_torque, self.params.STEER_MAX, self.apply_torque_last, CS.out.steeringTorque, self.params, limiter='driver')
     apply_torque = (0 if self.angle_vm is not None else
                     apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, self.params))
 
     # >90 degree steering fault prevention
-    self.angle_limit_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringAngleDeg) >= self.eps_test.values['max_angle'], CC.latActive,
-                                                                       self.angle_limit_counter, self.eps_test.values['max_angle_frames'],
-                                                                       MAX_ANGLE_CONSECUTIVE_FRAMES)
+    apply_steer_req = self.eps_test.cut_out(abs(CS.out.steeringAngleDeg) >= self.eps_test.values['max_angle'], CC.latActive,
+                                            apply_torque)
 
     if not CC.latActive:
       apply_torque = 0
