@@ -127,6 +127,7 @@ class Controls:
     self.lane_centering_controller = (
       LaneCenteringController(body=interface_dimensions(self.CI, self.CP), body_required=True) if predict_lane_clearance else LaneCenteringController()
     )
+    self.lane_shadow = self._create_lane_shadow(predict_lane_clearance)
     self.curve_guard = self._create_curve_guard()
     self.turn_yield = TurnYield()
     self.turn_yield_log = None
@@ -269,6 +270,25 @@ class Controls:
     except Exception:
       self.turn_yield = TurnYield()
       return False
+
+  def _create_lane_shadow(self, predict_lane_clearance: bool):
+    """Lane centering v2 (starpilot/lateral/lane_centering_v2.py): shadowed beside the current controller by default,
+    or steering with the current one shadowed (lane_centering_v2.json mode 'on'). A failure leaves the current one alone."""
+    try:
+      from openpilot.starpilot.lateral.lane_centering_v2 import LaneCenteringControllerV2, LaneShadow, read_mode
+      mode = read_mode()
+      if mode == 'off':
+        return None
+      body = interface_dimensions(self.CI, self.CP) if predict_lane_clearance else None
+      kwargs = {'body': body, 'body_required': True} if predict_lane_clearance else {}
+      width = float(body.width) if body is not None and getattr(body, 'width', None) else 1.83
+      if mode == 'on':
+        self.lane_centering_controller = LaneCenteringControllerV2(**kwargs)
+        return LaneShadow(LaneCenteringController(**kwargs), 'current', 'v2', width)
+      return LaneShadow(LaneCenteringControllerV2(**kwargs), 'v2', 'current', width)
+    except Exception:
+      cloudlog.exception('lane centering shadow setup failed; current controller only')
+      return None
 
   def _select_nnlc(self) -> bool:
     """Once per drive: does the personal NNLC feedforward steer this drive? Any failure means no."""
@@ -639,14 +659,17 @@ class Controls:
         self.lane_centering_inactive_reason = self.lane_centering_host.last_refusal
     if lane_centering is None:
       self.lane_centering_controller.reset()
+      if getattr(self, 'lane_shadow', None) is not None:
+        self.lane_shadow.controller.reset()
     elif not isinstance(lane_centering, LaneCenteringRequest):
       self.lane_centering_controller.reset()
+      if getattr(self, 'lane_shadow', None) is not None:
+        self.lane_shadow.controller.reset()
       self.last_lane_centering_result = LaneCenteringResult(None, 0.0, 0, "invalid_request")
     else:
       lane_now_ns = int(self.sm.logMonoTime['carState']) if os.getenv('REPLAY') == '1' else time.monotonic_ns()
       lane_delay = current_delay(self.sm, lane_now_ns)
-      result = self.lane_centering_controller.update(
-        LaneCenteringInput(
+      lane_input = LaneCenteringInput(
           model=model_v2,
           model_sample_id=self.sm.logMonoTime['modelV2'],
           model_valid=bool(self.sm.all_checks(['modelV2'])),
@@ -662,7 +685,10 @@ class Controls:
           measured_curvature=self.curvature,
           lateral_delay_s=lane_delay,
         )
-      )
+      result = self.lane_centering_controller.update(lane_input)
+      shadow = getattr(self, 'lane_shadow', None)
+      if shadow is not None:
+        shadow.observe(lane_input, result)   # logs only; what steers is result
       self.last_lane_centering_result = result
       if result.candidate_curvature is not None:
         new_desired_curvature = result.candidate_curvature

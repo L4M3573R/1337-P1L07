@@ -361,6 +361,10 @@ class LaneCenteringController:
     self._remember_command(final)
     return final
 
+  def _raw_correction(self, model, speed, offset, authority, *, _paths=None, _single_target=None) -> float | None:
+    """The lane reading (a subclass may replace it: lane_centering_v2)."""
+    return raw_correction(model, speed, offset, authority, _paths=_paths, _single_target=_single_target)
+
   def update(self, observation: LaneCenteringInput) -> LaneCenteringResult:
     if not isinstance(observation, LaneCenteringInput):
       self.reset()
@@ -421,8 +425,8 @@ class LaneCenteringController:
     else:
       self._geometry_cache = None
     tracked = self._tracker.target(observation.model, observation.model_sample_id, speed, dt, offset, revision=geometry)
-    raw = None if tracked.blocked else raw_correction(observation.model, speed, offset, authority,
-                                                     _paths=paths, _single_target=tracked.y)
+    raw = None if tracked.blocked else self._raw_correction(observation.model, speed, offset, authority,
+                                                           _paths=paths, _single_target=tracked.y)
     if raw is None or not math.isfinite(raw):
       return self._fade(base, dt, "unqualified_model")
     target = clip_scalar(raw, -0.004, 0.004) * 0.30
@@ -444,7 +448,7 @@ class LaneCenteringController:
           acquire_error = max(CENTER_ERROR_DEADBAND, min(POSITION_ACQUIRE_ERROR, 2. * line_std))
           self._position_age = self._position_age + dt if abs(position_error) > acquire_error or self._position_trim != 0. else 0.
           error = math.copysign(max(0., abs(position_error) - CENTER_ERROR_DEADBAND), position_error)
-          unattenuated = raw_correction(observation.model, speed, offset, 0., _paths=paths, _single_target=tracked.y)
+          unattenuated = self._raw_correction(observation.model, speed, offset, 0., _paths=paths, _single_target=tracked.y)
           weight = 1. if unattenuated == 0. else abs(raw / unattenuated) if unattenuated is not None else 0.
           if weight == 0. or raw * error < 0. or raw * self._position_trim < 0.:
             self._position_trim = 0.
