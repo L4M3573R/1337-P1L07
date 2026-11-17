@@ -52,7 +52,8 @@ from openpilot.starpilot.lateral.lane_change_preferences import LiveLaneChangePo
 from openpilot.starpilot.lateral.lane_change_smoothing import LaneChangeSmoother, limit_rate
 from openpilot.starpilot.lateral.lane_runtime import LaneCenteringHost, runtime_supported as lane_runtime_supported
 from openpilot.starpilot.lateral.torque_runtime import TorqueHost, runtime_enabled as torque_runtime_enabled
-from openpilot.starpilot.lateral.controller_selection import learning_allowed, read_selection, turn_assist_supported
+from openpilot.starpilot.feature_capabilities import lateral_supported
+from openpilot.starpilot.lateral.controller_selection import learning_allowed, read_selection
 from openpilot.starpilot.lateral.gain_runtime import create_gain_owner
 from openpilot.starpilot.flm.global_runtime import GlobalRuntime
 from openpilot.starpilot.flm.evidence_hooks import control_message
@@ -132,7 +133,7 @@ class Controls:
     self.turn_yield = TurnYield()
     self.turn_yield_log = None
     self.highway_correction_gain = HighwayCorrectionGain()
-    self.highway_smoothing_supported = turn_assist_supported(self.CP)
+    self.highway_smoothing_supported = lateral_supported(self.CP)
     self.highway_gain = read_gain(self.params) if self.highway_smoothing_supported else 1.0
     self.lateral_pause = LateralPause(read_lateral_pause(self.params), self.params)
     self.lane_change_preferences = LiveLaneChangePolicy(self.params, now_ns=0 if os.getenv('REPLAY') == '1' else time.monotonic_ns())
@@ -959,6 +960,8 @@ class Controls:
       valid=bool(CS.canValid and self.sm.all_checks(['modelV2'])),
       inactive_reason=getattr(self, 'lane_centering_inactive_reason', 'inactive'),
     )
+    from openpilot.starpilot.lateral.applied_tuning import write_applied_tuning
+    write_applied_tuning(feedback.starpilotLateralState, self.LaC, getattr(self, 'torque_host', None))
     automatic = getattr(self, 'global_learning', None)
     if automatic is not None:
       try:
