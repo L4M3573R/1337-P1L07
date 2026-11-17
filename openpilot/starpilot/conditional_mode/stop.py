@@ -6,7 +6,7 @@ No Params, IPC, sign recognition, or longitudinal control is owned here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 import numpy as np
@@ -29,6 +29,13 @@ STOP_MODEL_RELEASE_MARGIN_M = 4.0  # Existing model-stop off margin.
 STOP_POINT_MARGIN_M = 8.0  # A lead this close to the model's stop point is at that stop.
 STOP_POINT_MARGIN_FRACTION = 0.15
 STOP_POINT_LEAD_MAX_MPS = 4.5  # Matches the existing slow approach-handoff lead speed.
+# A stop is a plan that reaches (near) standstill. A plan that only slows (to 8 mph behind a turning car, say) is not
+# one: at 26 mph its 10 s path fell under the speed x 9 s threshold and the stop committed and held 6.5 s.
+NEAR_STOP_PLAN_MPS = 3.0 * 0.44704
+# Stopped behind a car that pulls away while the model asks to go: the stop was that car, release.
+LEAD_LAUNCH_MIN_MPS = 0.5
+LEAD_LAUNCH_MIN_ACCEL = 0.3
+LEAD_LAUNCH_MAX_M = 25.0  # the car we stopped behind; a car far ahead (through on yellow) says nothing about the light
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,19 @@ class StopFrame:
   standstill_path_extent_m: float | None = None
   longitudinal_stop_active: bool = False
   longitudinal_launch_active: bool = False
+  model_min_speed_mps: float | None = None  # lowest speed of the model's plan; None keeps the old behaviour
+  model_desired_accel: float | None = None
+
+
+def model_plan_fields(model) -> dict:
+  """StopFrame fields from a modelV2: the plan's lowest speed and the model's asked-for acceleration."""
+  try:
+    speeds = [float(v) for v in model.velocity.x]
+    low = min(speeds) if speeds and all(math.isfinite(v) for v in speeds) else None
+    accel = float(model.action.desiredAcceleration)
+    return {'model_min_speed_mps': low, 'model_desired_accel': accel if math.isfinite(accel) else None}
+  except (AttributeError, TypeError, ValueError):
+    return {'model_min_speed_mps': None, 'model_desired_accel': None}
 
 
 @dataclass(frozen=True)
@@ -74,6 +94,24 @@ class StopObservation:
   standstill_hold: bool | None
   standstill_reason: str | None
   model_stopping: bool | None
+
+
+def _plans_stop(frame: StopFrame) -> bool:
+  """The model's plan reaches (near) standstill, or the model says stop. Unknown plans keep the old behaviour."""
+  low = frame.model_min_speed_mps
+  if low is None or not math.isfinite(low):
+    return True
+  return low <= NEAR_STOP_PLAN_MPS or frame.model_should_stop is True
+
+
+def _lead_launch(frame: StopFrame) -> bool:
+  """Stopped behind a radar lead that is pulling away while the model asks to go and does not say stop."""
+  lead, accel = frame.lead, frame.model_desired_accel
+  return bool(frame.standstill is True and frame.pedal_override is False and frame.forcing_stop is False and
+              frame.model_should_stop is False and accel is not None and math.isfinite(accel) and
+              accel >= LEAD_LAUNCH_MIN_ACCEL and lead is not None and lead.present is True and lead.radar is True and
+              lead.speed_mps is not None and math.isfinite(lead.speed_mps) and lead.speed_mps >= LEAD_LAUNCH_MIN_MPS and
+              lead.distance_m is not None and math.isfinite(lead.distance_m) and lead.distance_m <= LEAD_LAUNCH_MAX_M)
 
 
 def _finite(value: object, low: float, high: float) -> float | None:
@@ -112,15 +150,20 @@ class StopLightDetector:
     self.committed = False
     self.standstill_committed = False
     self.commit_distance_m = 0.0
+    self.commit_start_m = 0.0
+    self.commit_travel_m = 0.0
     self.commit_clear_since_s: float | None = None
+    self.lead_launching = False
     self.last_observed_mono_s: float | None = None
     self.last_model_tick_mono_s: float | None = None
 
   def invalidate(self) -> None:
     committed, distance, stopped = self.committed, self.commit_distance_m, self.standstill_committed
+    start, travel = self.commit_start_m, self.commit_travel_m
     self.reset()
     # Missing evidence cannot acquire a stop or prove that a committed one cleared.
     self.committed, self.commit_distance_m, self.standstill_committed = committed, distance, stopped
+    self.commit_start_m, self.commit_travel_m = start, travel
 
   def _reset_light(self) -> None:
     # Retain filter alpha across resets; clear its state and latches.
@@ -141,18 +184,30 @@ class StopLightDetector:
                     frame.longitudinal_stop_active is False and
                     frame.model_should_stop is False and model_stopping is False and frame.forcing_stop is False and
                     horizon is not None and horizon >= FROZEN_RAW_STOP_DISTANCE_M + STOP_MODEL_RELEASE_MARGIN_M)
-    if acquire and not self.committed and horizon is not None and not clear_launch:
+    if acquire and not self.committed and horizon is not None and not clear_launch and _plans_stop(frame):
       self.committed = True
       self.commit_distance_m = horizon
+      self.commit_start_m = horizon
+      self.commit_travel_m = 0.0
     if self.committed:
       assert frame.speed_mps is not None
       self.commit_distance_m = max(0.0, self.commit_distance_m - frame.speed_mps * dt)
+      self.commit_travel_m += frame.speed_mps * dt
       launch_clear = (self.standstill_committed and frame.standstill is True and frame.speed_mps <= 0.01 and
                       frame.forcing_stop is False and frame.stationary_launch_clear is True)
       clear_distance = max(0.0 if launch_clear else FROZEN_RAW_STOP_DISTANCE_M,
                            self.commit_distance_m) + STOP_MODEL_RELEASE_MARGIN_M
       clear = (horizon is not None and model_stopping is False and frame.model_should_stop is False and
                horizon >= clear_distance)
+      # Driven past where the stop was and the model no longer plans one: it was not a stop (traffic, a turning car).
+      # Behind a lead the path never reaches the 54 m clear distance, so without this a stop held for a minute.
+      passed = (frame.standstill is False and self.commit_travel_m >= self.commit_start_m + STOP_POINT_MARGIN_M and
+                frame.model_should_stop is False and not _plans_stop(frame))
+      # Stopped behind a car that pulls away while the model asks to go: that car was the stop, so the path it
+      # still limits need not reach the committed distance.
+      lead_went = self.standstill_committed and self.lead_launching and horizon is not None and \
+        model_stopping is False and frame.model_should_stop is False
+      clear = clear or passed or lead_went
       if clear:
         if self.commit_clear_since_s is None:
           self.commit_clear_since_s = frame.now_mono_s
@@ -255,6 +310,9 @@ class StopLightDetector:
     if frame.pedal_override is True:
       self.reset()
       return StopObservation(False, False, None, False)
+    self.lead_launching = _lead_launch(frame)
+    if self.lead_launching and not frame.stationary_launch_clear:
+      frame = replace(frame, stationary_launch_clear=True)
     dt = model_tick - self.last_model_tick_mono_s if self.last_model_tick_mono_s is not None else DT_MDL
     self.last_observed_mono_s = observed
     self.last_model_tick_mono_s = model_tick
@@ -349,7 +407,7 @@ class StopLightDetector:
     else:
       self.lead_clear_filter.update(not relevant)
       lead_cleared = self.lead_clear_filter.x >= THRESHOLD
-    self.light_filter.update(model_stopping and lead_cleared)
+    self.light_filter.update(model_stopping and lead_cleared and _plans_stop(frame))
     filtered = bool(self.light_filter.x >= THRESHOLD**2 and lead_cleared)
     active = bool(filtered or handoff or approach_latched)
     strong = horizon < max(threshold_m - 10.0, 0.0)

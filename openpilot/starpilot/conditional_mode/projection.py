@@ -22,7 +22,8 @@ from openpilot.starpilot.conditional_mode.policy import Authority, LeadEvidence,
 from openpilot.starpilot.conditional_mode.preferences import CEMOptions
 from openpilot.starpilot.conditional_mode.signal_lane import MonoSource, SignalLaneFrame, SignalLaneTracker
 from openpilot.starpilot.conditional_mode.slower_lead import SlowerLeadDetector, SlowerLeadFrame
-from openpilot.starpilot.conditional_mode.stop import FORD_STOP_NAMES, StopFrame, StopLead, StopLightDetector, StopObservation
+from openpilot.starpilot.conditional_mode.stop import (FORD_STOP_NAMES, StopFrame, StopLead, StopLightDetector, StopObservation,
+                                                       model_plan_fields)
 from openpilot.starpilot.conditional_mode.turn_scene import committed_turn_scene
 from openpilot.starpilot.model_geometry import (
   STANDSTILL_MODEL_PREFIX_NOISE_M as STANDSTILL_MODEL_PREFIX_NOISE_M, STANDSTILL_SPEED_NOISE_MPS, normalized_origin,
@@ -645,6 +646,7 @@ class SceneProjector:
       model_tick_mono_s=model_stamp / 1e9 if model_stamp is not None else None,
       model_should_stop=current_stop,
       stationary_launch_clear=stationary_launch_clear,
+      **(model_plan_fields(model) if model_transport_current else {}),
       longitudinal_stop_active=bool(_field(control, 'longActive') is True and _field(selfdrive, 'enabled') is True and
         _field(controls, 'longControlState') == structs.CarControl.Actuators.LongControlState.stopping),
       longitudinal_launch_active=bool(_field(control, 'enabled') is True and _field(control, 'longActive') is True and

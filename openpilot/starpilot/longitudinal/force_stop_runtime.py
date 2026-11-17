@@ -8,6 +8,7 @@ from openpilot.starpilot.conditional_mode.preferences import CEMOptions, decode_
 from openpilot.starpilot.conditional_mode.projection import _horizon
 from openpilot.starpilot.conditional_mode.stop import (
   FROZEN_RAW_STOP_DISTANCE_M, STOP_MODEL_RELEASE_MARGIN_M, StopFrame as LightFrame, StopLead, StopLightDetector,
+  model_plan_fields,
 )
 from openpilot.starpilot.lead_tracking import LeadDetector
 from openpilot.starpilot.longitudinal.enhanced_stop_hold import selected as always_hold_selected
@@ -188,7 +189,7 @@ class ForceStopRuntime:
           right_blinker=bool(car.rightBlinker), steering_angle_deg=float(car.steeringAngleDeg),
           driving_in_curve=raw_curve[1], car_fingerprint=str(cp.carFingerprint), dashboard_stop_sign=False,
           pedal_override=bool(car.gasPressed), model_tick_mono_s=stamp / 1e9,
-          model_should_stop=bool(model.action.shouldStop)))
+          model_should_stop=bool(model.action.shouldStop), **model_plan_fields(model)))
         perception_available = observation.light_detected is not None
         light_context = observation.light_detected is True or (observation.standstill_hold is True and
                                                              observation.standstill_reason == 'light')

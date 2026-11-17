@@ -37,7 +37,7 @@ class Frame(dict):
     model.position.y = [0.] * 33
     model.orientationRate.z = [0.] * 33
     model.orientationRate.t = [float(index) / 10 for index in range(33)]
-    model.velocity.x = [10.] * 33
+    model.velocity.x = [10.] * 32 + [0. if horizon < 100. else 10.]  # a short path is a plan that stops
 
 
 class ForceStopRuntimeTests(unittest.TestCase):
