@@ -155,32 +155,49 @@ class PreviewReading:
 
 
 class LaneCenteringControllerV2(LaneCenteringController):
+  # The model changes 20 times a second and the controller runs 100: the sticky view and the lane reading are worked
+  # out once per model frame and reused until the next one (the smoothing still runs every tick). Without this v2 cost
+  # 2.3x the current controller per tick.
+
   def __init__(self, **kwargs):
     self.sticky = StickyTrust()
     self.preview = PreviewReading()
-    self._calls, self._dt = 0, 0.01
     super().__init__(**kwargs)
     self._tracker = HoldingTracker(self.sticky)
+    self._clear_frame()
+
+  def _clear_frame(self) -> None:
+    self._frame, self._view, self._cache, self._since_frame, self._frame_dt, self._fresh = None, None, {}, 0.0, 0.01, False
 
   def reset(self) -> None:
     super().reset()
     self.sticky.reset()
     self.preview.reset()
+    self._clear_frame()
 
   def _raw_correction(self, model, speed, offset, authority, *, _paths=None, _single_target=None):
-    self._calls += 1   # the controller also asks once without the path preference: only the first call moves the memory
-    return self.preview.raw(model, speed, offset, authority, paths=_paths, single_target=_single_target, dt=self._dt,
-                            update=self._calls == 1, trusted=tuple(self.sticky.trusted))
+    # per frame: the single-line target drifts a hair with speed each tick, which must not defeat the reuse
+    key = (authority == 0.0, _single_target is None, offset)
+    if key not in self._cache:
+      # only the first reading of a new frame moves the memory (the controller also asks without the path preference)
+      self._cache[key] = self.preview.raw(model, speed, offset, authority, paths=_paths, single_target=_single_target,
+                                          dt=self._frame_dt, update=self._fresh, trusted=tuple(self.sticky.trusted))
+      self._fresh = False
+    return self._cache[key]
 
   def update(self, observation: LaneCenteringInput) -> LaneCenteringResult:
-    self._calls = 0
     if isinstance(observation, LaneCenteringInput):
       dt = lc._finite_number(observation.elapsed_seconds)
-      self._dt = dt if dt is not None and dt > 0 else 0.01
-      try:
-        observation = replace(observation, model=self.sticky.view(observation.model, self._dt))
-      except (AttributeError, TypeError, ValueError):
-        pass
+      self._since_frame += dt if dt is not None and dt > 0 else 0.0
+      frame = (observation.model_sample_id, id(observation.model))
+      if frame != self._frame or self._view is None:
+        self._frame, self._frame_dt, self._since_frame = frame, max(self._since_frame, 0.01), 0.0
+        self._cache, self._fresh = {}, True
+        try:
+          self._view = self.sticky.view(observation.model, self._frame_dt)
+        except (AttributeError, TypeError, ValueError):
+          self._view = observation.model
+      observation = replace(observation, model=self._view)
     return super().update(observation)
 
 
