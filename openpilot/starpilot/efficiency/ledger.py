@@ -47,6 +47,7 @@ class Sample:
   curvature: float = 0.0  # 1/m, absolute value is used
   lead: bool = False
   standstill: bool = False
+  parked: bool = False  # in Park: car on but not being driven, never counted for anyone (2026-11-17)
   long_active: bool = False
   experimental: bool = False
   battery_raw: float | None = None  # uncalibrated hybrid battery signal, logged for later calibration
@@ -83,6 +84,7 @@ def make_sample(t: float, mass: float, car_state, car_control=None, radar_state=
   lead = radar_state.leadOne if radar_state is not None else None
   return Sample(t=t, speed=cs.vEgo, accel=cs.aEgo, pitch=pitch, mass=mass, curvature=abs(yaw_rate) / max(cs.vEgo, 1.0),
                 lead=bool(lead is not None and lead.present and lead.dRel < 80.0), standstill=bool(cs.standstill),
+                parked=str(getattr(cs, 'gearShifter', '')) == 'park',
                 long_active=bool(cc is not None and cc.longActive),
                 experimental=bool(selfdrive_state is not None and selfdrive_state.experimentalMode), battery_raw=battery_raw,
                 fuel_gal=fuel_gal, flow=power_flow.flow if power_flow is not None else None,
@@ -293,6 +295,16 @@ class Ledger:
         s.soc_last = soc
 
   def add(self, sample: Sample) -> None:
+    if sample.parked:
+      # Park (warming up, waiting, a parking-lot test): fuel burned here is nobody's driving. It used to land in the
+      # driver's slow stop-and-go stretches with no miles, flattering the comma in the comparison. End the open stretch
+      # and leave a gap, so nothing is carried across it.
+      if self._open is not None and self._last is not None:
+        self._close(self._last.t)
+      self._open, self._last = None, None
+      self._fuel_carry = self._obd_carry = self._soc_carry = None
+      self._soc_accepted, self._soc_pending = None, []
+      return
     last, self._last = self._last, sample
     mode = mode_of(sample)
     dt = sample.t - last.t if last is not None else 0.0

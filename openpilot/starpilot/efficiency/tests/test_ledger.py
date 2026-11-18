@@ -94,3 +94,17 @@ def test_next_drive_with_an_earlier_boot_clock_is_not_dropped(monkeypatch):
   monkeypatch.setattr('openpilot.tools.lib.logreader.LogReader', lambda name, sort_by_time=True: logs[name])
   produced = list(report.samples([__import__('pathlib').Path('a'), __import__('pathlib').Path('b')]))
   assert len(produced) == 40  # both drives' samples, despite drive b's clock starting earlier
+
+
+def test_time_in_park_counts_for_nobody():
+  # 2026-11-17: idling in Park (warming up, a parking-lot test) landed in the driver's stretch where the car pulled out,
+  # adding fuel with no miles. Park now ends the stretch, and its fuel never reaches anyone's totals.
+  ledger, t, fuel = Ledger(), 0.0, 0.0
+  for parked, speed, seconds in ((True, 0.0, 25.0), (False, 0.0, 2.0), (False, 10.0, 20.0)):
+    for _ in range(int(round(seconds / DT))):
+      fuel += (0.0002 if parked else 0.0001) * DT   # idling in Park burns fuel too
+      ledger.add(Sample(t=t, speed=speed, accel=0.0, pitch=0.0, mass=MASS, parked=parked, obd_fuel_gal=fuel))
+      t += DT
+  total, _ = summarize(ledger.finish())
+  assert total.distance == pytest.approx(10.0 * 20.0, rel=0.02)
+  assert total.obd_fuel_gal == pytest.approx(0.0001 * 22.0, rel=0.1)   # only the time out of Park
