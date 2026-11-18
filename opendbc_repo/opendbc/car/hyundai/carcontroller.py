@@ -22,7 +22,6 @@ from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, rate_limit, struc
 from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.hyundai import hyundaicanfd, hyundaican
-from opendbc.car.hyundai import steady_ramp
 from opendbc.car.hyundai.hyundaicanfd import CanBus
 from opendbc.car.hyundai.ray_pedal import create_ray_pedal_command, ray_pedal_gas, ray_pedal_enabled
 from opendbc.car.hyundai.ioniq6_longitudinal import Ioniq6LongitudinalPolicy
@@ -39,7 +38,7 @@ from opendbc.car.hyundai.canfd_lead import select_lead, ABSENT
 from opendbc.car.hyundai.torque_ev_scc import eligible as torque_ev_scc_eligible, options as torque_ev_scc_options, clock_boot_ns, fallback_lead
 from opendbc.car.hyundai.ccnc_ev_stock import replacement_requested, qualified as qualified_ccnc_ev_stock
 from opendbc.car.hyundai.angle_tx_recovery import AngleTxRecovery
-from opendbc.car.hyundai.values import is_blended, HyundaiFlags, HyundaiSafetyFlags, Buttons, CarControllerParams, CAR, elantra_hev_2024_eps
+from opendbc.car.hyundai.values import is_blended, HyundaiFlags, HyundaiSafetyFlags, Buttons, CarControllerParams, CAR
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.vehicle_model import VehicleModel
 
@@ -143,7 +142,6 @@ class CarController(CarControllerBase):
 
     self.accel_last = 0
     self.apply_torque_last = 0
-    self.steady_ramp = steady_ramp.from_file(self.params) if elantra_hev_2024_eps(CP) else None
     self.car_fingerprint = CP.carFingerprint
     self.last_button_frame = 0
     self.cancel_counter = 0
@@ -229,16 +227,10 @@ class CarController(CarControllerBase):
     if self.CP.flags & HyundaiFlags.CANFD and self.angle_vm is None:
       self.params = CarControllerParams(self.CP, CS.out.vEgoRaw)
     new_torque = int(round(actuators.torque * self.params.STEER_MAX))
-    # 1337: the Elantra Hybrid's fast ramp only for a demand that keeps going one way (steady_ramp.py)
-    torque_limits = self.params if self.steady_ramp is None else self.steady_ramp.limits()
     if _projection is not None:
-      _projection.input(new_torque, self.params.STEER_MAX, self.apply_torque_last, CS.out.steeringTorque, torque_limits, limiter='driver')
-    if self.angle_vm is not None:
-      apply_torque = 0
-    elif self.steady_ramp is not None:
-      apply_torque = self.steady_ramp.apply(new_torque, self.apply_torque_last, CS.out.steeringTorque)
-    else:
-      apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, torque_limits)
+      _projection.input(new_torque, self.params.STEER_MAX, self.apply_torque_last, CS.out.steeringTorque, self.params, limiter='driver')
+    apply_torque = (0 if self.angle_vm is not None else
+                    apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, self.params))
 
     # >90 degree steering fault prevention
     self.angle_limit_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringAngleDeg) >= self.max_angle, CC.latActive,
