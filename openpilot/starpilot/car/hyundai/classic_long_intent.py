@@ -1,7 +1,7 @@
 from opendbc.car.hyundai.classic_long_aol import CAMERA_LONG_IDS, independent_buttons_qualified
 from opendbc.car.hyundai.blended_stock_aol import qualified_alpha
 from opendbc.car.structs import car
-from openpilot.starpilot.aol.intent import AolCardIntent
+from openpilot.starpilot.aol.intent import AOL_TOGGLE, AolCardIntent
 
 GearShifter = car.CarState.GearShifter
 ButtonType = car.CarState.ButtonEvent.Type
@@ -36,6 +36,12 @@ class ClassicLongCardIntent(AolCardIntent):
     """
     return bool(self.allowed_latch or self.gear_rearm_pending)
 
+  def _main_toggles_aol(self) -> bool:
+    """Main is this car's AOL gesture (not reassigned to another action), as in AolCardIntent.update."""
+    main_managed, lkas_managed = self.main_action == AOL_TOGGLE, self.lkas_action == AOL_TOGGLE
+    independent = self.independent_cruise_buttons and (main_managed or lkas_managed)
+    return (not independent or main_managed) and not (self.independent_cruise_buttons and self.settings.main_wheel_action)
+
   def update(self, CS, **kwargs) -> None:
     latched = self.allowed_latch
     super().update(CS, **kwargs)
@@ -45,6 +51,13 @@ class ClassicLongCardIntent(AolCardIntent):
     if latched and not self.allowed_latch and not driving and self.latch_clear_reason in GEAR_REARM_REASONS:
       # The latch fell only because the car left Drive; the driver never turned AOL off.
       self.gear_rearm_pending = True
+    main_pressed = any(event.type == ButtonType.mainCruise and event.pressed for event in CS.buttonEvents)
+    if not driving and main_pressed and self.settings.enabled and self._main_toggles_aol():
+      # Out of Drive AOL is paused and ignores the press, but the car's cruise main still toggles. Leaving the
+      # choice to the car's main state in Drive keeps the two in step: a press in Park used to drop the re-arm
+      # with main lit, and the next press (to arm) turned main off (2026-11-17).
+      self.gear_rearm_pending = True
+      return
     if not self.gear_rearm_pending:
       return
     if any(event.type in DRIVER_DECISION_BUTTONS and event.pressed for event in CS.buttonEvents) or not self.settings.enabled:

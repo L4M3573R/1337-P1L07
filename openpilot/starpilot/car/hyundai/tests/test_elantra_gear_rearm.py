@@ -38,7 +38,7 @@ def test_aol_rearms_on_return_to_drive_with_main_still_on():
   assert owner.allowed_latch and owner.output(state('drive'))[0]
 
 
-@pytest.mark.parametrize('button', ['mainCruise', 'cancel', 'lkas'])
+@pytest.mark.parametrize('button', ['cancel', 'lkas'])
 def test_a_deliberate_button_while_parked_replaces_the_remembered_choice(button):
   owner = armed()
   owner.update(state('neutral'), now_ns=10, fault_active=True)
@@ -125,3 +125,25 @@ def test_a_disarmed_intent_does_not_publish_an_arm():
   owner = ClassicLongCardIntent(elantra_cp(marked=True), ON)
   owner.update(state('park'), now_ns=SECOND)
   assert not owner.lateral_arm_retained()
+
+
+@pytest.mark.parametrize('main_in_drive', [True, False])
+def test_main_pressed_in_park_follows_the_cars_main_state_in_drive(main_in_drive):
+  # 2026-11-17: Main pressed in Park lit the car's main but AOL ignored it (paused out of Drive) and dropped the re-arm;
+  # the next press turned main off. Now Drive follows the car's main state.
+  for owner in (armed(), ClassicLongCardIntent(elantra_cp(marked=True), ON)):
+    if owner.allowed_latch:
+      owner.update(state('neutral'), now_ns=10, fault_active=True)
+    owner.update(state('park', main=False), now_ns=20, fault_active=True)
+    owner.update(state('park', main=False, buttons=('mainCruise',)), now_ns=30, fault_active=True)
+    assert owner.gear_rearm_pending and not owner.allowed_latch
+    owner.update(state('drive', main=main_in_drive), now_ns=40, fault_active=False)
+    assert owner.allowed_latch == main_in_drive
+
+
+def test_cancel_after_main_in_park_still_cancels():
+  owner = ClassicLongCardIntent(elantra_cp(marked=True), ON)
+  owner.update(state('park', main=False, buttons=('mainCruise',)), now_ns=10, fault_active=True)
+  owner.update(state('park', main=False, buttons=('cancel',)), now_ns=20, fault_active=True)
+  owner.update(state('drive'), now_ns=30, fault_active=False)
+  assert not owner.allowed_latch
