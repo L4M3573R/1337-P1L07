@@ -263,6 +263,8 @@ class BlinkerTurn:
     if v_ego < STOPPED_MPS:
       self.stop_odo_m = None if lead else self.odo_m
     if self.turning:
+      if self.start_heading is None:
+        self.start_heading = heading  # started from a stop, where GPS has no heading: count from the first one
       turned = (heading is not None and self.start_heading is not None and
                 abs((heading - self.start_heading + 180.0) % 360.0 - 180.0) >= TURN_DONE_DEG)
       if turned:

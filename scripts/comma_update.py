@@ -9,7 +9,8 @@ Steps, each printed: find the comma (home Wi-Fi first, then Tailscale); refuse u
 and disengaged; set UpdaterTargetBranch (block=True: a plain put is lost); force Offroad if onroad; ask the running
 updater for its fast update (StarPilot's updater: only changed files, falls back to a full update when the OS
 changes; it reboots the comma itself); wait for the comma to come back on the branch tip; then check the AOL safety
-link (aolSafetyWire) and the Chestnut. Exit code 0 only when the comma runs the tip with AOL up.
+link (aolSafetyWire: seen, valid and not empty) and the Chestnut. Exit code 0 only when the comma runs the tip with
+AOL up; 3 when the install took but the car was never seen, so AOL could not be checked.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ import time
 
 HOSTS = ('192.168.1.157', '100.117.14.62')   # home Wi-Fi, Tailscale
 SSH = ['ssh', '-o', 'ConnectTimeout=6', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=10']
+AOL_WAIT_S = 180
 REMOTE_PY = 'cd /data/openpilot && PYTHONPATH=/data/openpilot:/data/openpilot/openpilot /usr/local/venv/bin/python -'
 
 STATUS = r'''
@@ -41,7 +43,9 @@ print(json.dumps({
   'target': text('UpdaterTargetBranch'), 'agnos': open('/VERSION').read().strip(),
   'onroad': bool(sm['deviceState'].started), 'offroad_param': open('/data/params/d/IsOffroad').read().strip() == '1',
   'car_seen': bool(sm.seen['carState']), 'gear': str(cs.gearShifter), 'speed': float(cs.vEgo),
-  'engaged': bool(sm['selfdriveState'].enabled), 'aol_link': bool(sm.seen['aolSafetyWire']),
+  'engaged': bool(sm['selfdriveState'].enabled),
+  # pandad still publishes the message (invalid, empty) when the panda's AOL safety does not match: seen is not enough
+  'aol_link': bool(sm.seen['aolSafetyWire'] and sm.valid['aolSafetyWire'] and len(sm['aolSafetyWire']) > 0),
   'chestnut': (open('/data/params/d/ChestnutActive').read().strip() == '1') if os.path.exists('/data/params/d/ChestnutActive') else False,
   'updater_state': text('UpdaterState'), 'uptime': float(open('/proc/uptime').read().split()[0]),
 }))
@@ -192,11 +196,19 @@ def main() -> int:
     # The fast updater puts the new files in place first and reboots after, so the tip alone is not done: it counts
     # only once the comma has rebooted since the request (uptime shorter than the time since then).
     if now['commit'] == tip and now['uptime'] < time.monotonic() - start:
-      if now['uptime'] < 60:
-        time.sleep(30)   # let pandad, the model and AOL come up
-        now = remote(host, STATUS)
+      # pandad, the panda flash and the car's data take a while after the reboot: wait for the car before judging AOL
+      checked = time.monotonic()
+      while not (now['car_seen'] and now['aol_link']) and time.monotonic() - checked < AOL_WAIT_S:
+        time.sleep(10)
+        try:
+          now = remote(host, STATUS, timeout=40)
+        except (RuntimeError, subprocess.TimeoutExpired):
+          continue
       say(f'installed: {show(now)}')
-      if now['car_seen'] and not now['aol_link']:
+      if not now['car_seen']:
+        say(f'AOL NOT CHECKED: the comma has not seen the car in {AOL_WAIT_S} s; run --status with the car on')
+        return 3
+      if not now['aol_link']:
         say('WARNING: AOL safety link is down; do not drive engaged until this is checked')
         return 1
       return 0

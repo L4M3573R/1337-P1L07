@@ -32,7 +32,16 @@ APPROACH_MAX_M = 150.0        # a mapped road further than this does not slow th
 LEARN_MAX_MPS = 22 * MPH      # turns taken faster than this are not learned (a curve, not a turn)
 TURN_DONE_DEG = 60.0
 EMA_NEW = 0.3                 # weight of a new sample
-CONFIRM_WEIGHT = 0.1          # a comma-driven turn with no pedal nudges the speed toward what was driven
+# A turn the car nearly stopped before (stop sign, light, queue) teaches no speed: its slowest point is the pull-away,
+# and those samples had dragged the table from ~10.5 mph to 5-9 mph by 2026-11-17.
+FROM_STOP_MPS = 2.5
+TABLE_VERSION = 2             # 1: learned the slowest speed of every turn, pull-aways included (reset to the seed)
+SEED_MPH = {'right|unknown': 10.7, 'left|unknown': 10.3}   # from 35 recorded rolling turns
+# The ceiling ends once the car has turned this far (yaw), whatever modeld says: a turn started from a stop has no GPS
+# heading to count from and kept the cap on until the blinker went off.
+RELEASE_MARGIN_DEG = 20.0
+RELEASE_MIN_DEG = 30.0
+RELEASE_MAX_M = 60.0
 TURN_SPEED_RANGE = (5 * MPH, 22 * MPH)
 # starting speeds (mph) until the driver's own turns are learned: (side, sharpness)
 DEFAULT_MPH = {('right', 'sharp'): 9.0, ('right', 'square'): 11.0, ('right', 'shallow'): 16.0, ('right', 'unknown'): 11.0,
@@ -97,6 +106,7 @@ class TurnSpeeds:
   """Learned turn speed (m/s) per (side, sharpness): {key: [speed, samples]}."""
   table: dict[str, list] = field(default_factory=dict)
   curvatures: dict[str, list] = field(default_factory=dict)   # {key: [peak curvature 1/m, samples]}
+  migrated: bool = False   # loaded from an older table version: the speeds were reset to the seed
 
   def curvature(self, side: str, sharp: str) -> float:
     entry = self.curvatures.get(self.key(side, sharp))
@@ -157,7 +167,11 @@ class TurnSpeeds:
       def entries(name):
         return {k: [float(v[0]), int(v[1])] for k, v in doc.get(name, {}).items()
                 if isinstance(k, str) and k.count('|') == 1 and isinstance(v, list) and len(v) == 2}
-      return cls(entries('speeds'), entries('curvatures'))
+      speeds = cls(entries('speeds'), entries('curvatures'))
+      if int(doc.get('version', 1)) < TABLE_VERSION:
+        speeds.table = {k: [round(v * MPH, 3), 1] for k, v in SEED_MPH.items()}
+        speeds.migrated = True
+      return speeds
     except (OSError, ValueError, TypeError, AttributeError, IndexError):
       return cls()
 
@@ -165,7 +179,7 @@ class TurnSpeeds:
     try:
       path.parent.mkdir(parents=True, exist_ok=True)
       tmp = path.with_suffix('.tmp')
-      tmp.write_text(json.dumps({'version': 1, 'speeds': self.table, 'curvatures': self.curvatures}, indent=1))
+      tmp.write_text(json.dumps({'version': TABLE_VERSION, 'speeds': self.table, 'curvatures': self.curvatures}, indent=1))
       tmp.replace(path)
     except OSError:
       pass
@@ -194,6 +208,7 @@ class TurnLearner:
   sharp: str = 'unknown'
   heading_deg: float = 0.0
   min_v: float = math.inf
+  slowest_before: float = math.inf   # the slowest the car went on this blinker before the turn began
   max_v_turning: float = 0.0
   driver_frames: int = 0
   comma_frames: int = 0
@@ -207,6 +222,7 @@ class TurnLearner:
 
   def reset(self) -> None:
     self.side, self.sharp, self.heading_deg, self.min_v, self.max_v_turning = None, 'unknown', 0.0, math.inf, 0.0
+    self.slowest_before = math.inf
     self.driver_frames = self.comma_frames = 0
     self.braked = self.gassed = False
     self.done = False
@@ -236,6 +252,8 @@ class TurnLearner:
         self.k_smooth += (abs(yaw_rate) / v - self.k_smooth) * min(1.0, dt / 0.5)
         self.k_peak = max(self.k_peak, self.k_smooth)
     turned = abs(self.heading_deg)
+    if turned < 15.0:
+      self.slowest_before = min(self.slowest_before, v)
     if turned >= 15.0:
       self.min_v = min(self.min_v, v)
       self.max_v_turning = max(self.max_v_turning, v)
@@ -249,6 +267,9 @@ class TurnLearner:
       return None
     key = TurnSpeeds.key(self.side, self.sharp)
     self.speeds.learn_curvature(self.side, self.sharp, self.k_peak)
+    self.done = True   # no second sample until the blinker goes off
+    if self.slowest_before < FROM_STOP_MPS:
+      return None                                                           # from a stop: only the pull-away was seen
     if self.driver_frames >= self.comma_frames:
       self.speeds.learn(self.side, self.sharp, self.min_v)                  # the driver's own speed
     elif self.braked:
@@ -256,10 +277,16 @@ class TurnLearner:
     elif self.gassed:
       self.speeds.learn(self.side, self.sharp, self.max_v_turning)          # pressed on to this: faster
     else:
-      self.speeds.learn(self.side, self.sharp, self.min_v, CONFIRM_WEIGHT)  # the comma's speed was fine
+      return None   # the comma's own speed with no pedal says nothing new (it was at or under the cap already)
     self.learned += 1
-    self.done = True   # no second sample until the blinker goes off
     return key
+
+
+def release_deg(angle_deg) -> float:
+  """How far the car turns before the turn-speed ceiling ends: most of the mapped angle, or the learner's 60 deg."""
+  if isinstance(angle_deg, (int, float)) and math.isfinite(angle_deg):
+    return max(RELEASE_MIN_DEG, abs(angle_deg) - RELEASE_MARGIN_DEG)
+  return TURN_DONE_DEG
 
 
 def speeds_path() -> Path:
@@ -278,14 +305,41 @@ class TurnSpeedHost:
     self.speeds: TurnSpeeds | None = None
     self.learner: TurnLearner | None = None
     self.log = None
+    self.turn_side: str | None = None   # the blinker use whose turn is being followed
+    self.turn_deg = 0.0                 # turned (yaw) since modeld said turning
+    self.turn_m = 0.0
+    self.turn_released = False
+    self.turn_t: float | None = None
 
   def _ensure(self) -> None:
     if self.speeds is None:
       self.path = self.path if self.path is not None else speeds_path()
       self.speeds = TurnSpeeds.load(self.path)
+      if self.speeds.migrated:
+        try:
+          self.path.with_suffix('.v1.json').write_text(self.path.read_text())   # what was learned before, kept
+        except OSError:
+          pass
+        self.speeds.save(self.path)
       self.learner = TurnLearner(self.speeds)
       from openpilot.starpilot.diagnostics.features import ChangeLog
       self.log = ChangeLog('turn_speed', min_gap_s=1.0)
+
+  def _turn_over(self, now: float, side: str | None, status: dict | None, v: float, yaw_rate: float) -> bool:
+    """This blinker's turn is behind the car (by yaw or distance): no ceiling until the blinker goes off."""
+    dt = 0.0 if self.turn_t is None else min(max(now - self.turn_t, 0.0), 0.5)
+    self.turn_t = now
+    if side is None or side != self.turn_side:
+      self.turn_side, self.turn_deg, self.turn_m, self.turn_released = side, 0.0, 0.0, False
+      return False
+    if status is None or not status.get('turning'):
+      return self.turn_released
+    if math.isfinite(yaw_rate):
+      self.turn_deg += math.degrees(yaw_rate) * dt
+    self.turn_m += max(v, 0.0) * dt
+    if abs(self.turn_deg) >= release_deg(status.get('angle_deg')) or self.turn_m >= RELEASE_MAX_M:
+      self.turn_released = True
+    return self.turn_released
 
   def sample(self, sm) -> float | None:
     try:
@@ -301,6 +355,8 @@ class TurnSpeedHost:
                                      bool(cs.brakePressed), status.get('angle_deg') if status else None)
       if learned is not None:
         self.speeds.save(self.path)
+      if self._turn_over(now, side, status, float(cs.vEgo), float(cs.yawRate)):
+        status = None
       cap, v_turn = ceiling(status, self.speeds)
       if self.log is not None:
         self.log.observe({'slowing': cap is not None and cap < float(cs.vEgo) + 0.5, 'turning': bool(status and status.get('turning')),

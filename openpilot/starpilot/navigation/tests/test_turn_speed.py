@@ -140,3 +140,56 @@ def test_host_saves_what_it_learns(tmp_path):
     host.sample(sm(v=7 * MPH, long_active=False, yaw=rate if turning else 0.0))
   saved = json.loads((tmp_path / 'turn_speed.json').read_text())['speeds']
   assert saved['right|unknown'][0] == pytest.approx(7 * MPH, abs=0.05)
+
+
+def test_a_turn_from_a_stop_teaches_no_speed():
+  # 2026-11-17: pull-aways from stop signs had dragged left square turns to 8.9 mph and right unknown to 6.3 mph
+  speeds = TurnSpeeds({'right|square': [11 * MPH, 5]})
+  learner = TurnLearner(speeds)
+  rate = -math.radians(90.0) / 3.0
+  for i in range(120):
+    t = i * 0.05
+    turning = 1.5 <= t < 4.5
+    v = 0.0 if t < 1.5 else min(6.0, 1.5 * (t - 1.5))   # waits at the line, then pulls away through the turn
+    assert learner.observe(t, 'right', v, rate if turning else 0.0, False, False, False, 90.0) is None
+  assert speeds.driver_speed('right', 'square') == pytest.approx(11 * MPH)
+  assert learner.learned == 0
+
+
+def test_a_comma_turn_with_no_pedal_never_lowers_the_speed():
+  speeds = TurnSpeeds({'right|square': [11 * MPH, 5]})
+  for _ in range(10):   # ten turns behind a slow car
+    drive_turn(TurnLearner(speeds), v_apex=6.7 * MPH, long_active=True)
+  assert speeds.driver_speed('right', 'square') == pytest.approx(11 * MPH)
+
+
+def test_an_old_table_is_reset_to_the_seed_and_kept_beside(tmp_path):
+  path = tmp_path / 'turn_speed.json'
+  path.write_text(json.dumps({'version': 1, 'speeds': {'right|unknown': [2.815, 33], 'left|square': [3.989, 34]},
+                              'curvatures': {'right|unknown': [0.0988, 33]}}))
+  host = TurnSpeedHost(path=path, status_path=tmp_path / 'status.json', clock=Clock())
+  host.sample(sm())
+  assert host.speeds.driver_speed('right', 'unknown') == pytest.approx(10.7 * MPH, abs=0.01)
+  assert host.speeds.curvature('right', 'unknown') == pytest.approx(0.0988)       # the measured tightness stays
+  assert json.loads(path.read_text())['version'] == ts.TABLE_VERSION
+  assert json.loads((tmp_path / 'turn_speed.v1.json').read_text())['speeds']['left|square'] == [3.989, 34]
+  assert not TurnSpeeds.load(path).migrated
+
+
+def test_the_ceiling_ends_once_the_car_has_turned(tmp_path):
+  # a turn started from a stop has no GPS heading in modeld, so its 'turning' stayed on until the blinker went off
+  clock = Clock()
+  status = tmp_path / 'status.json'
+  host = TurnSpeedHost(path=tmp_path / 'turn_speed.json', status_path=status, clock=clock)
+  rate = -math.radians(90.0) / 3.0
+  caps = []
+  for i in range(160):
+    clock.t = 100.0 + i * 0.05
+    ts.write_status({'t': clock.t, 'side': 'right', 'turning': True, 'distance_m': None, 'angle_deg': 90.0}, status)
+    caps.append(host.sample(sm(v=4.0, yaw=rate if i * 0.05 < 3.0 else 0.0)))
+  assert caps[10] is not None and caps[40] is not None     # capped through the first 70 degrees
+  assert caps[55] is None and caps[-1] is None              # 70 of the 90 degrees turned: released, and stays so
+  host.sample(sm(right=False))                              # blinker off
+  ts.write_status({'t': clock.t, 'side': 'right', 'turning': True, 'distance_m': None, 'angle_deg': 90.0}, status)
+  assert host.sample(sm(v=4.0)) is not None                 # the next blinker gets its ceiling again
+  assert ts.release_deg(45.0) == 30.0 and ts.release_deg(None) == ts.TURN_DONE_DEG
