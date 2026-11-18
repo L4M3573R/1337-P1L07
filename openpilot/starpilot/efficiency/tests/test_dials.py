@@ -111,7 +111,20 @@ def test_a_slower_setting_the_driver_pressed_through_is_counted_and_then_left_ou
     exp.sample(f)
   assert exp.episode is not None and exp.episode.variant == 'u1.00'
   exp.sample(Frame(3.1, 27.0, 27.0, True, gas=True))
-  assert exp.vetoes['cruise|60+|u1.00'] == 1
+  assert exp.vetoes['cruise|60+|u1.00'] == el.VETO_LIMIT   # one press: too slow there, never offered again
+
+
+def test_one_gas_press_on_the_center_steps_it_faster_for_the_rest_of_the_drive():
+  # The driver, 2026-11-17: a gas press on a too-gentle setting means try a slightly faster one.
+  exp = DialExperimenter(rng=random.Random(5), state={'cruise|60+': dl.Situation({'u': 1.0}, {'u': 0.5})})
+  exp.rng.random = lambda: 0.0    # always drive the center
+  exp.cruise_turn = 1
+  for t in range(30):
+    exp.sample(Frame(t * 0.1, 27.0, 27.0, True))
+  assert exp.episode is not None and exp.episode.variant == 'u1.00'
+  exp.sample(Frame(3.1, 27.0, 27.0, True, gas=True))
+  assert exp.state['cruise|60+'].center == {'u': 0.5}
+  assert exp.draw('cruise', '60+') == 'u0.50'
 
 
 def test_a_dial_episode_shapes_the_plan_and_tags_the_ledger():

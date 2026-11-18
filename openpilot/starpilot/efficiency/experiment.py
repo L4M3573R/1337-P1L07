@@ -341,6 +341,7 @@ class Experimenter:
       self.vetoed_episode = ep.number
       key = ep.tag()
       self.vetoes[key] = self.vetoes.get(key, 0) + 1
+      self._vetoed(ep)
     if f.long_active:
       self.engaged_s += dt
       self.distance_m += max(f.v_ego, 0.0) * dt
@@ -360,6 +361,9 @@ class Experimenter:
         self._started(ep, f)
     self.was_standstill = f.standstill
     return self._plan(f, ep, dt)
+
+  def _vetoed(self, ep: Episode) -> None:
+    """Hook: the driver pressed on during this slower episode (its veto is already counted)."""
 
   def _is_slower(self, ep: Episode) -> bool:
     """The episode drives slower than normal (a gas press during it counts as the driver's veto)."""
@@ -456,6 +460,22 @@ class DialExperimenter(Experimenter):
     from openpilot.starpilot.efficiency.dials import costs_time, decode
     values = decode(ep.category, ep.variant)
     return values is not None and costs_time(ep.category, values)
+
+  def _vetoed(self, ep: Episode) -> None:
+    """One gas press during a slower dial setting means it was too slow there (the driver, 2026-11-17): never offer
+    it again, and if it was the center, step every slower dial one notch faster for the rest of the drive (the
+    end-of-drive judge does the same from the saved center, so the next drive starts there too)."""
+    from openpilot.starpilot.efficiency.dials import DIALS, Situation, decode, encode
+    self.vetoes[ep.tag()] = max(self.vetoes.get(ep.tag(), 0), VETO_LIMIT)
+    key = f'{ep.category}|{ep.context}'
+    sit = self.situation_state(ep.category, ep.context)
+    if decode(ep.category, ep.variant) is None or ep.variant != encode(ep.category, sit.center):
+      return
+    center = dict(sit.center)
+    for d in DIALS[ep.category]:
+      if d.slower and (center[d.key] - d.start) * d.slower > 1e-9:
+        center[d.key] = d.clamp(center[d.key] - d.slower * sit.step[d.key])
+    self.state[key] = Situation(center, dict(sit.step), sit.cost_min_per_100mi, sit.moves)
 
   def _started(self, ep: Episode, f: Frame) -> None:
     from openpilot.starpilot.efficiency.dials import decode, episode_time_s
