@@ -51,7 +51,12 @@ static void hyundai_daw_rx(const CANPacket_t *msg) {
   if ((hyundai_daw_addr != 0U) && (msg->addr == hyundai_daw_addr) && (msg->bus == (canfd ? hyundai_daw_bus : 2U))) {
     const uint32_t now = microsecond_timer_get();
     const bool fresh = hyundai_daw_counter_seen && (safety_get_ts_elapsed(now, hyundai_daw_rx_ts) <= 100000U);
-    bool valid = canfd ? (GET_LEN(msg) == hyundai_daw_len) : ((GET_LEN(msg) == 6U) || (GET_LEN(msg) == 8U));
+    bool valid = false;
+    if (canfd) {
+      valid = GET_LEN(msg) == hyundai_daw_len;
+    } else {
+      valid = (GET_LEN(msg) == 6U) || (GET_LEN(msg) == 8U);
+    }
     if (valid && !canfd) {
       hyundai_daw_len = GET_LEN(msg);  // the classic layout is fixed per car; follow the source
     }

@@ -488,6 +488,12 @@ class HyundaiRefreshHybridGasMixin:
 
 
 class TestHyundaiSafetyCameraSCCRefreshHybrid(HyundaiRefreshHybridGasMixin, TestHyundaiSafetyCameraSCCRefresh):
+  # 1337: the 2024 Elantra Hybrid's own EPS limits (parking-lot test 2026-11-17), selected by this safety word
+  MAX_RATE_UP = 10
+  MAX_RATE_DOWN = 9
+  MAX_TORQUE_LOOKUP = [0], [400]
+  MAX_RT_DELTA = 375
+
   def setUp(self):
     self.packer = CANPackerSafety("hyundai_can_refresh_generated")
     self.safety = libsafety_py.libsafety
@@ -503,6 +509,11 @@ class TestHyundaiSafetyCameraSCCRefreshHybrid(HyundaiRefreshHybridGasMixin, Test
 
 
 class TestHyundaiLongitudinalSafetyCameraSCCRefreshHybrid(HyundaiRefreshHybridGasMixin, TestHyundaiLongitudinalSafetyCameraSCCRefresh):
+  MAX_RATE_UP = 10   # the 2024 Elantra Hybrid's own EPS limits, with openpilot longitudinal too
+  MAX_RATE_DOWN = 9
+  MAX_TORQUE_LOOKUP = [0], [400]
+  MAX_RT_DELTA = 375
+
   def setUp(self):
     self.packer = CANPackerSafety("hyundai_can_refresh_generated")
     self.safety = libsafety_py.libsafety

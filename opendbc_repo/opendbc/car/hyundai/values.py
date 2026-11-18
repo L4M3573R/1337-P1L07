@@ -12,6 +12,18 @@ from opendbc.car.lateral import AngleSteeringLimitsVM
 Ecu = CarParams.Ecu
 
 
+def elantra_hev_2024_eps(CP) -> bool:
+  """The 2024 Elantra Hybrid with the safety word the panda allows the higher EPS limits for: refresh CAN, camera SCC
+  and hybrid gas together (the same test as safety/modes/hyundai.h). Anything else keeps the default 384 / 3 / 7, so
+  the car never asks for more than the panda lets through."""
+  try:
+    word = int(CP.safetyConfigs[-1].safetyParam)
+  except (AttributeError, IndexError, TypeError, ValueError):
+    return False
+  need = HyundaiSafetyFlags.CAN_REFRESH_MSGS | HyundaiSafetyFlags.CAMERA_SCC | HyundaiSafetyFlags.HYBRID_GAS
+  return CP.carFingerprint == CAR.HYUNDAI_ELANTRA_HEV_2024 and (word & need) == need
+
+
 class CarControllerParams:
   ACCEL_MIN = -3.5 # m/s^2
   ACCEL_MAX = 2.0 # m/s^2
@@ -63,6 +75,13 @@ class CarControllerParams:
       if not CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG:
         self.STEER_DELTA_UP = 2
         self.STEER_DELTA_DOWN = 3
+
+    # 1337: this car's EPS takes more than the default (parking-lot test 2026-11-17: 400 / 10 / 9 were the highest
+    # with no EPS fault). Only with the safety word the panda raises its own limits for (safety/modes/hyundai.h).
+    elif elantra_hev_2024_eps(CP):
+      self.STEER_MAX = 400
+      self.STEER_DELTA_UP = 10
+      self.STEER_DELTA_DOWN = 9
 
     # Default for most HKG
     else:

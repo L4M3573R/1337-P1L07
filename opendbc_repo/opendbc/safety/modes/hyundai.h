@@ -6,11 +6,11 @@
 #include "opendbc/safety/modes/hyundai_classic_non_scc_aol.h"
 #include "opendbc/safety/modes/hyundai_blended_stock_aol.h"
 
-#define HYUNDAI_LIMITS(steer, rate_up, rate_down) { \
+#define HYUNDAI_LIMITS_RT(steer, rate_up, rate_down, rt_delta) { \
   .max_torque = (steer), \
   .max_rate_up = (rate_up), \
   .max_rate_down = (rate_down), \
-  .max_rt_delta = 112, \
+  .max_rt_delta = (rt_delta), \
   .driver_torque_allowance = 50, \
   .driver_torque_multiplier = 2, \
   .type = TorqueDriverLimited, \
@@ -21,6 +21,7 @@
   .min_valid_request_rt_interval = 810000,  /* 810ms; a ~10% buffer on cutting every 90 frames */ \
   .has_steer_req_tolerance = true, \
 }
+#define HYUNDAI_LIMITS(steer, rate_up, rate_down) HYUNDAI_LIMITS_RT(steer, rate_up, rate_down, 112)
 
 extern const LongitudinalLimits HYUNDAI_LONG_LIMITS;
 const LongitudinalLimits HYUNDAI_LONG_LIMITS = {
@@ -347,6 +348,12 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
   static uint32_t hyundai_blended_mirror_ts = 0U;
   hyundai_blended_cancel_check();
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS = HYUNDAI_LIMITS(384, 3, 7);
+  // 1337: the 2024 Elantra Hybrid's EPS takes more than the Hyundai default. Parking-lot test 2026-11-17 (eps-lab): the
+  // highest values with no EPS fault were torque 400, rise 10, release 9 (416 / 11 / 12 fault). The daily build asked
+  // for 384 / 3 / 7 and spent 42 % of every turn climbing at that rise limit, getting 70 % of the turn it wanted.
+  // The real-time limit is rise * 25 frames * 1.5, as for the other sets. Selected by the car's own safety word
+  // (refresh CAN + camera SCC + hybrid gas); the word is not changed, AOL matches on it exactly.
+  const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ELANTRA_HEV_2024 = HYUNDAI_LIMITS_RT(400, 10, 9, 375);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_BLENDED = HYUNDAI_LIMITS(404, 2, 3);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT = HYUNDAI_LIMITS(270, 2, 3);
   const TorqueSteeringLimits HYUNDAI_STEERING_LIMITS_ALT_2 = HYUNDAI_LIMITS(170, 2, 3);
@@ -489,7 +496,9 @@ static bool hyundai_tx_hook(const CANPacket_t *msg) {
 
     const TorqueSteeringLimits limits = hyundai_blended_stock ? HYUNDAI_STEERING_LIMITS_BLENDED :
                                         hyundai_alt_limits_2 ? HYUNDAI_STEERING_LIMITS_ALT_2 :
-                                        hyundai_alt_limits ? HYUNDAI_STEERING_LIMITS_ALT : HYUNDAI_STEERING_LIMITS;
+                                        hyundai_alt_limits ? HYUNDAI_STEERING_LIMITS_ALT :
+                                        (hyundai_can_refresh_msgs && hyundai_camera_scc && hyundai_hybrid_gas_signal) ?
+                                        HYUNDAI_STEERING_LIMITS_ELANTRA_HEV_2024 : HYUNDAI_STEERING_LIMITS;
 
     if (steer_torque_cmd_checks(desired_torque, steer_req, limits)) {
       tx = false;
