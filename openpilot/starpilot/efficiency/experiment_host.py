@@ -36,6 +36,26 @@ def mode(root: Path) -> str:
   return value if value in ('on', 'off') else 'off'
 
 
+def cruise_over_mph(root: Path) -> float:
+  """How far over the set speed the learner may cruise when this car measures better there: experiment.json
+  cruise_over_mph, 0 unless the driver set it, never more than speed_curve.OVER_MAX_MPH."""
+  from openpilot.starpilot.efficiency.speed_curve import OVER_MAX_MPH
+  try:
+    value = json.loads((root / 'experiment.json').read_text()).get('cruise_over_mph')
+    return float(min(max(value, 0.0), OVER_MAX_MPH)) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+  except (OSError, ValueError, TypeError, AttributeError):
+    return 0.0
+
+
+def speeds(root: Path) -> dict:
+  """The car's measured MPG by speed, as the judge last stored it (experiments.json); {} until it has."""
+  try:
+    table = json.loads((root / 'experiments.json').read_text()).get('speeds')
+    return table if isinstance(table, dict) else {}
+  except (OSError, ValueError, TypeError, AttributeError):
+    return {}
+
+
 def pitch_zero(root: Path) -> float:
   """The constant nose-up reading of the pitch signal, as the judge last measured it (experiments.json)."""
   try:
@@ -80,12 +100,13 @@ class ExperimentHost:
     which = engine(root)
     vetoes = load_vetoes(root / 'vetoes.json')
     dials = load_state(root / 'experiments.json')
+    measured = {'speeds': speeds(root), 'cruise_over_mph': cruise_over_mph(root)}
     if which == 'dials':
-      self.exp = DialExperimenter(vetoes=vetoes, state=dials)
+      self.exp = DialExperimenter(vetoes=vetoes, state=dials, **measured)
       self.shadow = None
     else:
       self.exp = Experimenter(winners=load_winners(root / 'experiments.json'), vetoes=vetoes)
-      self.shadow = DialExperimenter(vetoes=dict(vetoes), state=dials) if which == 'shadow' else None
+      self.shadow = DialExperimenter(vetoes=dict(vetoes), state=dials, **measured) if which == 'shadow' else None
     carried = load_budget(root / BUDGET_FILE)
     for exp in (self.exp, self.shadow):
       if exp is not None and carried is not None:
@@ -108,7 +129,8 @@ class ExperimentHost:
       return None
 
   def _reload(self, now: float) -> None:
-    """The judge wrote a new experiments.json (it runs as the drive starts): take its dial centers and pitch zero."""
+    """The judge wrote a new experiments.json (it runs as the drive starts): take its dial centers, the car's measured
+    MPG by speed and the pitch zero."""
     if now < self.next_reload:
       return
     self.next_reload = now + RELOAD_CHECK_S
@@ -118,9 +140,11 @@ class ExperimentHost:
     self.state_mtime = mtime
     from openpilot.starpilot.efficiency.dials import load_state
     state = load_state(self.root_now / 'experiments.json')
+    table = speeds(self.root_now)
     for exp in (self.exp, self.shadow):
       if isinstance(exp, DialExperimenter):
         exp.state = dict(state)
+        exp.speeds = table
     self.pitch_zero = pitch_zero(self.root_now)
 
   def _read_soc(self, now: float) -> None:

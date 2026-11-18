@@ -524,7 +524,8 @@ def load_drives(root: Path, since: str | None = None) -> list[list[dict]]:
 
 def update(root: Path) -> dict:
   """Judge every stored drive and write <root>/experiments.json (the winners the experimenter reads)."""
-  corrections = fit_corrections(load_drives(root))   # the road and speed costs: every drive is physics
+  all_drives = load_drives(root)
+  corrections = fit_corrections(all_drives)   # the road and speed costs: every drive is physics
   drives = load_drives(root, since=JUDGE_FROM)        # the road tests: only drives under the current variants
   season = current_season(drives)
   data = samples(drives, corrections, season)
@@ -535,9 +536,21 @@ def update(root: Path) -> dict:
   dial_report = {}
   if engine(root) == 'dials':
     state, dial_report = judge_dials(data, state, load_vetoes(root / 'vetoes.json'), situation_miles_per_hour=miles_per_hour)
+  # cruising, uphill and downhill speeds are not dials any more: they are picked from the car's measured MPG at each
+  # speed in that grade and condition (speed_curve.py), every stored drive, whoever drove
+  from openpilot.starpilot.efficiency import speed_curve
+  from openpilot.starpilot.efficiency.dials import start_values
+  picked = ('cruise', 'uphill', 'downhill')   # experiment.SPEED_PICKS
+  for key in [k for k in state if k.split('|')[0] in picked]:
+    state[key] = new_situation(key.split('|')[0])
+  for key in [k for k in dial_report if k.split('|')[0] in picked]:
+    dial_report[key] = {'status': 'chosen from the measured MPG by speed', 'center': encode(key.split('|')[0], start_values(key.split('|')[0]))}
   doc = {'version': 1, 'winners': {k: r['winner'] for k, r in results.items() if r['winner']}, 'results': results,
          'corrections': corrections, 'season': season, 'budget': budget, 'dials': state_doc(state),
-         'dial_results': dial_report}
+         'dial_results': dial_report,
+         'speeds': speed_curve.condition_tables(all_drives, corrections, current_season(all_drives),
+                                                speed_curve.current_climate(all_drives),
+                                                mode=speed_curve.current_mode(all_drives))}
   from openpilot.starpilot.efficiency.store import _atomic_write
   _atomic_write(root / 'experiments.json', doc)   # synced: the comma loses power the moment the car turns off
   return doc

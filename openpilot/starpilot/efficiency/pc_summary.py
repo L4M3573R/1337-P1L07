@@ -7,7 +7,8 @@ Copies /data/starpilot/efficiency/drives/*.json from the first reachable host in
 ./fuel_data), then writes per-drive MPG for the driver and the comma (BlueDriver, battery-adjusted), the
 running averages, the matched comma-versus-driver comparison per comma mode, trip reports (per drive, MPG by
 drive mode, tire pressure, outside temperature and road type, fill-ups and a tank-level fuel check) and the
-latest BlueDriver health check, and the shadow efficiency learner's findings (learner.py), as JSON. With
+latest BlueDriver health check, measured MPG by steady speed (speed_curve.py), and the shadow efficiency learner's
+findings (learner.py), as JSON. With
 <efficiency>/learner_ledger.json {"start": epoch s} on the comma, also the self-learner's own ledger: its drives from
 that moment to the next fill-up, MPG per drive, running MPG and the matched comparison with the driver.
 """
@@ -17,7 +18,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from openpilot.starpilot.efficiency import compare, learner, trend, trips
+from openpilot.starpilot.efficiency import compare, experiment_learn, learner, speed_curve, trend, trips
 
 
 def pull(hosts: list[str], local: Path, key: str) -> str | None:
@@ -115,6 +116,13 @@ def summarize(local: Path, host: str | None, gas_price: float | None = None, tan
   out['drive_modes_vs_eco'] = trips.drive_mode_comparison(records)
   out['fill_ups'] = trips.fill_ups(drives, tank_gal)
   out['tank_check'] = trips.tank_check(drives, tank_gal)
+  all_drives = [rs for _, rs in drives]
+  out['speed_curve'] = speed_curve.speed_curve(all_drives)
+  out['speed_conditions'] = speed_curve.condition_tables(all_drives, None, experiment_learn.current_season(all_drives),
+                                                         speed_curve.current_climate(all_drives),
+                                                         mode=speed_curve.current_mode(all_drives))
+  out['speed_by_mode'] = {m: speed_curve.table(speed_curve.speed_curve(all_drives, keep=lambda st, m=m: st.get('drive_mode') == m))
+                          for m in sorted({st.get('drive_mode') for d in all_drives for st in d if isinstance(st.get('drive_mode'), str)} - {'unknown'})}
   out['learner'] = learner.learn_stored(local)
   out['learner_ledger'] = learner_ledger(local, points)
   try:
@@ -141,6 +149,8 @@ def main():
   print('comparison:', out['comparison']['all'])
   print('current averages: you', out['you_avg'][-1] if n else None, '| comma', out['comma_avg'][-1] if n else None)
   print('\n'.join(learner.report_lines(out['learner'])))
+  print('\n'.join(speed_curve.report_lines(out['speed_curve'])))
+  print('\n'.join(speed_curve.condition_lines(out['speed_conditions'])))
 
 
 if __name__ == '__main__':

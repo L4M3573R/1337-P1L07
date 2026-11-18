@@ -41,6 +41,7 @@ class Dial:
   finest: float   # the step it stops halving at
   slower: int     # +1: a higher value is slower driving, -1: a lower value is, 0: neither (no time cost, no veto)
   digits: int = 2
+  probe_low: float | None = None   # probes stay at or above this; the range under it is only ever chosen from measurement
 
   def clamp(self, x: float) -> float:
     return min(self.high, max(self.low, x))
@@ -60,7 +61,9 @@ DIALS: dict[str, tuple[Dial, ...]] = {
   'pulse_glide': (Dial('b', 'Pulse and Glide band (mph; 0 = off)', 0.0, 5.0, 0.0, 2.0, 0.5, +1, 1),
                   Dial('p', 'pulse strength (share of the normal pulse)', 0.6, 1.4, 1.0, 0.2, 0.05, 0),
                   Dial('g', 'glide regen (m/s2 beyond the plain coast; 0 = coast)', 0.0, 0.6, 0.0, 0.2, 0.05, 0)),
-  'cruise': (Dial('u', 'cruise under the set speed (mph)', 0.0, 2.0, 0.0, 1.0, 0.25, +1),),
+  # negative is over the set speed: never probed, only chosen from the car's measured MPG by speed (speed_curve.py),
+  # and only as far as experiment.json's cruise_over_mph allows (0 unless the driver sets it)
+  'cruise': (Dial('u', 'cruise under the set speed (mph; negative: over)', -2.0, 2.0, 0.0, 1.0, 0.25, +1, probe_low=0.0),),
   'hold': (Dial('d', 'dip allowed before the throttle comes back (mph)', 0.0, 2.0, 0.0, 1.0, 0.25, +1),
            Dial('k', 'recovery strength after a dip', 0.3, 1.0, 1.0, 0.25, 0.05, -1)),
   'uphill': (Dial('s', 'sag on uphills (mph)', 0.0, 2.0, 0.0, 1.0, 0.25, +1),),
@@ -112,6 +115,8 @@ class Situation:
         continue   # with Pulse and Glide off its pulse and glide change nothing: only the band is worth probing
       for direction in (+1, -1):
         x = d.clamp(self.center[d.key] + direction * self.step[d.key])
+        if d.probe_low is not None:
+          x = max(x, d.probe_low)
         if abs(x - self.center[d.key]) > 1e-9:
           out.append((encode(category, {**self.center, d.key: x}), d.key, direction))
     return out
@@ -172,6 +177,30 @@ def vetoed_values(category: str, context: str, vetoes: dict[str, int], limit: in
       if values is not None and costs_time(category, values):
         out.append(values)
   return out
+
+
+def too_fast_values(category: str, context: str, vetoes: dict[str, int], limit: int) -> list[dict[str, float]]:
+  """The faster-than-normal settings the driver turned the set speed down during, in this situation."""
+  prefix = f'{category}|{context}|'
+  out = []
+  for key, count in vetoes.items():
+    if count >= limit and key.startswith(prefix):
+      values = decode(category, key[len(prefix):])
+      if values is not None and faster_than_normal(category, values):
+        out.append(values)
+  return out
+
+
+def faster_than_normal(category: str, values: dict[str, float]) -> bool:
+  start = start_values(category)
+  return any(d.slower and (values[d.key] - start[d.key]) * d.slower < -1e-9 for d in DIALS[category]) and \
+    not costs_time(category, values)
+
+
+def blocked_as_too_fast(category: str, values: dict[str, float], refused: list[dict[str, float]]) -> bool:
+  """What was too fast for the driver rules out every setting that is as fast or faster on every dial."""
+  slow = [d for d in DIALS.get(category, ()) if d.slower]
+  return bool(slow) and any(all((values[d.key] - v[d.key]) * d.slower <= 1e-9 for d in slow) for v in refused)
 
 
 def blocked_by_veto(category: str, values: dict[str, float], vetoed: list[dict[str, float]]) -> bool:

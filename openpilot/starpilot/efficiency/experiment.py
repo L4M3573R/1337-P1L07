@@ -253,6 +253,7 @@ class Experimenter:
   carry_engaged_s: float = 0.0   # engaged and spent seconds of earlier drives still inside the budget window
   carry_spent_s: float = 0.0
   grace_s: float = BUDGET_GRACE_S
+  frame: Frame | None = None     # the frame being sampled (a draw may need the set speed)
 
   # ---------- budget ----------
   def budget_left_s(self) -> float:
@@ -371,6 +372,7 @@ class Experimenter:
   def _sample(self, f: Frame) -> Plan:
     dt = 0.0 if self.last_t is None else min(max(f.t - self.last_t, 0.0), 0.5)
     self.last_t = f.t
+    self.frame = f
     ep = self.episode
     if f.gas and ep is not None and self._is_slower(ep) and self.vetoed_episode != ep.number:
       # the driver pressed on during a slower variant: it was not acceptable here
@@ -467,6 +469,11 @@ class Experimenter:
             'total_spent_s': round(self.carry_spent_s + self.spent_s, 1)}
 
 
+# situations whose speed is picked from the car's measured MPG by speed: category -> (grade table, dial, dial sign for
+# "mph under the set speed")
+SPEED_PICKS = {'cruise': ('flat', 'u', +1), 'uphill': ('uphill', 's', +1), 'downhill': ('downhill', 'c', -1)}
+
+
 @dataclass
 class DialExperimenter(Experimenter):
   """The same situations and safety rules, but each draws a dial setting (dials.py): the learned center, or one dial
@@ -474,6 +481,12 @@ class DialExperimenter(Experimenter):
   state: dict = field(default_factory=dict)   # 'category|context' -> dials.Situation
   # Pulse and Glide is tried at every speed (band 0 = off is where it starts): the dials find where it pays
   pulse_glide_max_mps: float = math.inf
+  # The car's measured MPG by speed per grade and condition (speed_curve.condition_tables, from experiments.json). With
+  # it (even empty) level cruising, uphills and downhills pick their speed from the measurement instead of probing a
+  # dial: None keeps the plain dials.
+  speeds: dict | None = None
+  cruise_over_mph: float = 0.0   # how far over the set speed a measured-better speed may be driven (the driver's choice)
+  ep_set_mps: float = 0.0        # the set speed when the episode began
 
   def situation_state(self, category: str, context: str):
     from openpilot.starpilot.efficiency.dials import new_situation
@@ -483,6 +496,8 @@ class DialExperimenter(Experimenter):
     from openpilot.starpilot.efficiency.dials import (EXPLOIT, Situation, blocked_by_veto, costs_time, decode, encode,
                                                       slower_than, start_values, step_back, vetoed_values)
     key = f'{category}|{context}'
+    if category in SPEED_PICKS and self.speeds is not None and self.frame is not None:
+      return self._draw_speed(category, context)
     sit = self.situation_state(category, context)
     budget_ok = self.budget_left_s() > 0
     vetoed = vetoed_values(category, context, self.vetoes, VETO_LIMIT)
@@ -497,6 +512,39 @@ class DialExperimenter(Experimenter):
       fewest = min(self.tried.get(f'{key}|{v}', 0) for v in probes)
       return self.rng.choice([v for v in probes if self.tried.get(f'{key}|{v}', 0) == fewest])
     return center
+
+  def _draw_speed(self, category: str, context: str) -> str:
+    """Drive the speed this car measures best inside the driver's window around the set speed, in this grade and
+    condition, or, half the time, a speed in the window that this condition has not driven enough to judge: it learns
+    the car instead of assuming slower is cheaper. Slower still needs minutes in the budget and no gas-press veto;
+    faster on the level needs cruise_over_mph and no set-speed-turned-down veto."""
+    from openpilot.starpilot.efficiency.dials import (EXPLOIT, blocked_as_too_fast, blocked_by_veto, encode,
+                                                      too_fast_values, vetoed_values)
+    from openpilot.starpilot.efficiency.speed_curve import OVER_MAX_MPH, UNDER_MAX_MPH, choose, thin
+    grade, dial, sign = SPEED_PICKS[category]
+    under, over = {'cruise': (UNDER_MAX_MPH, min(max(self.cruise_over_mph, 0.0), OVER_MAX_MPH)), 'uphill': (UNDER_MAX_MPH, 0),
+                   'downhill': (0, DOWNHILL_CARRY_MPH)}[category]
+    levels = self.speeds.get(grade) if isinstance(self.speeds, dict) else None
+    levels = levels if isinstance(levels, list) else []
+    budget_ok = self.budget_left_s() > 0
+    too_slow = vetoed_values(category, context, self.vetoes, VETO_LIMIT)
+    too_fast = too_fast_values(category, context, self.vetoes, VETO_LIMIT)
+
+    def variant(u: float) -> str:
+      return encode(category, {dial: sign * u})   # u: mph under the set speed (negative: over)
+
+    def allowed(u: float) -> bool:
+      if u > 0:
+        return budget_ok and not blocked_by_veto(category, {dial: sign * u}, too_slow)
+      return u == 0 or not blocked_as_too_fast(category, {dial: sign * u}, too_fast)
+
+    set_mph = self.frame.v_set / MPH
+    learn = [u for u in thin(levels, set_mph, over, under) if allowed(u)]
+    if learn and self.rng.random() >= EXPLOIT:
+      key = f'{category}|{context}'
+      fewest = min(self.tried.get(f'{key}|{variant(u)}', 0) for u in learn)
+      return variant(next(u for u in learn if self.tried.get(f'{key}|{variant(u)}', 0) == fewest))
+    return variant(choose(levels, set_mph, over, allowed, under))
 
   def _is_slower(self, ep: Episode) -> bool:
     from openpilot.starpilot.efficiency.dials import costs_time, decode
@@ -521,6 +569,7 @@ class DialExperimenter(Experimenter):
   def _started(self, ep: Episode, f: Frame) -> None:
     from openpilot.starpilot.efficiency.dials import decode, episode_time_s
     values = decode(ep.category, ep.variant)
+    self.ep_set_mps = f.v_set
     if values is None:
       return
     if ep.category == 'stop':
@@ -531,6 +580,11 @@ class DialExperimenter(Experimenter):
   def _plan(self, f: Frame, ep: Episode | None, dt: float) -> Plan:
     from openpilot.starpilot.efficiency.dials import Effect, decode, effect, ongoing_time_s
     values = decode(ep.category, ep.variant) if ep is not None else None
+    if values is not None and ep.category == 'cruise' and values['u'] < 0 and f.v_set < self.ep_set_mps - 0.5 * MPH:
+      # the driver turned the set speed down while it ran over it: too fast here, never offered again (a bound, as
+      # the gas press is for slower), and the episode is over
+      self.vetoes[ep.tag()] = max(self.vetoes.get(ep.tag(), 0), VETO_LIMIT)
+      self.episode = ep = values = None
     own_target = f.v_set + min(self.offset_mps, 0.0)
     eff = Effect()
     if values is not None:
