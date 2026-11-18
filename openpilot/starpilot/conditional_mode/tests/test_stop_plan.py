@@ -1,4 +1,4 @@
-"""A stop is a plan that reaches standstill; a passed or pulled-away stop releases (2026-11-17 drives b0 and b2)."""
+"""A passed or pulled-away stop releases (2026-11-17 drives b0, b2); a slowing plan still acquires early (b7)."""
 from dataclasses import replace
 
 from openpilot.starpilot.conditional_mode.stop import StopLead, StopLightDetector
@@ -17,14 +17,11 @@ def committed_short_stop():
   return detector
 
 
-def test_a_plan_that_only_slows_is_not_a_stop():
-  # b0 seg 10: 26 mph, the model planned down to ~8 mph (path 83 m, under speed x 9 s) and the stop held 6.5 s.
+def test_a_slowing_plan_still_acquires_early_at_speed():
+  # b7 seg 11: at 45 mph toward a red light the plan only bottomed out near 33 mph 150 m out; the stop must start there.
   detector = StopLightDetector()
   for tick in range(40):
-    result = detector.step(plan(frame(tick, speed=11.6, horizon=83.), 3.7))
-    assert not detector.committed and not result.light_detected
-  for tick in range(40, 80):
-    detector.step(plan(frame(tick, speed=11.6, horizon=83.), 0.4))
+    detector.step(plan(frame(tick, speed=20.0, horizon=150.), 14.8))
   assert detector.committed
 
 

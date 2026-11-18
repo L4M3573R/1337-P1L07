@@ -29,8 +29,8 @@ STOP_MODEL_RELEASE_MARGIN_M = 4.0  # Existing model-stop off margin.
 STOP_POINT_MARGIN_M = 8.0  # A lead this close to the model's stop point is at that stop.
 STOP_POINT_MARGIN_FRACTION = 0.15
 STOP_POINT_LEAD_MAX_MPS = 4.5  # Matches the existing slow approach-handoff lead speed.
-# A stop is a plan that reaches (near) standstill. A plan that only slows (to 8 mph behind a turning car, say) is not
-# one: at 26 mph its 10 s path fell under the speed x 9 s threshold and the stop committed and held 6.5 s.
+# A plan near standstill. Not an acquisition gate: at 45 mph the model plans its full stop only ~70 m before a red light
+# (drive 000000b7 2026-11-17), too late; used only to release a stop the car has driven past.
 NEAR_STOP_PLAN_MPS = 3.0 * 0.44704
 # Stopped behind a car that pulls away while the model asks to go: the stop was that car, release.
 LEAD_LAUNCH_MIN_MPS = 0.5
@@ -184,7 +184,7 @@ class StopLightDetector:
                     frame.longitudinal_stop_active is False and
                     frame.model_should_stop is False and model_stopping is False and frame.forcing_stop is False and
                     horizon is not None and horizon >= FROZEN_RAW_STOP_DISTANCE_M + STOP_MODEL_RELEASE_MARGIN_M)
-    if acquire and not self.committed and horizon is not None and not clear_launch and _plans_stop(frame):
+    if acquire and not self.committed and horizon is not None and not clear_launch:
       self.committed = True
       self.commit_distance_m = horizon
       self.commit_start_m = horizon
@@ -407,7 +407,7 @@ class StopLightDetector:
     else:
       self.lead_clear_filter.update(not relevant)
       lead_cleared = self.lead_clear_filter.x >= THRESHOLD
-    self.light_filter.update(model_stopping and lead_cleared and _plans_stop(frame))
+    self.light_filter.update(model_stopping and lead_cleared)
     filtered = bool(self.light_filter.x >= THRESHOLD**2 and lead_cleared)
     active = bool(filtered or handoff or approach_latched)
     strong = horizon < max(threshold_m - 10.0, 0.0)
