@@ -121,6 +121,28 @@ def show(st: dict) -> str:
   return ', '.join(parts)
 
 
+def push_stop_line() -> None:
+  """A stop-line model the PC staged goes along (shadow only, the comma just logs with it). Never blocks the install."""
+  try:
+    import datetime as dt
+    import fcntl
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'openpilot' / 'starpilot' / 'stop_line'))
+    import nightly
+    if not (nightly.RUNS / 'staged' / 'stop_line.onnx').exists():
+      return
+    with open(nightly.RUNS / 'nightly.lock', 'w') as lock:
+      try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+      except BlockingIOError:
+        say('stop-line model: the nightly run holds it, not pushed this time')
+        return
+      sent = nightly.deploy(nightly.Night(f'{dt.date.today():%Y-%m-%d}'), parked=True)
+    say('stop-line model: pushed to the comma' if sent else 'stop-line model: NOT pushed (see the nightly log)')
+  except Exception as e:
+    say(f'stop-line model: not pushed ({e})')
+
+
 def main() -> int:
   ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   ap.add_argument('--branch', help='switch UpdaterTargetBranch to this branch first')
@@ -139,6 +161,7 @@ def main() -> int:
   if not parked:
     say('refusing: put the car in Park (stopped, disengaged) or turn it off first')
     return 2
+  push_stop_line()
   target = a.branch or st['target']
   tip = branch_tip(target)
   if tip is None:

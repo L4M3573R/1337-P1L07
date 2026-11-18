@@ -246,6 +246,8 @@ procs = [
   PythonProcess("edgemapd", "openpilot.starpilot.edgemap.edgemapd", only_onroad),
   PythonProcess("curvemapd", "openpilot.starpilot.curve_speed.curvemapd", only_onroad),
   PythonProcess("sideroadd", "openpilot.starpilot.navigation.sideroadd", only_onroad),
+  # Stop-line finder, shadow only: runs the PC-trained model if one is deployed, logs where it and chestnut would stop.
+  PythonProcess("stop_lined", "openpilot.starpilot.stop_line.stop_lined", only_onroad, enabled=not PC),
   # 1337 trace: decision-log events, lag/disengage CPU snapshots and a per-minute load line in one daily file.
   PythonProcess("traced", "openpilot.starpilot.diagnostics.traced", only_onroad),
   PythonProcess("hardwared", "openpilot.system.hardware.hardwared", always_run),

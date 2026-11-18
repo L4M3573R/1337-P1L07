@@ -5,7 +5,7 @@
 # A dead Jetlink owner sends the drive back to the small model.
 # The energy ledger and the BlueDriver logger only observe; their absence must never block or disengage driving.
 ANCILLARY_PROCESSES = frozenset({'starportd', 'galaxy_hotspot', 'jetlinkd', 'netwatchd', 'efficiencyd', 'edgemapd', 'bluedriverd',
-                                 'curvemapd', 'sideroadd', 'traced'})
+                                 'curvemapd', 'sideroadd', 'traced', 'stop_lined'})
 
 
 def driving_process_failures(processes) -> set[str]:
