@@ -30,7 +30,6 @@ from openpilot.starpilot.feature_runtime import enabled as feature_enabled
 from openpilot.starpilot.vehicle_preferences import VehicleStartupPreferences
 from openpilot.starpilot.lateral.pause import LateralPause, read_settings as read_lateral_pause
 from openpilot.starpilot.lateral.model_turn_assist import ModelTurnAssist, update_twitch_guard
-from openpilot.starpilot.lateral.turn_yield import TurnYield
 from openpilot.starpilot.aol.runtime import (
   current_axis,
   current_native,
@@ -130,8 +129,6 @@ class Controls:
     )
     self.lane_shadow = self._create_lane_shadow(predict_lane_clearance)
     self.curve_guard = self._create_curve_guard()
-    self.turn_yield = TurnYield()
-    self.turn_yield_log = None
     self.highway_correction_gain = HighwayCorrectionGain()
     self.highway_smoothing_supported = lateral_supported(self.CP)
     self.highway_gain = read_gain(self.params) if self.highway_smoothing_supported else 1.0
@@ -261,7 +258,8 @@ class Controls:
     try:
       from openpilot.starpilot.lateral.turn_yield import no_push_back
       limited = no_push_back(torque, v_ego=CS.vEgo, left_blinker=bool(CS.leftBlinker), right_blinker=bool(CS.rightBlinker),
-                             steering_angle_deg=float(CS.steeringAngleDeg), lat_active=bool(CC.latActive))
+                             steering_angle_deg=float(CS.steeringAngleDeg), lat_active=bool(CC.latActive),
+                             steering_pressed=bool(CS.steeringPressed), steering_torque=float(CS.steeringTorque))
       if getattr(self, 'turn_hold_log', None) is None:
         from openpilot.starpilot.diagnostics.features import ChangeLog
         self.turn_hold_log = ChangeLog('turn_no_push_back', min_gap_s=0.5)
@@ -269,22 +267,6 @@ class Controls:
       return limited
     except Exception:
       return torque
-
-  def _turn_yielding(self, CS, CC) -> bool:
-    """Turn yield (starpilot/lateral/turn_yield.py): no comma torque while the driver steers a turn toward the blinker."""
-    try:
-      yielding = self.turn_yield.update(time.monotonic(), v_ego=CS.vEgo, left_blinker=bool(CS.leftBlinker),
-                                        right_blinker=bool(CS.rightBlinker), steering_pressed=bool(CS.steeringPressed),
-                                        steering_torque=float(CS.steeringTorque), lat_active=bool(CC.latActive))
-      if self.turn_yield_log is None:
-        from openpilot.starpilot.diagnostics.features import ChangeLog
-        self.turn_yield_log = ChangeLog('turn_yield', min_gap_s=0.5)
-      self.turn_yield_log.observe({'yielding': yielding}, {'v_ego': CS.vEgo, 'driver_torque': CS.steeringTorque,
-                                                           'steering_deg': CS.steeringAngleDeg})
-      return yielding
-    except Exception:
-      self.turn_yield = TurnYield()
-      return False
 
   def _create_lane_shadow(self, predict_lane_clearance: bool):
     """Lane centering v2 (starpilot/lateral/lane_centering_v2.py) steers by default with the current controller shadowed
@@ -784,7 +766,7 @@ class Controls:
     if nnlc is not None:
       nnlc.set_plan(model_v2)
     steer, lateral_output, lac_log = self.LaC.update(
-      CC.latActive and not self._turn_yielding(CS, CC), CS, self.VM, lp, self.steer_limited_by_safety, self.desired_curvature,
+      CC.latActive, CS, self.VM, lp, self.steer_limited_by_safety, self.desired_curvature,
       curvature_limited, lat_delay
     )
     actuators.torque = float(steer)
