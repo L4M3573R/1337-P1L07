@@ -2,7 +2,10 @@
 """Verify every 1337-P1L07 customization is still present and working after an upstream (StarPilot Dom) merge.
 
   .venv/bin/python scripts/check_1337.py            # anchors only: each feature's key code is still there
-  .venv/bin/python scripts/check_1337.py --tests    # anchors, then each feature's tests through ./dev
+  .venv/bin/python scripts/check_1337.py --tests    # anchors, then every feature's tests in one ./dev pytest run
+
+This is the fork's standard test run: the Elantra, its panda safety mode and everything built here. Tests for other
+makes are not part of it (2026-11-18: the user wants a clean run to mean "what we use works").
 
 The feature list mirrors docs/1337_FORK_CHANGES.md. When a feature is added, add it here and there.
 Exit status is non-zero when any anchor is missing or any test run fails.
@@ -70,9 +73,9 @@ FEATURES = [
   ('Curve guard (opt-in): keep the inside body off a confident inside line or edge',
    [(OP + 'selfdrive/controls/controlsd.py', r'_apply_curve_guard'), (STARPILOT + 'lateral/curve_guard.py', r'class CurveGuard')],
    [STARPILOT + 'lateral/tests/test_curve_guard.py']),
-  ('Turn yield: no comma torque while the driver steers a turn toward the blinker below turn speed',
-   [(OP + 'selfdrive/controls/controlsd.py', r'CC\.latActive and not self\._turn_yielding\(CS, CC\)'),
-    (STARPILOT + 'lateral/turn_yield.py', r'class TurnYield')],
+  ('Turns: no push back against the driver mid-turn (turn yield itself was removed, 092000f5)',
+   [(OP + 'selfdrive/controls/controlsd.py', r'from openpilot\.starpilot\.lateral\.turn_yield import no_push_back'),
+    (STARPILOT + 'lateral/turn_yield.py', r'def no_push_back')],
    [STARPILOT + 'lateral/tests/test_turn_yield.py']),
   ('No lane change into a lane that is not there (road edge close, no line beyond)',
    [(STARPILOT + 'lateral/adjacent_lane_evidence.py', r'def lane_clearly_absent'),
@@ -123,7 +126,7 @@ FEATURES = [
    [(STARPILOT + 'efficiency/experiment.py', r'class Experimenter'), (STARPILOT + 'efficiency/experiment_host.py', r'class ExperimentHost'),
     (OP + 'selfdrive/controls/plannerd.py', r'ExperimentHost\('), (OP + 'selfdrive/controls/lib/longitudinal_planner.py', r'efficiency_plan=None'),
     (STARPILOT + 'efficiency/ledger.py', r"'exp': self\.experiment"), (STARPILOT + 'efficiency/experiment_learn.py', r'def judge'),
-    (STARPILOT + 'efficiency/efficiencyd.py', r'experiment_learn\.update')],
+    (STARPILOT + 'efficiency/efficiencyd.py', r'def start_judge')],   # the judge runs beside efficiencyd as a drive starts
    [STARPILOT + 'efficiency/tests/test_experiment.py', STARPILOT + 'efficiency/tests/test_experiment_learn.py',
     STARPILOT + 'efficiency/tests/test_experiment_host.py', STARPILOT + 'efficiency/tests/test_experiment_planner.py']),
   ('Turn speed for signalled turns (learned per side and sharpness, eased into by plannerd)',
@@ -199,6 +202,32 @@ FEATURES = [
    [(OP + 'system/ui/lib/application.py', r'def add_frame_pacer'), (OP + 'system/ui/lib/frame_filter.py', r'class FrameFilter'),
     (OP + 'selfdrive/ui/onroad/cameraview.py', r'def _pace_to_camera'), (OP + 'selfdrive/ui/mici/onroad/model_renderer.py', r'FrameFilter\(')],
    [OP + 'system/ui/tests/test_frame_filter.py', OP + 'system/ui/tests/test_frame_timing.py', STARPILOT + 'ui/tests/test_camera_resources.py']),
+  ('Fuel learner limits: veto as a bound, budget carried across drives, pitch zero, 5-drive win test',
+   [(STARPILOT + 'efficiency/dials.py', r'def blocked_by_veto'), (STARPILOT + 'efficiency/experiment.py', r"BUDGET_FILE = 'budget\.json'"),
+    (STARPILOT + 'efficiency/experiment_learn.py', r'DIAL_MIN_DRIVES = 5'), (STARPILOT + 'efficiency/experiment_learn.py', r'def pitch_zero')],
+   [STARPILOT + 'efficiency/tests']),
+  ('Fuel learner: cruise and hill speed picked from the measured MPG by speed, per grade and condition',
+   [(STARPILOT + 'efficiency/speed_curve.py', r'def condition_tables'), (STARPILOT + 'efficiency/experiment.py', r'SPEED_PICKS = '),
+    (STARPILOT + 'efficiency/experiment_host.py', r'def cruise_over_mph'), (STARPILOT + 'efficiency/experiment_learn.py', r'speed_curve\.condition_tables')],
+   [STARPILOT + 'efficiency/tests/test_speed_curve.py', STARPILOT + 'efficiency/tests/test_cruise_speed.py']),
+  ('BlueDriver logs the engine computer vehicle speed',
+   [(STARPILOT + 'obd/bluedriver.py', r"\('010D', 2\)")], [STARPILOT + 'obd/tests']),
+  ('Elantra Hybrid EPS limits 400 / 10 / 9 (car code and panda, selected by the unchanged safety word)',
+   [(OPENDBC + 'safety/modes/hyundai.h', r'HYUNDAI_STEERING_LIMITS_ELANTRA_HEV_2024 = HYUNDAI_LIMITS_RT\(400, 10, 9, 375\)'),
+    (OPENDBC + 'car/hyundai/values.py', r'def elantra_hev_2024_eps')],
+   [OPENDBC + 'car/hyundai/tests/test_elantra_hev_eps_limits.py']),
+  ("The Elantra's panda safety mode (classic Hyundai) and the panda protocol",
+   [(OPENDBC + 'safety/modes/hyundai.h', r'hyundai_tx_hook'), (OPENDBC + 'safety/tests/conftest.py', r'RELEASE_ONLY')],
+   [OPENDBC + 'safety/tests/test_hyundai.py', OPENDBC + 'safety/tests/test_hyundai_classic_long_aol.py',
+    OPENDBC + 'safety/tests/test_hyundai_main_rearm.py', OPENDBC + 'safety/tests/test_hyundai_classic_cancel_joined.py',
+    OPENDBC + 'safety/tests/test_hyundai_blended_cruise_ack.py', OPENDBC + 'safety/tests/misra/test_mutation.py',
+    OP + 'selfdrive/pandad/tests']),
+  ('Stop-line finder (shadow) and Force Stop lead identity',
+   [(OP + 'system/manager/process_config.py', r'"stop_lined"'), (STARPILOT + 'conditional_mode/stop.py', r'OWN_LEAD_MAX_JUMP_M')],
+   [STARPILOT + 'stop_line/tests', STARPILOT + 'conditional_mode/tests/test_stop_plan.py']),
+  ('Test runner: ./dev pytest runs without the desktop-app switches (167 false failures, 2026-11-18)',
+   [('tools/host_runtime.py', r"PYTEST_UNSET_ENV = \('SIMULATION', 'SKIP_FW_QUERY', 'NOBOARD'\)")],
+   ['tools/ci/tests/test_dev_runtime.py']),
 ]
 
 
@@ -218,22 +247,36 @@ def check_anchors() -> list[str]:
 
 
 def run_tests() -> list[str]:
-  failed = []
+  """Every feature's tests in one ./dev pytest run (each ./dev start costs a build check), then per feature: PASS
+  unless one of its files had a failure or error. Inside the Claude Desktop distrobox the run goes to the host, where
+  the compiler is."""
+  import os
+  import shlex
+  failed, wanted = [], {}
   for name, _, tests in FEATURES:
-    if not tests:
-      continue
     paths = [t for t in tests if (ROOT / t).exists()]
     gone = sorted(set(tests) - set(paths))
     if gone:
       failed.append(f'{name}: test files missing: {", ".join(gone)}')
-    if not paths:
+    wanted[name] = paths
+  paths = sorted({p for ps in wanted.values() for p in ps})
+  inner = (f'cd {shlex.quote(str(ROOT))} && SCONSFLAGS="--ccflags=-Wno-error" ./dev pytest -q -rfE -p no:cacheprovider '
+           + ' '.join(map(shlex.quote, paths)))
+  cmd = (['distrobox-host-exec'] if os.environ.get('CONTAINER_ID') else []) + ['bash', '-c', inner]
+  result = subprocess.run(cmd, capture_output=True, text=True, errors='replace', check=False)
+  lines = result.stdout.splitlines()
+  summary = next((line.strip(' =') for line in reversed(lines) if ' passed' in line or ' failed' in line or ' error' in line), 'no summary')
+  broken = sorted({line.split()[1].split('::')[0] for line in lines if line.startswith(('FAILED ', 'ERROR ')) and len(line.split()) > 1})
+  print(f'tests: {summary}')
+  if result.returncode != 0 and not broken:
+    failed.append(f'the test run itself failed (exit {result.returncode}): {summary}')
+  for name, feature_paths in wanted.items():
+    if not feature_paths:
       continue
-    cmd = ['toolbox', 'run', '-c', 'op-ubuntu', 'bash', '-lc', f'cd {ROOT} && ./dev pytest -q -p no:cacheprovider ' + ' '.join(paths)]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    summary = next((line for line in reversed(result.stdout.splitlines()) if ' passed' in line or ' failed' in line), 'no summary')
-    print(f'  {"PASS" if result.returncode == 0 else "FAIL"}  {name}: {summary.strip()}')
-    if result.returncode != 0:
-      failed.append(f'{name}: {summary.strip()}')
+    bad = [b for b in broken if any(b == p or b.startswith(p.rstrip('/') + '/') for p in feature_paths)]
+    print(f'  {"FAIL" if bad else "PASS"}  {name}' + (f': {", ".join(bad)}' if bad else ''))
+    if bad:
+      failed.append(f'{name}: {", ".join(bad)}')
   return failed
 
 
@@ -246,6 +289,8 @@ def main() -> int:
   for line in missing:
     print('  MISSING ', line)
   failed = run_tests() if args.tests else []
+  if args.tests:
+    print('ALL CLEAR' if not (missing or failed) else f'{len(missing)} anchors missing, {len(failed)} features failing')
   return 1 if missing or failed else 0
 
 

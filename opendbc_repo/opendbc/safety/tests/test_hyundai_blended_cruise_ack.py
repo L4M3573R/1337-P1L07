@@ -6,7 +6,12 @@ import unittest
 from opendbc.car.hyundai.values import Buttons
 from opendbc.safety.tests.test_hyundai_blended_alpha_paired_ack import AcknowledgedCancelStream
 from openpilot.selfdrive.car.card import Car
-from openpilot.selfdrive.car.cruise import VCruiseHelper, V_CRUISE_INITIAL
+from openpilot.selfdrive.car.cruise import VCruiseHelper, V_CRUISE_ENGAGE_FLOOR, V_CRUISE_INITIAL
+
+# 1337: with the default Initial Cruise Speed this fork engages SET at the current speed down to 7 mph (commit
+# 810b0428c5, "Engage cruise at the current speed down to 7 mph again"), where upstream floors it at V_CRUISE_INITIAL.
+# Both cases below drive at 20 kph.
+SET_AT_20_KPH = int(round(max(20., V_CRUISE_ENGAGE_FLOOR)))
 from openpilot.starpilot.vehicle_startup import VehicleStartupOwner
 
 
@@ -53,7 +58,7 @@ class TestBlendedCruiseAcknowledgment(unittest.TestCase):
             for _ in range(delay):
               previous = stream.step()  # Actual fresh host-enabled acknowledgment must retain hint.
             result = self.invoke_card(stream, previous)
-            self.assertEqual(result, V_CRUISE_INITIAL if button == Buttons.SET_DECEL else 90.)
+            self.assertEqual(result, SET_AT_20_KPH if button == Buttons.SET_DECEL else 90.)
 
   def test_acknowledged_hint_invalidation_and_single_consumption(self):
     for mode in ('edge', 'pedal', 'profile', 'expiry'):
@@ -78,7 +83,7 @@ class TestBlendedCruiseAcknowledgment(unittest.TestCase):
     cp = params('hdai')
     cp.pcmCruise = False
     for button, expected in ((structs.CarState.ButtonEvent.Type.accelCruise, 90.),
-                             (structs.CarState.ButtonEvent.Type.decelCruise, V_CRUISE_INITIAL)):
+                             (structs.CarState.ButtonEvent.Type.decelCruise, SET_AT_20_KPH)):
       state = structs.CarState()
       state.vEgo = 20 / 3.6
       state.buttonEvents = [structs.CarState.ButtonEvent(type=button, pressed=False)]

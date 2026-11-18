@@ -47,6 +47,7 @@ Native build artifacts, editable installs and Params stay in that cache.
 Shared commands wait while another shared command is running; Cabana is separate.
 ./build remains the Linux ARM64 device build, including ./build --panda.
 """
+PYTEST_UNSET_ENV = ('SIMULATION', 'SKIP_FW_QUERY', 'NOBOARD')   # set for the desktop UI and replay; tests run without them
 COMMANDS = {'c3', 'c4', 'onroad', 'replay', 'cabana', 'jotpluggler', 'plotjuggler', 'galaxy', 'python', 'pytest', 'shell', 'sync'}
 BUCKET_ALIASES = dict.fromkeys(('shared', 'default', 'ui', 'c3', 'c4', 'onroad', 'replay', 'shell', 'jotpluggler', 'plotjuggler', 'juggle'), 'shared')
 BUCKET_ALIASES['cabana'] = 'cabana'
@@ -363,6 +364,11 @@ class HostRuntime:
     elif command == 'pytest':
       argv = [python, '-m', 'pytest', *arguments]
       env.setdefault('SCALE', '1')  # UI imports must not probe a monitor in test workers.
+      # 1337 (2026-11-18): the desktop-app switches are not a test environment. With them 167 tests failed on this
+      # machine and nowhere else: the AOL caller tests assert a real (non-simulation) SubMaster, and the firmware
+      # discovery tests need the query SKIP_FW_QUERY turns off. A test that wants one sets it itself.
+      for desktop_only in PYTEST_UNSET_ENV:
+        env.pop(desktop_only, None)
       if self.system == 'Darwin':
         env['PYTEST_ADDOPTS'] = env.get('PYTEST_ADDOPTS', '') + ' -n0'
     elif command == 'shell':
