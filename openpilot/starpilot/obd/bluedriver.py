@@ -165,7 +165,10 @@ FAST = ('0110', '0144', '010C')
 SLOW = (('0162', 1), ('015B', 3), ('0106', 5), ('0107', 10), ('0104', 5), ('0105', 25), ('0146', 50),
         ('0142', 25), ('012F', 50), ('01A6', 100), ('0163', 500),
         # the ECU's own fuel rate every cycle (compared against the MAF/lambda estimate), battery voltage every 5th
-        ('019D', 1), ('019A', 5))
+        ('019D', 1), ('019A', 5),
+        # the engine computer's own vehicle speed (whole km/h) every other cycle: a third speed beside the wheel
+        # sensors and the dash, to check them against GPS (2026-11-18: wheel 1.3 % under GPS, dash 1.3 % over)
+        ('010D', 2))
 
 
 def plan(cycle: int) -> list[str]:

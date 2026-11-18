@@ -73,13 +73,15 @@ def test_poll_plan_reads_fuel_every_cycle():
   for cycle in range(20):
     assert bd.plan(cycle)[:3] == list(bd.FAST)
   assert '0163' in bd.plan(0) and '0163' not in bd.plan(1)
+  assert '010D' in bd.plan(0) and '010D' not in bd.plan(1) and '010D' in bd.plan(2)   # vehicle speed, logged as speed_kph
+  assert bd.PIDS['010D'].name == 'speed_kph'
 
 
 class FakeLink:
   """Answers like the scanner did with the engine idling."""
   REPLIES = {'010C': '15 C4', '0110': '02 AA', '0144': '7E E0', '015B': '80', '0162': '8F', '0106': '7A', '0107': '7C',
              '0104': '4B', '0105': '4C', '0146': '2F', '0142': '35 C4', '01A6': '00 02 39 9E', '0163': '01 2C', '012F': '7A',
-             '010F': '40', '019D': '00 10 00 10', '019A': '9A 07 00 3B AB'}
+             '010F': '40', '019D': '00 10 00 10', '019A': '9A 07 00 3B AB', '010D': '69'}
 
   def __init__(self, clock, fail_after=None):
     self.clock, self.count, self.fail_after = clock, 0, fail_after
