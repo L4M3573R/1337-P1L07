@@ -84,3 +84,23 @@ def test_lead_that_does_not_move_or_a_model_stop_keeps_the_hold():
     detector = committed_short_stop()
     result = stopped_behind(detector, lead_speed, accel=accel, should_stop=should_stop)
     assert detector.committed and result.standstill_hold, (lead_speed, accel, should_stop)
+
+
+def test_a_car_that_was_never_stopped_ahead_does_not_release_the_hold():
+  # First in line at a light: a car turns in from the cross street and drives off ahead. It was never stopped in front
+  # of us, so it says nothing about our light, even if the model asks to go.
+  detector = committed_short_stop()
+  for tick in range(30, 50):
+    result = detector.step(plan(frame(tick, speed=0., standstill=True, horizon=15., lead=StopLead(False)), 0.0, 0.5))
+  assert detector.committed
+  result = stopped_behind(detector, 3.0, accel=0.5, start=50)
+  assert detector.committed and result.standstill_hold
+
+
+def test_a_different_car_taking_the_leads_place_does_not_release_the_hold():
+  detector = committed_short_stop()
+  stopped_behind(detector, 0.0, accel=-0.3, ticks=10)          # stopped behind a car 6 m ahead
+  for tick in range(40, 80):                                   # another car, 18 m out, becomes the radar lead and drives off
+    lead = StopLead(True, 18.0 + 0.1 * (tick - 40), 2.0, True, 0.99, True)
+    result = detector.step(plan(frame(tick, speed=0., standstill=True, horizon=15., lead=lead), 0.0, 0.5))
+  assert detector.committed and result.standstill_hold

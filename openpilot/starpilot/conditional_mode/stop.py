@@ -36,6 +36,10 @@ NEAR_STOP_PLAN_MPS = 3.0 * 0.44704
 LEAD_LAUNCH_MIN_MPS = 0.5
 LEAD_LAUNCH_MIN_ACCEL = 0.3
 LEAD_LAUNCH_MAX_M = 25.0  # the car we stopped behind; a car far ahead (through on yellow) says nothing about the light
+# The launching lead must be the car that was seen stopped ahead: followed frame to frame by its distance, forgotten
+# after a second out of sight. A car that turns into the lane from the cross street was never stopped ahead.
+OWN_LEAD_MAX_JUMP_M = 2.0
+OWN_LEAD_FORGET_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -154,8 +158,28 @@ class StopLightDetector:
     self.commit_travel_m = 0.0
     self.commit_clear_since_s: float | None = None
     self.lead_launching = False
+    self.own_lead_m: float | None = None
+    self.own_lead_seen_s = 0.0
     self.last_observed_mono_s: float | None = None
     self.last_model_tick_mono_s: float | None = None
+
+  def _own_lead(self, frame: StopFrame) -> bool:
+    """Whether the radar lead is the car that was stopped ahead of us (2026-11-17 review: any moving lead counted)."""
+    lead, now = frame.lead, frame.now_mono_s
+    near = bool(lead is not None and lead.present is True and lead.radar is True and
+                lead.distance_m is not None and math.isfinite(lead.distance_m) and lead.distance_m <= LEAD_LAUNCH_MAX_M and
+                lead.speed_mps is not None and math.isfinite(lead.speed_mps))
+    if near and lead.speed_mps < LEAD_LAUNCH_MIN_MPS:
+      self.own_lead_m, self.own_lead_seen_s = lead.distance_m, now
+      return True
+    if self.own_lead_m is not None and now - self.own_lead_seen_s > OWN_LEAD_FORGET_S:
+      self.own_lead_m = None
+    if near and self.own_lead_m is not None and abs(lead.distance_m - self.own_lead_m) <= OWN_LEAD_MAX_JUMP_M:
+      self.own_lead_m, self.own_lead_seen_s = lead.distance_m, now
+      return True
+    if near:
+      self.own_lead_m = None  # another car took the lead's place
+    return False
 
   def invalidate(self) -> None:
     committed, distance, stopped = self.committed, self.commit_distance_m, self.standstill_committed
@@ -310,7 +334,7 @@ class StopLightDetector:
     if frame.pedal_override is True:
       self.reset()
       return StopObservation(False, False, None, False)
-    self.lead_launching = _lead_launch(frame)
+    self.lead_launching = self._own_lead(frame) and _lead_launch(frame)
     if self.lead_launching and not frame.stationary_launch_clear:
       frame = replace(frame, stationary_launch_clear=True)
     dt = model_tick - self.last_model_tick_mono_s if self.last_model_tick_mono_s is not None else DT_MDL
