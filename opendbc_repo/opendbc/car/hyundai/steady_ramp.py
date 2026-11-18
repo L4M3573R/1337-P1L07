@@ -5,11 +5,18 @@ low-speed steering loop overshoots back and forth at about 2 Hz (first drive, 20
 8-25 mph against 2 deg on 3 / 7; the slow ramp was what kept that hunting small). A turn asks for torque one way for
 a long time; hunting reverses every quarter second. So after the applied torque reverses, the ramp is the old 3 / 7
 for HOLD_FRAMES, and only then grows to the full step. Anything that swings faster than about 1 Hz therefore gets
-exactly the old ramp; a steady build towards a turn gets the fast one. Never more than the limits it is given, so the
-panda's own check (safety/modes/hyundai.h) is not affected.
+the old ramp up and down; a steady build towards a turn gets the fast one.
+
+One thing is not the ramp's to slow: torque above what the driver's hands allow. The panda (driver_limit_check in
+safety/lateral.h) wants that to come down by the full release step every frame, and refuses the frame otherwise. The
+first build of this file released at 7 there, the panda refused the frames, the EPS faulted and beeped and the fault
+latch turned the steering off (second drive, 2026-11-18). apply() gives that case the full step;
+safety/tests/test_hyundai.py sends this ramp's torque through the panda's own check.
 """
 import json
 from types import SimpleNamespace
+
+from opendbc.car.lateral import apply_driver_steer_torque_limits
 
 # {"ramp": "steady" | "fast" | "slow", "hold_frames": n, "grow_frames": n} on the comma switches it at the next car
 # start without an install: fast is the flat 10 / 9 of the first drive, slow the flat 3 / 7 of before. No file: steady.
@@ -46,6 +53,22 @@ class SteadyRamp:
           setattr(self.view, k, getattr(limits, k))
     self.view.STEER_DELTA_UP, self.view.STEER_DELTA_DOWN = self.steps()
     return self.view
+
+  def apply(self, wanted: int, last: int, driver_torque: float) -> int:
+    """The torque to send this frame."""
+    L = self.limits()
+    torque = apply_driver_steer_torque_limits(wanted, last, driver_torque, L)
+    # torque above what the driver's hands allow comes down by the full release step, whatever the ramp is doing
+    hands = driver_torque * L.STEER_DRIVER_FACTOR
+    if last > 0:
+      allowed = max(min(L.STEER_MAX, L.STEER_MAX + (L.STEER_DRIVER_ALLOWANCE + hands) * L.STEER_DRIVER_MULTIPLIER), 0)
+      torque = min(torque, max(last - self.full_down, allowed))
+    elif last < 0:
+      allowed = min(max(-L.STEER_MAX, -L.STEER_MAX + (-L.STEER_DRIVER_ALLOWANCE + hands) * L.STEER_DRIVER_MULTIPLIER), 0)
+      torque = max(torque, min(last + self.full_down, allowed))
+    torque = int(round(float(torque)))
+    self.update(torque)
+    return torque
 
   def update(self, applied: int) -> None:
     """Tell it the torque that was sent this frame."""

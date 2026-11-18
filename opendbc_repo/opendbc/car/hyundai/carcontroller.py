@@ -233,8 +233,12 @@ class CarController(CarControllerBase):
     torque_limits = self.params if self.steady_ramp is None else self.steady_ramp.limits()
     if _projection is not None:
       _projection.input(new_torque, self.params.STEER_MAX, self.apply_torque_last, CS.out.steeringTorque, torque_limits, limiter='driver')
-    apply_torque = (0 if self.angle_vm is not None else
-                    apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, torque_limits))
+    if self.angle_vm is not None:
+      apply_torque = 0
+    elif self.steady_ramp is not None:
+      apply_torque = self.steady_ramp.apply(new_torque, self.apply_torque_last, CS.out.steeringTorque)
+    else:
+      apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, torque_limits)
 
     # >90 degree steering fault prevention
     self.angle_limit_counter, apply_steer_req = common_fault_avoidance(abs(CS.out.steeringAngleDeg) >= self.max_angle, CC.latActive,
@@ -245,8 +249,6 @@ class CarController(CarControllerBase):
       apply_torque = 0
 
     self.apply_torque_last = apply_torque
-    if self.steady_ramp is not None:
-      self.steady_ramp.update(apply_torque)
 
     # Original lead hysteresis counts100Hz controller updates, not50Hz SCC.
     lead_data = None

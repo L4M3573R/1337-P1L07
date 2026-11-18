@@ -501,6 +501,61 @@ class TestHyundaiSafetyCameraSCCRefreshHybrid(HyundaiRefreshHybridGasMixin, Test
     self.safety.set_safety_hooks(CarParams.SafetyModel.hyundai, flags)
     self.safety.init_tests()
 
+  def _steady_ramp_refusals(self, ramp, frames=6000, seed=0):
+    """Frames the panda refuses when the car code's ramp drives the torque: random demands, and hands on the wheel
+    pushing against it for a second or two at a time (what the driver did on 2026-11-18)."""
+    import random
+    rng = random.Random(seed)
+    self.safety.set_controls_allowed(True)
+    self._reset_torque_driver_measurement(0)
+    self._set_prev_torque(0)
+    refused, last, want, driver, now_us = [], 0, 0, 0, 0
+    for n in range(frames):
+      if rng.random() < 0.03:
+        want = rng.choice((-400, -250, -120, -30, 0, 30, 120, 250, 400))
+      if rng.random() < 0.02:
+        driver = rng.choice((0, 0, 0, 40, -40, 150, -150, 230, -230, 300, -300))
+      hands = driver + rng.randint(-15, 15)
+      now_us += 10000
+      self.safety.set_timer(now_us)
+      self._rx(self._torque_driver_msg(hands))
+      torque = ramp.apply(want, last, hands)
+      if not self._tx(self._torque_cmd_msg(torque)):
+        refused.append((n, last, torque, hands))
+        self._set_prev_torque(torque)   # carry on from what the car sent, to count every refusal
+      last = torque
+    return refused
+
+  def _elantra_limits(self):
+    from types import SimpleNamespace as NS
+    from opendbc.car.hyundai.values import CAR, CarControllerParams
+    return CarControllerParams(NS(carFingerprint=CAR.HYUNDAI_ELANTRA_HEV_2024, flags=0, safetyConfigs=[NS(safetyParam=0x8C0E)]))
+
+  def test_the_car_codes_steady_ramp_is_never_refused(self):
+    # 1337: the first steady ramp released at 7 a frame under the driver's hands; the panda wants the full 9 there,
+    # refused the frames, and the EPS faulted (second drive, 2026-11-18)
+    from opendbc.car.hyundai import steady_ramp
+    limits = self._elantra_limits()
+    self.assertEqual((limits.STEER_MAX, limits.STEER_DELTA_UP, limits.STEER_DELTA_DOWN), (400, 10, 9))
+    for seed in range(4):
+      for ramp in (steady_ramp.SteadyRamp(limits), steady_ramp.SteadyRamp(limits, hold_frames=0, grow_frames=1)):
+        self.assertEqual(self._steady_ramp_refusals(ramp, seed=seed), [])
+    slow = steady_ramp.SteadyRamp(limits)
+    slow.full_up = slow.base_up            # the switch file's "slow"
+    self.assertEqual(self._steady_ramp_refusals(slow, seed=9), [])
+
+  def test_releasing_slower_than_the_panda_under_the_drivers_hands_is_refused(self):
+    # the bug itself, so the test above is known to be able to see it
+    from opendbc.car.hyundai import steady_ramp
+    from opendbc.car.lateral import apply_driver_steer_torque_limits
+
+    class Released7(steady_ramp.SteadyRamp):
+      def apply(self, wanted, last, driver_torque):
+        torque = apply_driver_steer_torque_limits(wanted, last, driver_torque, self.limits())
+        self.update(torque)
+        return torque
+    self.assertGreater(len(self._steady_ramp_refusals(Released7(self._elantra_limits()))), 20)
+
   def test_hybrid_stock_refresh_length_and_acc_ownership(self):
     self.assertTrue(self._tx(common.make_msg(0, 0x485, 8)))
     self.assertFalse(self._tx(common.make_msg(0, 0x485, 4)))

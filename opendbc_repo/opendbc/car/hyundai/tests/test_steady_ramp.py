@@ -19,10 +19,10 @@ def drive(wanted, ramp=None, flat=None):
   """The torque sent for each asked torque; a ramp carries on from where its last call ended."""
   out, last = [], getattr(ramp, 'test_last', 0)
   for want in wanted:
-    last = apply_driver_steer_torque_limits(want, last, 0.0, ramp.limits() if ramp is not None else flat)
     if ramp is not None:
-      ramp.update(last)
-      ramp.test_last = last
+      last = ramp.test_last = ramp.apply(want, last, 0.0)
+    else:
+      last = apply_driver_steer_torque_limits(want, last, 0.0, flat)
     out.append(last)
   return out
 
@@ -91,12 +91,35 @@ def test_it_never_allows_more_than_it_was_given_and_passes_the_rest_through():
   import random
   rng, ramp, last = random.Random(3), SteadyRamp(limits()), 0
   for _ in range(4000):
-    tq = apply_driver_steer_torque_limits(rng.randint(-400, 400), last, 0.0, ramp.limits())
+    tq = ramp.apply(rng.randint(-400, 400), last, 0.0)
     step = tq - last
     rising = abs(tq) > abs(last) or tq * last < 0
     assert abs(step) <= (10 if rising else 9) + (9 if tq * last < 0 else 0) and abs(tq) <= 400
-    ramp.update(tq)
     last = tq
+
+
+def test_under_the_drivers_hands_the_release_is_the_full_step_whatever_the_ramp_is_doing():
+  # the panda refuses a frame that is above what the driver's hands allow and has not come down by the full release
+  # step (safety/tests/test_hyundai.py checks this against the panda itself). 2026-11-18: released at 7, refused, faults.
+  for sign in (1, -1):
+    ramp = SteadyRamp(limits())
+    last = 0
+    for _ in range(40):
+      last = ramp.apply(sign * 300, last, 0.0)
+    for _ in range(6):
+      last = ramp.apply(sign * 250, last, 0.0)             # a reversal: the ramp is now 3 / 7
+    assert ramp.steps() == (3, 7)
+    before = last
+    last = ramp.apply(sign * 300, last, -sign * 250.0)     # hands push hard the other way: nothing is allowed
+    assert last == before - sign * 9
+    last = ramp.apply(sign * 300, last, -sign * 250.0)
+    assert last == before - sign * 18
+    # hands allow some torque (400 + (50 - 200) * 2 = 100): down to it at the full step, never below it
+    for _ in range(30):
+      last = ramp.apply(sign * 300, last, -sign * 200.0)
+    assert last == sign * 100
+    # hands off again: back up on the gentle ramp, because the torque did reverse
+    assert ramp.apply(sign * 300, last, 0.0) == sign * 103
 
 
 def test_the_file_switches_the_ramp_and_bad_values_mean_the_default(tmp_path):
@@ -120,5 +143,4 @@ def test_the_file_switches_the_ramp_and_bad_values_mean_the_default(tmp_path):
 def test_only_the_elantra_hybrid_with_its_raised_limits_gets_it():
   src = (Path(__file__).resolve().parents[1] / 'carcontroller.py').read_text()
   assert 'self.steady_ramp = steady_ramp.from_file(self.params) if elantra_hev_2024_eps(CP) else None' in src
-  assert 'torque_limits = self.params if self.steady_ramp is None else self.steady_ramp.limits()' in src
-  assert 'apply_driver_steer_torque_limits(new_torque, self.apply_torque_last, CS.out.steeringTorque, torque_limits)' in src
+  assert 'apply_torque = self.steady_ramp.apply(new_torque, self.apply_torque_last, CS.out.steeringTorque)' in src
