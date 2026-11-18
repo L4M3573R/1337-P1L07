@@ -162,6 +162,42 @@ def costs_time(category: str, values: dict[str, float]) -> bool:
   return slower_than(category, values, start_values(category))
 
 
+def vetoed_values(category: str, context: str, vetoes: dict[str, int], limit: int) -> list[dict[str, float]]:
+  """The dial settings the driver pressed on during in this situation (slower-than-normal ones only)."""
+  prefix = f'{category}|{context}|'
+  out = []
+  for key, count in vetoes.items():
+    if count >= limit and key.startswith(prefix):
+      values = decode(category, key[len(prefix):])
+      if values is not None and costs_time(category, values):
+        out.append(values)
+  return out
+
+
+def blocked_by_veto(category: str, values: dict[str, float], vetoed: list[dict[str, float]]) -> bool:
+  """A veto is a bound, not one setting: what was too slow for the driver rules out every setting that is as slow or
+  slower on every dial (2026-11-17 review: with 1 mph under vetoed, 2 mph under was still drawn)."""
+  slow = [d for d in DIALS.get(category, ()) if d.slower]
+  return bool(slow) and any(all((values[d.key] - v[d.key]) * d.slower >= -1e-9 for d in slow) for v in vetoed)
+
+
+def step_back(category: str, center: dict[str, float], step: dict[str, float], vetoed: list[dict[str, float]]) -> dict[str, float]:
+  """The center, moved toward normal driving on every slower dial until no veto covers it."""
+  center = dict(center)
+  for _ in range(64):
+    if not blocked_by_veto(category, center, vetoed):
+      break
+    moved = False
+    for d in DIALS[category]:
+      if d.slower and (center[d.key] - d.start) * d.slower > 1e-9:
+        x = center[d.key] - d.slower * max(step.get(d.key, d.finest), d.finest)
+        center[d.key] = d.clamp(max(x, d.start) if d.slower > 0 else min(x, d.start))
+        moved = True
+    if not moved:
+      break
+  return center
+
+
 @dataclass(frozen=True)
 class Effect:
   target_offset_mps: float = 0.0      # under (negative) or over (positive, downhill) the set speed, ramped in

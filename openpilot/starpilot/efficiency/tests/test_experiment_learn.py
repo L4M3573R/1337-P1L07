@@ -182,14 +182,14 @@ def test_road_tests_count_from_the_judge_date_but_corrections_use_every_drive(tm
   old = tagged('uphill|30-45|hold', runs(rng, 20, 0.030)) + tagged('uphill|30-45|sag3', runs(rng, 20, 0.020))
   new = tagged('uphill|30-45|hold', runs(rng, 20, 0.030)) + tagged('uphill|30-45|sag3', runs(rng, 20, 0.031))
   (tmp_path / 'drives' / 'old.json').write_text(json.dumps({'drive': '20261114-120000-1', 'stretches': old}))
-  (tmp_path / 'drives' / 'new.json').write_text(json.dumps({'drive': '20261115-120000-2', 'stretches': new}))
+  (tmp_path / 'drives' / 'new.json').write_text(json.dumps({'drive': f'{el.JUDGE_FROM}-120000-2', 'stretches': new}))
   fitted = []
   monkeypatch.setattr(el, 'fit_corrections', lambda drives: fitted.append(len(drives)) or {'climb': 0.0, 'speed': 0.0})
   doc = el.update(tmp_path)
   assert fitted == [2]                                    # corrections: both drives
-  assert doc['results']['uphill|30-45']['measured']['sag3'] == round(20 * 400 / 1609.344, 2)   # judging: Nov 15 only
+  assert doc['results']['uphill|30-45']['measured']['sag3'] == round(20 * 400 / 1609.344, 2)   # judging: from JUDGE_FROM only
   assert doc['winners'].get('uphill|30-45') != 'sag3'     # the old, redefined runs do not make it win
-  assert len(el.load_drives(tmp_path, since='20261115')) == 1 and len(el.load_drives(tmp_path)) == 2
+  assert len(el.load_drives(tmp_path, since=el.JUDGE_FROM)) == 1 and len(el.load_drives(tmp_path)) == 2
 
 
 def test_a_variant_driven_with_the_heat_off_is_not_flattered():

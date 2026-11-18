@@ -25,7 +25,13 @@ from pathlib import Path
 
 MPH = 0.44704
 TIME_BUDGET_S_PER_H = 240.0    # at most 4 extra minutes per engaged hour, 2 per half hour (the driver, 2026-11-15)
-BUDGET_GRACE_S = 30.0          # what a drive may spend before its first engaged minutes have earned it
+BUDGET_GRACE_S = 30.0          # what the very first drive may spend before its engaged minutes have earned it
+# The budget is kept across drives (review 2026-11-17: counted per ignition with the grace never repaid, short drives
+# were allowed 13 min/hr): engaged and spent seconds carry over in <efficiency>/budget.json, scaled down to the last
+# BUDGET_WINDOW_S of engaged driving, so an overspend is paid back by the next drives.
+BUDGET_WINDOW_S = 2 * 3600.0
+BUDGET_FILE = 'budget.json'
+UPFRONT_COST = ('launch', 'accelerate')   # their whole cost is charged when the episode starts
 EXPLORE = 0.2                  # after learning, a non-winning variant is still tried this often
 EPISODE_M = 1000.0             # cruising and following episodes are redrawn every kilometre
 GRADE_ENTER = 0.025            # a hill episode starts past 2.5 % grade...
@@ -151,6 +157,32 @@ def write_status(doc: dict, path: Path = STATUS_PATH) -> None:
     pass
 
 
+def load_budget(path: Path | None) -> tuple[float, float] | None:
+  """(engaged s, spent s) carried in from earlier drives, scaled to the budget window; None without a valid file."""
+  try:
+    doc = json.loads(path.read_text()) if path is not None else None
+    engaged, spent = float(doc['engaged_s']), float(doc['spent_s'])
+    if not (math.isfinite(engaged) and math.isfinite(spent)) or engaged < 0 or spent < 0:
+      return None
+    scale = min(1.0, BUDGET_WINDOW_S / engaged) if engaged > 0 else 1.0
+    return engaged * scale, spent * scale
+  except (OSError, ValueError, TypeError, KeyError, AttributeError):
+    return None
+
+
+def read_budget_totals(now: float, path: Path = STATUS_PATH) -> tuple[float, float] | None:
+  """plannerd's running (engaged s, spent s) inside the budget window, for efficiencyd to keep on disk."""
+  try:
+    doc = json.loads(path.read_text())
+    if isinstance(doc, dict) and isinstance(doc.get('t'), (int, float)) and 0 <= now - doc['t'] <= STATUS_MAX_AGE_S:
+      engaged, spent = doc.get('total_engaged_s'), doc.get('total_spent_s')
+      if isinstance(engaged, (int, float)) and isinstance(spent, (int, float)):
+        return float(engaged), float(spent)
+  except (OSError, ValueError, TypeError):
+    pass
+  return None
+
+
 def read_tag(now: float, path: Path = STATUS_PATH) -> str | None:
   """The experiment tag in force, or None when plannerd's status is missing or stale (monotonic clock)."""
   try:
@@ -218,10 +250,14 @@ class Experimenter:
   vetoes: dict[str, int] = field(default_factory=dict)   # 'category|context|variant' -> driver gas presses (all drives)
   vetoed_episode: int = 0        # the episode a veto was already counted for
   pulse_glide_max_mps: float = PULSE_GLIDE_MAX_MPS   # Pulse and Glide is only tried below this
+  carry_engaged_s: float = 0.0   # engaged and spent seconds of earlier drives still inside the budget window
+  carry_spent_s: float = 0.0
+  grace_s: float = BUDGET_GRACE_S
 
   # ---------- budget ----------
   def budget_left_s(self) -> float:
-    return BUDGET_GRACE_S + TIME_BUDGET_S_PER_H * self.engaged_s / 3600.0 - self.spent_s
+    return (self.grace_s + TIME_BUDGET_S_PER_H * (self.carry_engaged_s + self.engaged_s) / 3600.0
+            - self.carry_spent_s - self.spent_s)
 
   # ---------- situations ----------
   def situation(self, f: Frame) -> tuple[str, str] | None:
@@ -347,7 +383,9 @@ class Experimenter:
       self.distance_m += max(f.v_ego, 0.0) * dt
     where = self.situation(f)
     ep = self.episode
-    if where is None or ep is None or (where[0], where[1]) != (ep.category, ep.context) or \
+    out_of_minutes = (ep is not None and ep.category not in UPFRONT_COST and self._is_slower(ep) and
+                      self.budget_left_s() <= 0)   # the budget ran out during a slower episode: it ends here
+    if where is None or ep is None or (where[0], where[1]) != (ep.category, ep.context) or out_of_minutes or \
        (ep.category in ('follow', 'pulse_glide', 'cruise', 'hold', 'ev') and self.distance_m - ep.start_m >= EPISODE_M):
       if ep is not None and ep.category in ('pulse_glide', 'cruise', 'hold', 'ev'):
         self.cruise_turn += 1
@@ -424,7 +462,9 @@ class Experimenter:
     ep = self.episode
     return {'tag': ep.tag() if ep is not None else None, 'episode': ep.number if ep is not None else 0,
             'spent_s': round(self.spent_s, 1), 'budget_left_s': round(self.budget_left_s(), 1),
-            'engaged_min': round(self.engaged_s / 60.0, 1)}
+            'engaged_min': round(self.engaged_s / 60.0, 1),
+            'total_engaged_s': round(self.carry_engaged_s + self.engaged_s, 1),
+            'total_spent_s': round(self.carry_spent_s + self.spent_s, 1)}
 
 
 @dataclass
@@ -440,17 +480,19 @@ class DialExperimenter(Experimenter):
     return self.state.get(f'{category}|{context}') or new_situation(category)
 
   def draw(self, category: str, context: str) -> str:
-    from openpilot.starpilot.efficiency.dials import EXPLOIT, costs_time, decode, encode, slower_than, start_values
+    from openpilot.starpilot.efficiency.dials import (EXPLOIT, Situation, blocked_by_veto, costs_time, decode, encode,
+                                                      slower_than, start_values, step_back, vetoed_values)
     key = f'{category}|{context}'
     sit = self.situation_state(category, context)
     budget_ok = self.budget_left_s() > 0
-    center = encode(category, sit.center)
-    center_ok = (budget_ok or not costs_time(category, sit.center)) and self.vetoes.get(f'{key}|{center}', 0) < VETO_LIMIT
-    if not center_ok:
-      center = encode(category, start_values(category))   # out of minutes (or vetoed here): normal driving
-    probes = [v for v, _, _ in sit.probes(category)
-              if self.vetoes.get(f'{key}|{v}', 0) < VETO_LIMIT and
-              (budget_ok or not slower_than(category, decode(category, v), decode(category, center)))]
+    vetoed = vetoed_values(category, context, self.vetoes, VETO_LIMIT)
+    values = step_back(category, sit.center, sit.step, vetoed)   # never a setting a veto covers, judged yet or not
+    if not budget_ok and costs_time(category, values):
+      values = start_values(category)   # out of minutes: normal driving
+    center = encode(category, values)
+    probes = [v for v, _, _ in Situation(values, sit.step).probes(category)
+              if not blocked_by_veto(category, decode(category, v), vetoed) and
+              (budget_ok or not slower_than(category, decode(category, v), values))]
     if probes and self.rng.random() >= EXPLOIT:
       fewest = min(self.tried.get(f'{key}|{v}', 0) for v in probes)
       return self.rng.choice([v for v in probes if self.tried.get(f'{key}|{v}', 0) == fewest])
@@ -465,17 +507,16 @@ class DialExperimenter(Experimenter):
     """One gas press during a slower dial setting means it was too slow there (the driver, 2026-11-17): never offer
     it again, and if it was the center, step every slower dial one notch faster for the rest of the drive (the
     end-of-drive judge does the same from the saved center, so the next drive starts there too)."""
-    from openpilot.starpilot.efficiency.dials import DIALS, Situation, decode, encode
+    from openpilot.starpilot.efficiency.dials import Situation, decode, step_back, vetoed_values
     self.vetoes[ep.tag()] = max(self.vetoes.get(ep.tag(), 0), VETO_LIMIT)
     key = f'{ep.category}|{ep.context}'
     sit = self.situation_state(ep.category, ep.context)
-    if decode(ep.category, ep.variant) is None or ep.variant != encode(ep.category, sit.center):
+    if decode(ep.category, ep.variant) is None:
       return
-    center = dict(sit.center)
-    for d in DIALS[ep.category]:
-      if d.slower and (center[d.key] - d.start) * d.slower > 1e-9:
-        center[d.key] = d.clamp(center[d.key] - d.slower * sit.step[d.key])
-    self.state[key] = Situation(center, dict(sit.step), sit.cost_min_per_100mi, sit.moves)
+    # the veto is a bound: the center moves toward normal until it is faster than what was just refused
+    center = step_back(ep.category, sit.center, sit.step, vetoed_values(ep.category, ep.context, self.vetoes, VETO_LIMIT))
+    if center != sit.center:
+      self.state[key] = Situation(center, dict(sit.step), sit.cost_min_per_100mi, sit.moves)
 
   def _started(self, ep: Episode, f: Frame) -> None:
     from openpilot.starpilot.efficiency.dials import decode, episode_time_s

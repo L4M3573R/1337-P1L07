@@ -32,8 +32,7 @@ class Clock:
 
 
 def host(tmp_path, mode='on', winners=None):
-  if mode != 'on':
-    (tmp_path / 'experiment.json').write_text(json.dumps({'mode': mode}))
+  (tmp_path / 'experiment.json').write_text(json.dumps({'mode': mode}))   # no file means off
   if winners:
     (tmp_path / 'experiments.json').write_text(json.dumps({'winners': winners}))
   return ExperimentHost(root=tmp_path, status_path=tmp_path / 'status.json', clock=Clock())
@@ -106,3 +105,29 @@ def test_stop_distance_is_the_nearer_of_force_stop_and_a_stopped_car():
   assert stop_distance(25.0, stopped) == 25.0 and stop_distance(80.0, stopped) == 40.0 - ex.STOP_GAP_M
   assert stop_distance(None, moving) is None and stop_distance(None, none) is None and stop_distance(60.0, moving) == 60.0
   assert stop_distance(0.0, none) is None and stop_distance(float('nan'), none) is None
+
+
+def test_no_config_file_means_off(tmp_path):
+  # it used to mean on, with the fixed presets (3 and 4 mph under) driving
+  h = ExperimentHost(root=tmp_path, status_path=tmp_path / 'status.json', clock=Clock())
+  assert h.sample(sm(), NS(owner=Owner()), drive=1, force_stop_forcing=False) is None
+  (tmp_path / 'experiment.json').write_text('{"mode": "o')   # cut off
+  assert h.sample(sm(), NS(owner=Owner()), drive=2, force_stop_forcing=False) is None
+
+
+def test_the_budget_and_the_judges_result_reach_a_running_drive(tmp_path):
+  from openpilot.starpilot.efficiency import dials as dl
+  (tmp_path / 'experiment.json').write_text(json.dumps({'mode': 'on', 'engine': 'dials'}))
+  (tmp_path / ex.BUDGET_FILE).write_text(json.dumps({'engaged_s': 3600.0, 'spent_s': 300.0}))
+  h = ExperimentHost(root=tmp_path, status_path=tmp_path / 'status.json', clock=Clock())
+  h.sample(sm(), NS(owner=Owner()), drive=1, force_stop_forcing=False)
+  assert h.exp.carry_engaged_s == 3600.0 and h.exp.carry_spent_s == 300.0 and h.exp.grace_s == 0.0
+  assert h.exp.state == {} and h.pitch_zero == 0.0
+  status = json.loads((tmp_path / 'status.json').read_text())
+  assert status['total_spent_s'] >= 300.0 and ex.read_budget_totals(h.clock.t, tmp_path / 'status.json') is not None
+  # the judge (started beside efficiencyd as the drive begins) lands a new file a few seconds in
+  state = {'cruise|45-60': dl.Situation({'u': 1.0}, {'u': 0.5})}
+  (tmp_path / 'experiments.json').write_text(json.dumps({'dials': dl.state_doc(state), 'corrections': {'pitch_zero': 0.016}}))
+  for _ in range(150):   # 7.5 s: past the reload check
+    h.sample(sm(), NS(owner=Owner()), drive=1, force_stop_forcing=False)
+  assert h.exp.state['cruise|45-60'].center == {'u': 1.0} and h.pitch_zero == 0.016

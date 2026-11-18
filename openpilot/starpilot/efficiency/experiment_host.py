@@ -12,12 +12,14 @@ import math
 import time
 from pathlib import Path
 
-from openpilot.starpilot.efficiency.experiment import (STATUS_PATH, STOP_GAP_M, DialExperimenter, Experimenter, Frame, Plan,
-                                                       load_vetoes, load_winners, save_vetoes, write_status)
+from openpilot.starpilot.efficiency.experiment import (BUDGET_FILE, STATUS_PATH, STOP_GAP_M, DialExperimenter, Experimenter,
+                                                       Frame, Plan, load_budget, load_vetoes, load_winners, save_vetoes,
+                                                       write_status)
 
 KPH_TO_MS = 1 / 3.6
 SOC_READ_S = 1.0
 STATUS_WRITE_S = 0.5
+RELOAD_CHECK_S = 5.0   # efficiencyd judges the stored drives as the drive starts: pick its result up when it lands
 DRIVER_PULSE_GLIDE = 'driver toggled pulse and glide'
 
 
@@ -30,8 +32,17 @@ def mode(root: Path) -> str:
   try:
     value = json.loads((root / 'experiment.json').read_text()).get('mode')
   except (OSError, ValueError, TypeError, AttributeError):
-    return 'on'
-  return value if value in ('on', 'off') else 'on'
+    return 'off'   # no (readable) config: nothing drives. It used to mean on, with the fixed presets (3-4 mph under)
+  return value if value in ('on', 'off') else 'off'
+
+
+def pitch_zero(root: Path) -> float:
+  """The constant nose-up reading of the pitch signal, as the judge last measured it (experiments.json)."""
+  try:
+    zero = json.loads((root / 'experiments.json').read_text())['corrections']['pitch_zero']
+    return float(zero) if isinstance(zero, (int, float)) and abs(zero) < 0.1 else 0.0
+  except (OSError, ValueError, TypeError, KeyError, AttributeError):
+    return 0.0
 
 
 def stop_distance(force_stop_m: float | None, lead) -> float | None:
@@ -75,12 +86,42 @@ class ExperimentHost:
     else:
       self.exp = Experimenter(winners=load_winners(root / 'experiments.json'), vetoes=vetoes)
       self.shadow = DialExperimenter(vetoes=dict(vetoes), state=dials) if which == 'shadow' else None
+    carried = load_budget(root / BUDGET_FILE)
+    for exp in (self.exp, self.shadow):
+      if exp is not None and carried is not None:
+        exp.carry_engaged_s, exp.carry_spent_s = carried
+        exp.grace_s = 0.0   # only the very first drive has nothing earned yet
+    self.pitch_zero = pitch_zero(root)
+    self.state_mtime = self._state_mtime()
+    self.next_reload = 0.0
     self.shadow_tag: str | None = None
     self.saved_vetoes = dict(self.exp.vetoes)
     self.driver_pulse_glide = False
     self.we_turned_pulse_glide_on = False
     from openpilot.starpilot.diagnostics.features import ChangeLog
     self.log = ChangeLog('efficiency_experiment', min_gap_s=1.0)
+
+  def _state_mtime(self) -> float | None:
+    try:
+      return (self.root_now / 'experiments.json').stat().st_mtime
+    except OSError:
+      return None
+
+  def _reload(self, now: float) -> None:
+    """The judge wrote a new experiments.json (it runs as the drive starts): take its dial centers and pitch zero."""
+    if now < self.next_reload:
+      return
+    self.next_reload = now + RELOAD_CHECK_S
+    mtime = self._state_mtime()
+    if mtime == self.state_mtime:
+      return
+    self.state_mtime = mtime
+    from openpilot.starpilot.efficiency.dials import load_state
+    state = load_state(self.root_now / 'experiments.json')
+    for exp in (self.exp, self.shadow):
+      if isinstance(exp, DialExperimenter):
+        exp.state = dict(state)
+    self.pitch_zero = pitch_zero(self.root_now)
 
   def _read_soc(self, now: float) -> None:
     if now < self.next_soc:
@@ -102,6 +143,7 @@ class ExperimentHost:
       if not self.enabled:
         return None
       now = self.clock()
+      self._reload(now)
       self._read_soc(now)
       owner = getattr(wheel_coast, 'owner', None)
       if owner is not None and getattr(owner, 'change_reason', '') == DRIVER_PULSE_GLIDE:
@@ -111,7 +153,7 @@ class ExperimentHost:
       v_ego = float(cs.vEgo)
       gap = float(lead.dRel) / max(v_ego, 1.0) if lead.present else math.inf
       pitch = cc.orientationNED[1] if len(cc.orientationNED) == 3 else None
-      grade = math.tan(pitch) if pitch is not None and math.isfinite(pitch) else None
+      grade = math.tan(pitch - self.pitch_zero) if pitch is not None and math.isfinite(pitch) else None
       stop_ahead = bool(force_stop_forcing or sm['modelV2'].action.shouldStop or sm['controlsState'].forceDecel or
                         (lead.present and lead.vLead < 1.0 and lead.dRel < 60.0))
       frame = Frame(now, v_ego, float(cs.vCruise) * KPH_TO_MS, bool(cc.longActive and cc.enabled), bool(cs.gasPressed),

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from openpilot.starpilot.diagnostics.features import EVENT, ChangeLog, log_error
 from openpilot.starpilot.efficiency import store, tank as tank_store
-from openpilot.starpilot.efficiency.experiment import read_tag
+from openpilot.starpilot.efficiency.experiment import BUDGET_FILE, read_budget_totals, read_tag
 from openpilot.starpilot.efficiency.car_signals import CABIN_ADDR, CLIMATE_ADDR, MDPS11_ADDR, MODE_ADDR, CarSignals
 from openpilot.starpilot.efficiency.hybrid import Cluster, PowerFlow, scan
 from openpilot.starpilot.efficiency.ledger import Ledger, make_sample
@@ -172,6 +172,33 @@ def pulse_glide_phase(sm) -> str | None:
   return str(plan.pulseGlidePhase) if plan.pulseGlideEnabled else None
 
 
+BUDGET_SAVE_S = 30.0
+
+
+def start_judge(root):
+  """Judge the stored drives now, in a child at the lowest priority on the little cores. It used to run when this
+  process stopped, which a normal drive never reaches (the car turns off and the comma loses power), so the dials
+  only moved when an install forced the comma offroad (review 2026-11-17). plannerd picks the result up when it lands."""
+  try:
+    import subprocess
+    import sys
+    return subprocess.Popen([sys.executable, '-m', 'openpilot.starpilot.efficiency.experiment_learn', str(root)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+  except Exception as e:
+    log_error('efficiency', e, where='starting the judge')
+    return None
+
+
+def save_budget(root, totals) -> None:
+  """plannerd's running time-budget totals, kept on disk every BUDGET_SAVE_S so the next drive carries them on."""
+  if totals is None:
+    return
+  try:
+    store._atomic_write(root / BUDGET_FILE, {'engaged_s': totals[0], 'spent_s': totals[1]})
+  except OSError as e:
+    log_error('efficiency', e, where='saving the time budget')
+
+
 def main() -> None:
   import openpilot.cereal.messaging as messaging
   from opendbc.car.structs import car
@@ -185,6 +212,8 @@ def main() -> None:
   can_sock = messaging.sub_sock('can', conflate=False)
   from openpilot.common.swaglog import cloudlog
   recorder = Recorder(float(cp.mass), None)
+  judge = start_judge(store.default_root())
+  last_budget_save = 0.0
   last_obd_read = 0.0
   sources_log = ChangeLog('efficiency_sources', min_gap_s=5.0)
   started = time.monotonic()
@@ -211,6 +240,9 @@ def main() -> None:
         except Exception as e:
           log_error('efficiency', e, where='BlueDriver live file')
         recorder.experiment = read_tag(now)
+        if now - last_budget_save >= BUDGET_SAVE_S:
+          last_budget_save = now
+          save_budget(store.default_root(), read_budget_totals(now))
         sources_log.observe(recorder.sources(), {'ledger_stretches': len(recorder.ledger.stretches)}, now=now)
       if not announced and now - started >= ANNOUNCE_AFTER_S:
         announced = True
@@ -218,12 +250,8 @@ def main() -> None:
       recorder.maybe_checkpoint(now)
   finally:
     recorder.finish()
-    try:
-      # judge the fuel experiments with this drive included; the planner reads the winners next drive
-      from openpilot.starpilot.efficiency import experiment_learn
-      experiment_learn.update(recorder.root if recorder.root is not None else store.default_root())
-    except Exception as e:
-      log_error('efficiency', e, where='experiment learning')
+    if judge is not None and judge.poll() is None:
+      judge.terminate()
     try:
       cloudlog.event(EVENT, feature='efficiency', what='stopped', drive=recorder.drive_id,
                      stretches=len(recorder.ledger.stretches), minutes=round((time.monotonic() - started) / 60, 1),

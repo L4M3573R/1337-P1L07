@@ -138,11 +138,14 @@ def test_a_dial_episode_shapes_the_plan_and_tags_the_ledger():
 
 
 # ---------- the judge ----------
-def _data(rng, center, probes, *, category='cruise', context='60+', n=20, base=0.040, spm=55.0):
-  drive = tagged(f'{category}|{context}|{center}', runs(rng, n, base, seconds_per_mile=spm))
-  for variant, (gal, sec) in probes.items():
-    drive += tagged(f'{category}|{context}|{variant}', runs(rng, n, gal, seconds_per_mile=sec))
-  return el.samples([drive])
+def _data(rng, center, probes, *, category='cruise', context='60+', n=30, base=0.040, spm=55.0, drives=5):
+  out = []   # a dial only moves on several drives' evidence (DIAL_MIN_DRIVES)
+  for _ in range(drives):
+    drive = tagged(f'{category}|{context}|{center}', runs(rng, n // drives, base, seconds_per_mile=spm))
+    for variant, (gal, sec) in probes.items():
+      drive += tagged(f'{category}|{context}|{variant}', runs(rng, n // drives, gal, seconds_per_mile=sec))
+    out.append(drive)
+  return el.samples(out)
 
 
 def test_a_probe_that_saves_fuel_becomes_the_new_center():
@@ -227,8 +230,8 @@ def test_with_pulse_and_glide_off_only_its_band_is_probed():
 
 
 def test_a_saving_below_the_fuel_per_minute_floor_is_not_worth_the_time():
-  # 2 mph under saves 4 % but costs 6 min/100 mi: 0.016 gal/100 mi over 6 min/100 mi is far under 0.02 gal per minute
-  data = _data(random.Random(14), 'u0.00', {'u1.00': (0.0384, 61.0)})
+  # 1 mph under saves 4 % (0.16 gal/100 mi) but costs 15 min/100 mi: about 0.011 gal per minute, under the 0.02 floor
+  data = _data(random.Random(14), 'u0.00', {'u1.00': (0.0384, 64.0)})
   state, report = el.judge_dials(data, {}, {}, situation_miles_per_hour={'cruise|60+': 40.0})
   assert state['cruise|60+'].center == {'u': 0.0}
   assert 'not worth the time' in report['cruise|60+']['probes']['u1.00']
@@ -240,3 +243,83 @@ def test_with_two_winners_the_better_fuel_per_minute_is_taken():
                category='hold')
   state, report = el.judge_dials(data, {}, {}, situation_miles_per_hour={'hold|60+': 40.0})
   assert state['hold|60+'].center == {'d': 0.0, 'k': 0.75} and 'no extra time' in report['hold|60+']['status']
+
+
+# ---------- review 2026-11-17: a veto is a bound, the budget carries over, the evidence spans drives ----------
+def test_a_veto_rules_out_everything_as_slow_or_slower_not_just_that_setting():
+  vetoes = {'cruise|60+|u1.00': el.VETO_LIMIT, 'hold|60+|d1.00k1.00': el.VETO_LIMIT}
+  exp = DialExperimenter(rng=random.Random(1), vetoes=dict(vetoes),
+                         state={'cruise|60+': dl.Situation({'u': 1.0}, {'u': 1.0}),      # the judge has not run yet
+                                'hold|60+': dl.Situation({'d': 1.0, 'k': 1.0}, {'d': 1.0, 'k': 0.25})})
+  cruise = {exp.draw('cruise', '60+') for _ in range(500)}
+  assert cruise == {'u0.00'}                 # 1 mph under was too slow: never 1, never 2 (487 of 2000 draws before)
+  hold = {exp.draw('hold', '60+') for _ in range(500)}
+  assert all(dl.decode('hold', v)['d'] < 1.0 for v in hold)   # d1.00k0.75 was still drawn before
+  # an acceleration strength: with 0.85 refused, 0.83 is weaker still and is not tried
+  assert dl.blocked_by_veto('launch', {'a': 0.83}, [{'a': 0.85}]) and not dl.blocked_by_veto('launch', {'a': 0.90}, [{'a': 0.85}])
+  # a dial that is neither slower nor faster (downhill carry) is never vetoed
+  assert not dl.blocked_by_veto('downhill', {'c': 3.0}, [{'c': 1.5}])
+
+
+def test_the_judge_never_moves_back_to_a_setting_the_driver_refused():
+  data = _data(random.Random(10), 'u0.00', {'u1.00': (0.036, 55.6)})   # 1 mph under clearly saves fuel
+  vetoes = {'cruise|60+|u1.00': el.VETO_LIMIT}
+  state, report = el.judge_dials(data, {'cruise|60+': dl.Situation({'u': 1.0}, {'u': 1.0})}, vetoes,
+                                 situation_miles_per_hour={'cruise|60+': 40.0})
+  assert state['cruise|60+'].center == {'u': 0.0}                        # stepped back
+  state, report = el.judge_dials(data, state, vetoes, situation_miles_per_hour={'cruise|60+': 40.0})
+  assert state['cruise|60+'].center == {'u': 0.0}                        # and not promoted again from the same data
+  assert report['cruise|60+']['probes']['u1.00'] == 'vetoed by the driver'
+
+
+def test_a_dial_needs_evidence_from_several_drives():
+  one_drive = _data(random.Random(10), 'u0.00', {'u1.00': (0.036, 55.6)}, drives=1)
+  state, report = el.judge_dials(one_drive, {}, {}, situation_miles_per_hour={'cruise|60+': 40.0})
+  assert state['cruise|60+'].center == {'u': 0.0} and report['cruise|60+']['probes']['u1.00'] == 'collecting'
+
+
+def test_the_time_budget_carries_over_from_earlier_drives():
+  from openpilot.starpilot.efficiency import experiment as ex
+  # an hour engaged with 5 minutes spent: 60 s over the 4 min/hr, so the next drive starts with nothing to spend
+  exp = DialExperimenter(rng=random.Random(2), carry_engaged_s=3600.0, carry_spent_s=300.0, grace_s=0.0,
+                         state={'cruise|60+': dl.Situation({'u': 1.0}, {'u': 0.5})})
+  assert exp.budget_left_s() == pytest.approx(-60.0)
+  assert {exp.draw('cruise', '60+') for _ in range(200)} == {'u0.00'}    # normal driving until it is earned back
+  exp.engaged_s = 900.0                                                   # 15 engaged minutes earn 60 s
+  assert exp.budget_left_s() == pytest.approx(0.0)
+  # the file: totals scaled to the last two engaged hours
+  assert ex.load_budget(None) is None
+
+
+def test_the_budget_file_keeps_the_last_two_engaged_hours(tmp_path):
+  import json
+  from openpilot.starpilot.efficiency import experiment as ex
+  path = tmp_path / ex.BUDGET_FILE
+  path.write_text(json.dumps({'engaged_s': 14400.0, 'spent_s': 1200.0}))
+  assert ex.load_budget(path) == pytest.approx((7200.0, 600.0))
+  path.write_text('{"engaged_s": 600')                                    # cut off by a power loss
+  assert ex.load_budget(path) is None
+
+
+def test_a_slower_episode_ends_when_the_budget_runs_out():
+  # 2 mph under at 27 mph costs 8 % of the time, more than the 6.7 % an engaged second earns: the budget drains
+  from openpilot.starpilot.efficiency.experiment import band
+  key = f'cruise|{band(12.0)}'
+  exp = DialExperimenter(rng=random.Random(6), state={key: dl.Situation({'u': 2.0}, {'u': 1.0})}, grace_s=1.0)
+  exp.rng.random = lambda: 0.0   # the center
+  exp.cruise_turn = 1
+  tags = [exp.sample(Frame(t * 0.05, 12.0, 12.0, True)).tag for t in range(6000)]   # 300 s
+  assert tags[20] == f'{key}|u2.00'
+  assert f'{key}|u0.00' in tags                  # it used to run to the end of its kilometre, budget or not
+  assert exp.budget_left_s() > -2.0              # never more than a moment over
+
+
+def test_the_pitch_zero_takes_the_constant_nose_up_reading_out_of_the_hills():
+  # every stretch reads +0.016 rad (0.93 deg): no real climb over a round trip
+  flat = [{'pitch': 0.016, 'm': 400.0, 'obd_gal': 0.01, 'soc_d': 0.0} for _ in range(200)]   # ~50 miles
+  assert el.pitch_zero([flat]) == pytest.approx(0.016)
+  assert el.pitch_zero([flat[:50]]) == 0.0                                 # too little driving to say
+  corrections = el.fit_corrections([flat])
+  assert corrections['pitch_zero'] == pytest.approx(0.016)
+  assert el.climb_m(flat[0], corrections['pitch_zero']) == pytest.approx(0.0, abs=1e-6)
+  assert el.corrected_gal(flat[0], corrections) == pytest.approx(0.01)     # nothing taken off for a climb that is not there

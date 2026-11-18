@@ -36,8 +36,8 @@ from typing import NamedTuple
 
 import numpy as np
 
-from openpilot.starpilot.efficiency.dials import (DIALS, Situation, decode, encode, is_dial_variant, load_state, new_situation,
-                                                  state_doc)
+from openpilot.starpilot.efficiency.dials import (DIALS, Situation, blocked_by_veto, decode, encode, is_dial_variant,
+                                                  load_state, new_situation, state_doc, step_back, vetoed_values)
 from openpilot.starpilot.efficiency.experiment import CATEGORIES, TIME_BUDGET_S_PER_H, VETO_LIMIT, load_vetoes
 from openpilot.starpilot.efficiency.ledger import BATTERY_KWH, GAL_PER_BATTERY_KWH
 
@@ -56,8 +56,20 @@ MIN_FIT_STRETCHES = 300
 SEASON_BANDS = ((10.0, 'cold'), (22.0, 'mild'), (math.inf, 'warm'))   # outside temperature, C: upper bound, name
 STRATUM_MIN_MILES = 0.5   # a curve class counts only when every variant drove at least this much of it
 STRATUM_MIN_EPISODES = 2
-JUDGE_FROM = '20261115'  # road tests count from this drive date: the first with every current variant and rule
+JUDGE_FROM = '20261118'  # road tests count from this drive date: the first with the zeroed pitch, veto bounds and carried budget
 MIN_GAL_PER_MINUTE = 0.02  # a minute must save at least this much fuel (~6-7 cents at $3.20/gal, ~$4 per hour of time)
+# A dial only moves on evidence from several drives, resampled drive by drive at a higher bar: stretches of one drive
+# share its wind, traffic and warm-up, and resampling them one by one called identical driving a win 21 % of the time
+# (review 2026-11-17), 44 % counting every look. With these three (measured on the same 45 miles of real stretches,
+# random labels): 5 % at the last look, 7 % at any.
+DIAL_MIN_DRIVES = 5
+DIAL_CONFIDENCE = 0.95
+DIAL_MIN_MILES = 6.0
+DIAL_MIN_EPISODES = 16
+# The pitch signal reads nose-up all the time (0.93 deg over the first week: every round trip "climbed"), so a third
+# of the driving counted as uphill and the climb correction took 46 % of the fuel. Its long-run mean is the zero.
+PITCH_ZERO_MIN_MILES = 30.0
+PITCH_ZERO_MAX = 0.05
 
 
 class Run(NamedTuple):
@@ -67,6 +79,7 @@ class Run(NamedTuple):
   curve: str = 'straight'
   season: str | None = None
   climate: str | None = None
+  drive: int = -1   # which stored drive it came from
 
 
 def season_of(ambient_c) -> str | None:
@@ -89,9 +102,23 @@ def _curve(stretch: dict) -> str:
   return str(ctx[2]) if isinstance(ctx, (list, tuple)) and len(ctx) > 2 else 'straight'
 
 
-def climb_m(stretch: dict) -> float:
+def pitch_zero(drives: list[list[dict]]) -> float:
+  """The pitch signal's constant offset (rad): its distance-weighted mean over all driving, which real hills cancel
+  out of on roads driven both ways. 0 until there is enough driving."""
+  total = metres = 0.0
+  for stretches in drives:
+    for s in stretches:
+      pitch, m = (s.get('pitch'), s.get('m') or 0.0) if isinstance(s, dict) else (None, 0.0)
+      if isinstance(pitch, (int, float)) and math.isfinite(pitch) and m > 0:
+        total, metres = total + pitch * m, metres + m
+  if metres / METERS_PER_MILE < PITCH_ZERO_MIN_MILES:
+    return 0.0
+  return min(max(total / metres, -PITCH_ZERO_MAX), PITCH_ZERO_MAX)
+
+
+def climb_m(stretch: dict, zero: float = 0.0) -> float:
   pitch, metres = stretch.get('pitch'), stretch.get('m') or 0.0
-  return metres * math.sin(pitch) if isinstance(pitch, (int, float)) and math.isfinite(pitch) else 0.0
+  return metres * math.sin(pitch - zero) if isinstance(pitch, (int, float)) and math.isfinite(pitch) else 0.0
 
 
 def speed_change(stretch: dict) -> float:
@@ -102,9 +129,11 @@ def speed_change(stretch: dict) -> float:
 def fit_corrections(drives: list[list[dict]]) -> dict:
   """Fuel per metre climbed and per unit of speed gained, fitted on every stored stretch with measured fuel (least
   squares, fuel = a * metres + b * climb + c * speed change); physics defaults when too few or not physical."""
-  rows = [(s.get('m') or 0.0, climb_m(s), speed_change(s), g) for d in drives for s in d
+  zero = pitch_zero(drives)
+  rows = [(s.get('m') or 0.0, climb_m(s, zero), speed_change(s), g) for d in drives for s in d
           if (g := adjusted_gal(s)) is not None and (s.get('m') or 0.0) > 50.0]
-  out = {'climb': DEFAULT_CLIMB, 'speed': DEFAULT_SPEED, 'source': 'physics', 'stretches': len(rows)}
+  out = {'climb': DEFAULT_CLIMB, 'speed': DEFAULT_SPEED, 'source': 'physics', 'stretches': len(rows),
+         'pitch_zero': round(zero, 5)}
   with_speed = [r for r in rows if r[2] != 0.0]
   if len(rows) < MIN_FIT_STRETCHES:
     return out
@@ -127,7 +156,8 @@ def corrected_gal(stretch: dict, corrections: dict) -> float | None:
   gal = adjusted_gal(stretch)
   if gal is None:
     return None
-  return gal - corrections['climb'] * climb_m(stretch) - corrections['speed'] * speed_change(stretch)
+  return (gal - corrections['climb'] * climb_m(stretch, corrections.get('pitch_zero', 0.0))
+          - corrections['speed'] * speed_change(stretch))
 
 
 def adjusted_gal(stretch: dict) -> float | None:
@@ -145,7 +175,7 @@ def samples(drives: list[list[dict]], corrections: dict | None = None,
   climb and speed change, metres, seconds, curve class and season. With season, runs of other bands are left out."""
   corrections = corrections or {'climb': 0.0, 'speed': 0.0}
   out: dict[tuple[str, str, str], list[Run]] = {}
-  for stretches in drives:
+  for drive, stretches in enumerate(drives):
     prev_tag = None
     for i, s in enumerate(stretches):
       tag = s.get('exp')
@@ -173,12 +203,12 @@ def samples(drives: list[list[dict]], corrections: dict | None = None,
             break
         if gal is not None and metres >= WINDOW_M[category]:
           out.setdefault((category, context, variant), []).append(
-            Run(gal, metres, seconds, _curve(s), run_season, s.get('climate')))
+            Run(gal, metres, seconds, _curve(s), run_season, s.get('climate'), drive))
       else:
         g, m = corrected_gal(s, corrections), s.get('m') or 0.0
         if g is not None and m > 0:
           out.setdefault((category, context, variant), []).append(
-            Run(g, m, s.get('dur') or 0.0, _curve(s), run_season, s.get('climate')))
+            Run(g, m, s.get('dur') or 0.0, _curve(s), run_season, s.get('climate'), drive))
   return out
 
 
@@ -342,17 +372,33 @@ def _spend_budget(results: dict, options: dict, miles_per_hour: dict[str, float]
   results['_budget'] = {'budget_min_per_hr': round(budget, 2), 'left_min_per_hr': round(left, 2)}
 
 
+def _drive_of(r) -> int:
+  return r[6] if len(r) > 6 else -1
+
+
+def _resample_drives(rows: list, rng: random.Random) -> list:
+  """Whole drives drawn with replacement: a drive's stretches share its conditions and are not separate evidence."""
+  by_drive: dict[int, list] = {}
+  for r in rows:
+    by_drive.setdefault(_drive_of(r), []).append(r)
+  drives = list(by_drive.values())
+  return [r for _ in drives for r in rng.choice(drives)]
+
+
 def _pair(category: str, center_rows: list, probe_rows: list, rng: random.Random):
   """(center gal, center min, probe gal, probe min per 100 mi, confidence the probe uses less) on the roads both drove,
-  or None while either side is short."""
-  if not enough(category, center_rows) or not enough(category, probe_rows):
-    return None
+  or None while either side is short (too little driving, or from fewer than DIAL_MIN_DRIVES drives)."""
+  for rows in (center_rows, probe_rows):
+    short = (len(rows) < DIAL_MIN_EPISODES if category in WINDOW_M else
+             sum(r[1] for r in rows) / METERS_PER_MILE < DIAL_MIN_MILES)
+    if short or len({_drive_of(r) for r in rows}) < DIAL_MIN_DRIVES:
+      return None
   rows = {'center': center_rows, 'probe': probe_rows}
   strata = _common_strata(category, rows)
   if not strata:
     return None
   (cg, cm), (pg, pm) = _rates(center_rows, strata), _rates(probe_rows, strata)
-  wins = sum(_rates(_resample(probe_rows, rng), strata)[0] < _rates(_resample(center_rows, rng), strata)[0]
+  wins = sum(_rates(_resample_drives(probe_rows, rng), strata)[0] < _rates(_resample_drives(center_rows, rng), strata)[0]
              for _ in range(RESAMPLES))
   return cg, cm, pg, pm, wins / RESAMPLES
 
@@ -376,16 +422,19 @@ def judge_dials(data: dict, state: dict[str, Situation], vetoes: dict[str, int],
     center = encode(category, sit.center)
     center_rows = data.get((category, context, center), [])
     entry = report[key] = {'center': center, 'step': dict(sit.step), 'probes': {}}
-    if vetoes.get(f'{key}|{center}', 0) >= VETO_LIMIT:
-      # the driver kept pressing on at this setting: back one step toward normal on every slower dial
-      for d in DIALS[category]:
-        if d.slower and (sit.center[d.key] - d.start) * d.slower > 1e-9:
-          sit.center[d.key] = d.clamp(sit.center[d.key] - d.slower * sit.step[d.key])
+    vetoed = vetoed_values(category, context, vetoes, VETO_LIMIT)
+    if blocked_by_veto(category, sit.center, vetoed):
+      # the driver pressed on at this setting or a faster one: back toward normal until it is under that bound
+      sit.center = step_back(category, sit.center, sit.step, vetoed)
       entry['status'] = 'vetoed by the driver: stepped back toward normal'
       continue
     lost: dict[str, set] = {}
     best = None
     for variant, dial, direction in sit.probes(category):
+      if blocked_by_veto(category, decode(category, variant), vetoed):
+        entry['probes'][variant] = 'vetoed by the driver'   # as slow as, or slower than, a setting the driver refused
+        lost.setdefault(dial, set()).add(direction)
+        continue
       result = _pair(category, center_rows, data.get((category, context, variant), []), rng)
       if result is None:
         entry['probes'][variant] = 'collecting'
@@ -396,13 +445,13 @@ def judge_dials(data: dict, state: dict[str, Situation], vetoes: dict[str, int],
       ratio = (cg - pg) / extra if extra > 0 else math.inf   # gallons saved per extra minute (inf: costs no time)
       entry['probes'][variant] = (f'{100 * gain:+.1f}% fuel, {extra:+.2f} min/100 mi'
                                   + (f', {ratio:.3f} gal per extra minute' if extra > 0 else '') + f', {confidence:.0%} sure')
-      if gain >= MIN_GAIN and confidence >= CONFIDENCE:
+      if gain >= MIN_GAIN and confidence >= DIAL_CONFIDENCE:
         if ratio < MIN_GAL_PER_MINUTE:
           entry['probes'][variant] += ': not worth the time'
         # time-free savings first, then the most fuel per extra minute (the fuel-to-time ratio), then the most fuel
         elif best is None or (ratio, cg - pg) > (best[0], best[3]):
           best = (ratio, key, variant, cg - pg, extra, gain)
-      elif confidence < 1.0 - CONFIDENCE or gain < MIN_GAIN:
+      elif confidence < 1.0 - DIAL_CONFIDENCE or gain < MIN_GAIN:
         lost.setdefault(dial, set()).add(direction)
     if best is not None:
       pending.append(best)
@@ -489,11 +538,27 @@ def update(root: Path) -> dict:
   doc = {'version': 1, 'winners': {k: r['winner'] for k, r in results.items() if r['winner']}, 'results': results,
          'corrections': corrections, 'season': season, 'budget': budget, 'dials': state_doc(state),
          'dial_results': dial_report}
-  path = root / 'experiments.json'
-  tmp = path.with_suffix('.tmp')
-  tmp.write_text(json.dumps(doc, indent=1))
-  tmp.replace(path)
+  from openpilot.starpilot.efficiency.store import _atomic_write
+  _atomic_write(root / 'experiments.json', doc)   # synced: the comma loses power the moment the car turns off
   return doc
+
+
+def main() -> None:
+  """python -m openpilot.starpilot.efficiency.experiment_learn <efficiency root>: judge the stored drives now.
+  efficiencyd runs this beside itself as a drive starts (the end of a drive is a power cut, nothing runs there)."""
+  import os
+  import sys
+  try:
+    os.nice(19)
+    from openpilot.starpilot.vision_cpu import LITTLE_CORES
+    os.sched_setaffinity(0, set(LITTLE_CORES))
+  except (OSError, AttributeError, ImportError):
+    pass
+  update(Path(sys.argv[1]))
+
+
+if __name__ == '__main__':
+  main()
 
 
 def report_lines(doc: dict) -> list[str]:
