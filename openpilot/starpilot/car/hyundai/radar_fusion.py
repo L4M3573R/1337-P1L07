@@ -43,6 +43,7 @@ PICKUP_MIN_SPEED = 3.0        # m/s ground speed; slower returns need the camera
 PICKUP_MAX_DISTANCE = 100.0   # m
 PICKUP_MIN_DISTANCE = 2.0     # m
 PICKUP_CLOSER_MARGIN = 5.0    # m, pickup must be this much closer than the camera's lead
+PICKUP_KEEP_JUMP_M = 5.0      # m per model frame: a picked-up track that jumps further is another object in its slot
 VETO_MAX_SPEED = 4.0          # m/s, radard's V_EGO_STATIONARY: below it stationary returns become leads without the camera
 STATIONARY_SPEED = 1.0        # m/s ground speed under which a return counts as stationary
 TURN_POINT_MARGIN = 2.0       # m, a return this close to the side road (or past it) is beyond where the car turns off
@@ -79,6 +80,8 @@ class TandemLeadPolicy:
     self.last_action = 'none'
     self.last_pickup_id = -1
     self.last_lead_prob = 0.0
+    self.picked_id = -1       # the track that was the pickup lead last frame
+    self.picked_drel = 0.0
 
   def _update_in_path(self, tracks: dict, model) -> None:
     for track_id in list(self.in_path_frames):
@@ -91,10 +94,15 @@ class TandemLeadPolicy:
         self.in_path_frames[track_id] = 0
 
   def _pickup(self, tracks: dict) -> Any | None:
-    candidates = [track for track_id, track in tracks.items()
-                  if self.in_path_frames.get(track_id, 0) >= PICKUP_MIN_FRAMES and track.vLead >= PICKUP_MIN_SPEED and
+    # The speed gate is for taking a track up. The car already being followed stays the lead as it slows to a stop
+    # (review 2026-11-17: it was dropped at 3 m/s, with the camera unsure, while we could still be doing 20 mph).
+    def fast_enough(track_id, track) -> bool:
+      return track.vLead >= PICKUP_MIN_SPEED or (track_id == self.picked_id and
+                                                 abs(track.dRel - self.picked_drel) < PICKUP_KEEP_JUMP_M)
+    candidates = [(track.dRel, track_id) for track_id, track in tracks.items()
+                  if self.in_path_frames.get(track_id, 0) >= PICKUP_MIN_FRAMES and fast_enough(track_id, track) and
                   PICKUP_MIN_DISTANCE < track.dRel < PICKUP_MAX_DISTANCE]
-    return min(candidates, key=lambda track: track.dRel) if candidates else None
+    return min(candidates)[1] if candidates else None
 
   def _turn_veto(self, lead: dict[str, Any], tracks: dict, model, lead_prob: float, v_ego: float) -> str | None:
     """Why radard's low-speed override lead is not in the car's way, or None to keep it."""
@@ -142,12 +150,16 @@ class TandemLeadPolicy:
 
     # A confident camera lead decides which car is followed: replays showed radar tracks "closer"
     # than it are mostly adjacent-lane cars crossing the predicted path while passing.
+    picked = -1
     if lead_prob <= CONFIRM_PROB:
-      pickup = self._pickup(tracks)
+      picked_key = self._pickup(tracks)
+      pickup = tracks[picked_key] if picked_key is not None else None
       if pickup is not None and (not lead.get('present', False) or pickup.dRel < lead['dRel'] - PICKUP_CLOSER_MARGIN):
         lead = pickup.get_RadarState(lead_prob)
         self.last_action = 'pickup'
         self.last_pickup_id = int(getattr(pickup, 'identifier', -1))
+        picked, self.picked_drel = picked_key, float(pickup.dRel)
+    self.picked_id = picked
     if self.last_action == 'none' and v_ego is not None and (veto := self._turn_veto(lead, tracks, model, lead_prob, v_ego)):
       self.last_action = veto
       return {'present': False}

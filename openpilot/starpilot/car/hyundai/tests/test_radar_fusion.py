@@ -199,3 +199,30 @@ def test_turn_veto_never_drops_camera_moving_held_or_faster_leads():
   policy.lead_one(camera_lead(wall), {1: wall}, STRAIGHT, 0.9, v_ego=3.0)
   held = policy.lead_one(NO_LEAD, {1: wall}, STRAIGHT, 0.2, v_ego=3.0)
   assert held['present'] and policy.last_action == 'hold'
+
+
+def test_a_picked_up_car_stays_the_lead_as_it_slows_to_a_stop():
+  # A car the camera never rates above 0.5 (trailer, motorcycle, glare) brakes for a light ahead of us.
+  policy, car = rf.TandemLeadPolicy(), track(7, 50.0, v_lead=15.0)
+  assert run(policy, rf.PICKUP_MIN_FRAMES, NO_LEAD, {7: car})['present']
+  d, lead = 50.0, None
+  for v_lead in (10.0, 6.0, 2.9, 1.0, 0.0, 0.0):
+    d -= 2.0
+    car.update(d, 0.0, v_lead - 10.0, v_lead)
+    lead = policy.lead_one(NO_LEAD, {7: car}, STRAIGHT, 0.2)
+    assert lead['present'] and lead['radarTrackId'] == 7, v_lead
+  assert policy.last_action == 'pickup'
+
+
+def test_a_stopped_object_taking_the_picked_up_slot_is_not_followed():
+  # The followed car leaves and the radar reuses its slot for a sign 30 m nearer: that is not the same car.
+  policy, car = rf.TandemLeadPolicy(), track(7, 60.0, v_lead=15.0)
+  assert run(policy, rf.PICKUP_MIN_FRAMES, NO_LEAD, {7: car})['present']
+  car.update(30.0, 0.0, -20.0, 0.0)
+  assert not policy.lead_one(NO_LEAD, {7: car}, STRAIGHT, 0.2)['present']
+  assert not run(policy, 5, NO_LEAD, {7: car})['present']        # and it is not taken up again while stopped
+
+
+def test_a_car_that_was_never_picked_up_still_needs_speed():
+  policy, car = rf.TandemLeadPolicy(), track(3, 40.0, v_lead=2.0)
+  assert not run(policy, rf.PICKUP_MIN_FRAMES * 3, NO_LEAD, {3: car})['present']
