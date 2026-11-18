@@ -363,6 +363,11 @@ class CarInterface(CarInterfaceBase):
 
     if candidate == CAR.HYUNDAI_ELANTRA_HEV_2024:
       ret.longitudinalActuatorDelay = 0.22
+      # 1337 (2026-11-18): speed on the instrument cluster's scale, so a set speed of 65 is 65 on the dash, the same as
+      # when the driver holds 65 by eye ("when I drive 65 mph and the comma drives it's the same"). The cluster's own
+      # speed (CLU11) is the four-wheel average times 1.0223 at every speed from 7 to 70 mph (22,993 steady samples,
+      # offset -0.08 mph). Against GPS the wheel average reads 1.35 % low and the cluster 0.9 % high.
+      ret.wheelSpeedFactor = 1.0223
 
     if is_blended(ret):
       ret.openpilotLongitudinalControl = False

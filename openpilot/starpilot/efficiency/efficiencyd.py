@@ -37,8 +37,9 @@ ANNOUNCE_AFTER_S = 10.0   # the start event waits until the trace daemon (starte
 
 class Recorder:
   def __init__(self, mass: float, drive_id: str | None, root: Path | None = None, checkpoint_s: float = CHECKPOINT_S,
-               tank_path: Path | None = None):
+               tank_path: Path | None = None, speed_factor: float = 1.0):
     self.mass, self.drive_id, self.root, self.checkpoint_s = mass, drive_id, root, checkpoint_s
+    self.speed_factor = speed_factor   # CarParams.wheelSpeedFactor: the scale this drive's speeds and miles are on
     self.tank_path = tank_path if tank_path is not None else (root / "tank.json" if root is not None else None)
     self.ledger = Ledger()
     self.tank = tank_store.load(self.tank_path)
@@ -135,7 +136,7 @@ class Recorder:
       if self._fill_pending:
         self.tank.fill_drive, self._fill_pending = self.drive_id, False
       if self.ledger.stretches:
-        store.save_drive(self.drive_id, list(self.ledger.stretches), self.root, self.ledger.flow_hist)
+        store.save_drive(self.drive_id, list(self.ledger.stretches), self.root, self.ledger.flow_hist, self.speed_factor)
       tank_store.save(self.tank, self.tank_path)
     except Exception as e:   # a failed checkpoint is retried next minute; it must not end the drive's ledger
       log_error('efficiency', e, where='save')
@@ -211,7 +212,7 @@ def main() -> None:
   sm = messaging.SubMaster(SERVICES, poll='radarState')
   can_sock = messaging.sub_sock('can', conflate=False)
   from openpilot.common.swaglog import cloudlog
-  recorder = Recorder(float(cp.mass), None)
+  recorder = Recorder(float(cp.mass), None, speed_factor=float(cp.wheelSpeedFactor) or 1.0)
   judge = start_judge(store.default_root())
   last_budget_save = 0.0
   last_obd_read = 0.0

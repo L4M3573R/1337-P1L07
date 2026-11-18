@@ -38,10 +38,11 @@ def pull(hosts: list[str], local: Path, key: str) -> str | None:
 
 
 def stored_drives(local: Path) -> list[tuple[float, list[dict]]]:
+  from openpilot.starpilot.efficiency.store import rescale
   drives = []
   for path in (local / 'drives').glob('*.json'):
     try:
-      doc = json.loads(path.read_text())
+      doc = rescale(json.loads(path.read_text()))
       drives.append((path.stat().st_mtime, list(doc.get('stretches', []))))
     except (OSError, ValueError, TypeError):
       continue

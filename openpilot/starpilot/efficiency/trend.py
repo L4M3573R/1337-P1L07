@@ -52,12 +52,12 @@ def drive_point(t: float, doc: dict) -> DrivePoint | None:
 
 
 def load_points(root: Path | None = None) -> list[DrivePoint]:
-  from openpilot.starpilot.efficiency.store import VERSION, default_root
+  from openpilot.starpilot.efficiency.store import VERSION, default_root, rescale
   root = default_root() if root is None else root
   points = []
   for path in (root / 'drives').glob('*.json'):
     try:
-      doc = json.loads(path.read_text())
+      doc = rescale(json.loads(path.read_text()))
       if doc.get('version') == VERSION and (p := drive_point(path.stat().st_mtime, doc)) is not None:
         points.append(p)
     except (OSError, ValueError, TypeError, AttributeError):

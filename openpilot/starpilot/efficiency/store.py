@@ -14,6 +14,11 @@ from pathlib import Path
 from openpilot.starpilot.efficiency.ledger import FLOW_LEN, Stretch, Totals, summarize
 
 VERSION = 1
+# The wheel-speed factor the car's speed and distance are on now (opendbc hyundai interface, Elantra Hybrid: the
+# cluster's scale since 2026-11-18). Each drive file records the factor it was made with; rescale() brings older drives
+# (factor 1.0, the bare wheel average) onto today's scale when they are read, so speeds and miles compare across the change.
+SPEED_FACTOR = 1.0223
+DISTANCE_FIELDS = ('distance', 'fuel_distance', 'obd_distance')
 MAX_DRIVES = 500
 MAX_STRETCH_RECORDS = 3000  # about 10 hours of driving in one file
 KEY_SEPARATOR = "|"
@@ -28,9 +33,34 @@ def _totals_dict(t: Totals) -> dict[str, float]:
   return {f.name: round(getattr(t, f.name), 3) for f in fields(Totals)}
 
 
-def drive_document(drive_id: str, stretches: list[Stretch], flow: dict | None = None) -> dict:
+def rescale(doc: dict) -> dict:
+  """A stored drive on today's speed scale (in place): distances and stretch speeds times SPEED_FACTOR over the factor
+  the drive was recorded with. The energy fields are left as recorded (they were worked out from the old speeds)."""
+  if not isinstance(doc, dict):
+    return doc
+  recorded = doc.get('speed_factor', 1.0)
+  if not isinstance(recorded, (int, float)) or isinstance(recorded, bool) or not 0.9 <= recorded <= 1.1:
+    recorded = 1.0
+  k = SPEED_FACTOR / recorded
+  if abs(k - 1.0) < 1e-6:
+    return doc
+  for totals in [doc.get('total'), *(doc.get('contexts') or {}).values()]:
+    if isinstance(totals, dict):
+      for name in DISTANCE_FIELDS:
+        if isinstance(totals.get(name), (int, float)):
+          totals[name] = totals[name] * k
+  for st in doc.get('stretches') or []:
+    if isinstance(st, dict):
+      for name in ('m', 'v0', 'v1'):
+        if isinstance(st.get(name), (int, float)):
+          st[name] = st[name] * k
+  doc['speed_factor'] = SPEED_FACTOR
+  return doc
+
+
+def drive_document(drive_id: str, stretches: list[Stretch], flow: dict | None = None, speed_factor: float = 1.0) -> dict:
   total, by_context = summarize(stretches)
-  doc = {"version": VERSION, "drive": drive_id, "total": _totals_dict(total),
+  doc = {"version": VERSION, "drive": drive_id, "speed_factor": round(float(speed_factor), 4), "total": _totals_dict(total),
          "contexts": {KEY_SEPARATOR.join(key): _totals_dict(t) for key, t in sorted(by_context.items())}}
   if flow:
     doc["flow"] = {k: [round(x, 1) for x in v] for k, v in sorted(flow.items())}
@@ -52,12 +82,13 @@ def _atomic_write(path: Path, data: dict) -> None:
       os.unlink(tmp)
 
 
-def save_drive(drive_id: str, stretches: list[Stretch], root: Path | None = None, flow: dict | None = None) -> Path:
+def save_drive(drive_id: str, stretches: list[Stretch], root: Path | None = None, flow: dict | None = None,
+               speed_factor: float = 1.0) -> Path:
   root = default_root() if root is None else root
   if not drive_id or any(ch in drive_id for ch in "/\\") or drive_id.startswith("."):
     raise ValueError("invalid drive id")
   path = root / "drives" / f"{drive_id}.json"
-  _atomic_write(path, drive_document(drive_id, stretches, flow))
+  _atomic_write(path, drive_document(drive_id, stretches, flow, speed_factor))
   prune(root)
   return path
 
@@ -75,6 +106,7 @@ def load_totals(root: Path | None = None) -> tuple[Totals, dict[str, Totals], in
   for path in sorted((root / "drives").glob("*.json")):
     try:
       doc = json.loads(path.read_text())
+      rescale(doc)
       if doc.get("version") != VERSION:
         continue
       _add(overall, doc["total"])
@@ -93,6 +125,7 @@ def load_drives(root: Path | None = None) -> list[tuple[str, float, dict[str, To
   for path in sorted((root / "drives").glob("*.json")):
     try:
       doc = json.loads(path.read_text())
+      rescale(doc)
       if doc.get("version") != VERSION:
         continue
       contexts = {}
@@ -117,6 +150,7 @@ def load_flow(root: Path | None = None) -> dict[str, list[float]]:
   for path in sorted((root / "drives").glob("*.json")):
     try:
       doc = json.loads(path.read_text())
+      rescale(doc)
       if doc.get("version") != VERSION:
         continue
       for key, values in doc.get("flow", {}).items():

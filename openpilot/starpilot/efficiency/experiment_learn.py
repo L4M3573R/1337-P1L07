@@ -509,10 +509,11 @@ def situation_miles(drives: list[list[dict]], season: str | None = None) -> dict
 
 def load_drives(root: Path, since: str | None = None) -> list[list[dict]]:
   """Stored drives, oldest first; with since (YYYYMMDD), only drives from that date on (undated ones are kept)."""
+  from openpilot.starpilot.efficiency.store import rescale
   drives = []
   for path in sorted((root / 'drives').glob('*.json'), key=lambda p: p.stat().st_mtime):
     try:
-      doc = json.loads(path.read_text())
+      doc = rescale(json.loads(path.read_text()))
       day = str(doc.get('drive', ''))[:8]
       if since is not None and day.isdigit() and len(day) == 8 and day < since:
         continue

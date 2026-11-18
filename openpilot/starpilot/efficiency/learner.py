@@ -272,12 +272,12 @@ def _add_flow(into: dict[str, list[float]], flow) -> None:
 def learn_stored(root: Path, mass_kg: float = DEFAULT_MASS_KG, window_days: float = EV_WINDOW_DAYS) -> dict:
   """From a folder of drive files (the comma's efficiency/drives, or the PC copy of them), oldest first. The EV
   cut-off also gets the last window_days of drives (counted back from the newest drive, so a PC copy reads the same)."""
-  from openpilot.starpilot.efficiency.store import VERSION
+  from openpilot.starpilot.efficiency.store import VERSION, rescale
   drives, flow, dated = [], {}, []
   paths = sorted((root / 'drives').glob('*.json'), key=lambda p: p.stat().st_mtime)
   for path in paths:
     try:
-      doc = json.loads(path.read_text())
+      doc = rescale(json.loads(path.read_text()))
     except (OSError, ValueError):
       continue
     if not isinstance(doc, dict) or doc.get('version') != VERSION:
