@@ -137,6 +137,25 @@ class CoastPlan:
   hill_paused: bool = False
 
 
+YIELD_UNDER_MPS = 0.25    # another ceiling this far under Pulse and Glide's own target counts as lower
+YIELD_BRAKE = -0.5        # the ordinary cruise braking floor (longitudinal_planner.A_CRUISE_MIN)
+
+
+def yields_cruise(plan: CoastPlan | None, own_target_mps: float, v_cruise_mps: float, v_ego: float) -> bool:
+  """Pulse and Glide hands the cruise acceleration back for this plan (review 2026-11-17, items 16 and 17).
+
+  Its band is made from the cruise target before the turn-speed and fuel ceilings. With one of those lower, a pulse
+  would speed up toward a turn, and a glide above the ceiling would coast into it: cruise takes over (a glide already
+  under the ceiling goes on). And when its own target drops (speed limit, curve, SET-), the glide's pull toward the
+  target is real braking with no floor (a 10 mph drop reached -1.8 m/s2): past the cruise floor, cruise does it."""
+  if plan is None or plan.accel_target is None or plan.force_decel:
+    return False
+  if plan.accel_target < YIELD_BRAKE:
+    return True
+  lower = v_cruise_mps < own_target_mps - YIELD_UNDER_MPS
+  return lower and (plan.pulsing or v_ego > v_cruise_mps)
+
+
 class CoastOwner:
   def __init__(self):
     self.force_coast = False

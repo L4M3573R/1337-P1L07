@@ -337,3 +337,25 @@ def test_stored_band_over_5_mph_is_clamped_to_5(tmp_path, monkeypatch):
     params.put('PulseGlideSpeedDelta', stored, block=True)
     run_planner(params, cp, action=14)
     assert seen and max(seen) == pytest.approx(expected_mph * 0.44704, rel=1e-6)
+
+
+def test_pulse_and_glide_hands_back_to_cruise_under_a_lower_ceiling_or_when_it_would_brake():
+  from openpilot.starpilot.controllers.coast import CoastPlan, yields_cruise
+  set_mps = 40 * 0.44704
+  pulse = CoastPlan(accel_target=0.6, pulsing=True)
+  glide = CoastPlan(brake_floor=-0.1, pulse_coasting=True, accel_target=-0.05)
+  # nothing else limits the speed: Pulse and Glide keeps the cruise acceleration
+  assert not yields_cruise(pulse, set_mps, set_mps, set_mps - 1.0)
+  assert not yields_cruise(glide, set_mps, set_mps, set_mps - 1.0)
+  # a signalled turn's ceiling (10 mph) under the 40 mph band: no pulse toward the turn, no coasting into it
+  turn = 10 * 0.44704
+  assert yields_cruise(pulse, set_mps, turn, set_mps - 1.0)
+  assert yields_cruise(glide, set_mps, turn, set_mps - 1.0)
+  # a ceiling just under the set speed with the car gliding below it: the glide goes on, a pulse does not
+  assert not yields_cruise(glide, set_mps, set_mps - 1.0, set_mps - 2.0)
+  assert yields_cruise(pulse, set_mps, set_mps - 1.0, set_mps - 2.0)
+  # its own target dropped 10 mph: the glide's pull toward it is braking past the cruise floor
+  assert yields_cruise(CoastPlan(brake_floor=-1.85, pulse_coasting=True, accel_target=-1.8), set_mps, set_mps, set_mps + 4.5)
+  # forced coast and no plan are not this function's business
+  assert not yields_cruise(CoastPlan(True, -0.6), set_mps, turn, set_mps)
+  assert not yields_cruise(None, set_mps, turn, set_mps)

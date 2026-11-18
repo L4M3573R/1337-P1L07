@@ -7,6 +7,7 @@ import numpy as np
 
 import openpilot.cereal.messaging as messaging
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
+from openpilot.starpilot.controllers.coast import yields_cruise
 from openpilot.starpilot.longitudinal.lead_takeoff_preferences import MAX_ACCEL as TAKEOFF_ACCEL_MAX
 from openpilot.starpilot.efficiency.experiment import DOWNHILL_CARRY_MPH
 from openpilot.common.constants import CV
@@ -328,6 +329,7 @@ class LongitudinalPlanner:
       self.coast_log = (coast_plan, owner)
       if coast_plan.speed_ceiling_mps is not None:
         v_cruise = min(v_cruise, coast_plan.speed_ceiling_mps)
+    coast_target_mps = v_cruise   # what Pulse and Glide made its band from; the ceilings below may go under it
     # 1337 fuel experiments (starpilot/efficiency/experiment.py): a lower cruise target, or the downhill carry (at most
     # DOWNHILL_CARRY_MPH) over a set speed nothing else is limiting; leads, stops and Force Stop still win in the plan below.
     # 1337 turn speed (starpilot/navigation/turn_speed.py): ease to the learned speed for a signalled turn
@@ -340,6 +342,8 @@ class LongitudinalPlanner:
         v_cruise += min(efficiency_plan.speed_bonus_mps, DOWNHILL_CARRY_MPH * CV.MPH_TO_MS)
     if sm['controlsState'].forceDecel or coast_plan is not None and coast_plan.force_decel:
       v_cruise = 0.0
+    if yields_cruise(coast_plan, coast_target_mps, v_cruise, v_ego):
+      coast_plan = replace(coast_plan, accel_target=None, brake_floor=None)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)
