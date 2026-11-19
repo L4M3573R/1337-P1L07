@@ -21,6 +21,10 @@ SOC_READ_S = 1.0
 STATUS_WRITE_S = 0.5
 RELOAD_CHECK_S = 5.0   # efficiencyd judges the stored drives as the drive starts: pick its result up when it lands
 DRIVER_PULSE_GLIDE = 'driver toggled pulse and glide'
+# The engine first stopped by itself at 61 C coolant (2026-11-19, -1 C outside, after a 10 min warm-up in Park); before
+# that it ran ~1600 rpm through a whole Pulse and Glide test. Warm from ENGINE_WARM_C, cold again only below ENGINE_COLD_C.
+ENGINE_WARM_C = 65.0
+ENGINE_COLD_C = 50.0
 
 
 def efficiency_root() -> Path:
@@ -86,6 +90,7 @@ class ExperimentHost:
     self.we_turned_pulse_glide_on = False
     self.soc: float | None = None
     self.next_soc = 0.0
+    self.engine_warm = False   # no BlueDriver coolant reading yet: treated as cold
     self.next_status = 0.0
     self.log = None
     self.last_tag: str | None = None
@@ -119,6 +124,7 @@ class ExperimentHost:
     self.saved_vetoes = dict(self.exp.vetoes)
     self.driver_pulse_glide = False
     self.we_turned_pulse_glide_on = False
+    self.engine_warm = False
     from openpilot.starpilot.diagnostics.features import ChangeLog
     self.log = ChangeLog('efficiency_experiment', min_gap_s=1.0)
 
@@ -154,10 +160,20 @@ class ExperimentHost:
     try:
       from openpilot.starpilot.obd.bluedriverd import read_live
       doc = read_live(now=now)
-      soc = doc.get('soc') if isinstance(doc, dict) and doc.get('connected') else None
+      live = doc if isinstance(doc, dict) and doc.get('connected') else {}
+      soc = live.get('soc')
       self.soc = float(soc) if isinstance(soc, (int, float)) and 0 <= soc <= 100 else None
+      self.observe_coolant(live.get('coolant'))
     except Exception:
       self.soc = None
+
+  def observe_coolant(self, coolant) -> None:
+    """Warm once the coolant reaches ENGINE_WARM_C; a missing reading keeps the last call (cold until one arrives)."""
+    if isinstance(coolant, (int, float)) and not isinstance(coolant, bool) and -40 <= coolant <= 150:
+      if coolant >= ENGINE_WARM_C:
+        self.engine_warm = True
+      elif coolant < ENGINE_COLD_C:
+        self.engine_warm = False
 
   def sample(self, sm, wheel_coast, *, drive, force_stop_forcing: bool, stop_distance_m: float | None = None) -> Plan | None:
     """The plan for this cycle, or None when experiments are off or cannot run."""
@@ -183,7 +199,7 @@ class ExperimentHost:
       frame = Frame(now, v_ego, float(cs.vCruise) * KPH_TO_MS, bool(cc.longActive and cc.enabled), bool(cs.gasPressed),
                     bool(cs.brakePressed), bool(cs.standstill), grade, gap, stop_ahead, self.soc, self.driver_pulse_glide,
                     float(cs.aEgo), bool(cs.leftBlinker or cs.rightBlinker),
-                    stop_distance_m=stop_distance(stop_distance_m, lead))
+                    stop_distance_m=stop_distance(stop_distance_m, lead), engine_warm=self.engine_warm)
       plan = self.exp.sample(frame)
       if self.shadow is not None:
         shadow_plan = self.shadow.sample(frame)   # decides and logs only; its vetoes and time are never saved

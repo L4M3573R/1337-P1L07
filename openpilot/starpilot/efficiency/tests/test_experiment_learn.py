@@ -209,3 +209,16 @@ def test_a_variant_driven_with_the_heat_off_is_not_flattered():
 def test_stretches_from_before_the_climate_band_keep_their_curve_class():
   assert el._run_curve(el.Run(0.1, 400.0, 30.0, 'curvy')) == 'curvy'
   assert el._run_curve(el.Run(0.1, 400.0, 30.0, 'curvy', 'cold', 'heat')) == 'curvy/heat'
+
+
+def test_fuel_from_outside_the_tests_speed_band_is_not_counted():
+  # stored before tests ended on leaving their band: a "60+" follow stretch driven at 56 mph belongs to 45-60
+  mph = 0.44704
+  inside = dict(stretch('follow|60+|a0.90', 0.004), v0=66 * mph, v1=68 * mph)
+  edge = dict(stretch('follow|60+|a0.90', 0.004), v0=59 * mph, v1=59 * mph)       # within the 1.5 mph margin
+  slowed = dict(stretch('follow|60+|a0.90', 0.004), v0=57 * mph, v1=55 * mph)
+  untimed = stretch('follow|60+|a0.90', 0.004)                                    # older stretches without speeds stay
+  launch = dict(stretch('launch|launch|gentle', 0.004), v0=0.0, v1=9.0)          # not keyed by its own speed
+  data = el.samples([[inside, edge, slowed, untimed]])
+  assert len(data[('follow', '60+', 'a0.90')]) == 3
+  assert not el._stretch_outside_band('launch', 'launch', launch)

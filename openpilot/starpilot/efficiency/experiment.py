@@ -101,6 +101,35 @@ def band(v: float) -> str:
   return next(name for top, name in SPEED_BANDS if v < top)
 
 
+# A test is learned for one speed band, so it ends once the car has left that band (traffic slowed, the road opened up):
+# its fuel would otherwise be filed under the wrong speed (2026-11-18: a "60+ mph" follow test ran on at 56 mph). The
+# margin stops a test flapping at a band edge; Pulse and Glide swings up to its 5 mph band by design, so it gets that too.
+BAND_EXIT_MPS = 1.5 * MPH
+PULSE_GLIDE_SWING_MPS = 5.0 * MPH
+SPEED_BAND_CATEGORIES = ('follow', 'uphill', 'downhill', 'cruise', 'hold', 'pulse_glide')
+
+
+def band_limits(context: str) -> tuple[float, float] | None:
+  """(low, high) m/s of a speed band context, as band() assigns it; None for contexts that are not speed bands."""
+  low = 0.0
+  for top, name in SPEED_BANDS:
+    if name == context:
+      return low, top
+    low = top
+  return None
+
+
+def outside_band(category: str, context: str, v: float) -> bool:
+  """The speed is clearly outside the band this test is learned for (categories keyed by the car's own speed only)."""
+  if category not in SPEED_BAND_CATEGORIES:
+    return False
+  limits = band_limits(context)
+  if limits is None or not math.isfinite(v):
+    return False
+  margin = BAND_EXIT_MPS + (PULSE_GLIDE_SWING_MPS if category == 'pulse_glide' else 0.0)
+  return not (limits[0] - margin <= v < limits[1] + margin)
+
+
 @dataclass(frozen=True)
 class Frame:
   t: float                      # monotonic seconds
@@ -118,6 +147,7 @@ class Frame:
   a_ego: float = 0.0            # m/s^2: a speed-up episode only starts while the car is actually speeding up
   blinker: bool = False         # a turn signal is on: a turn or lane change is coming, no experiment
   stop_distance_m: float | None = None  # metres to a stop ahead (Force Stop's line, or behind a stopped car)
+  engine_warm: bool = True      # the engine can stop by itself: Pulse and Glide and electric-only need it (host: coolant)
 
 
 @dataclass(frozen=True)
@@ -305,6 +335,8 @@ class Experimenter:
       return False
     if ep.category == 'accelerate':
       return self._own_target(f) - f.v_ego > 1.0
+    if outside_band(ep.category, ep.context, f.v_ego):
+      return False   # even inside the minimum length: a short test is dropped, a mislabelled one would mislead
     dwell = f.t - ep.start_t < MIN_EPISODE_S
     if ep.category == 'follow':
       return dwell or f.lead_gap_s < FOLLOW_EXIT_GAP_S
@@ -333,11 +365,12 @@ class Experimenter:
     # level cruising: the experiments take turns
     options = []
     if f.v_ego >= CRUISE_MIN_MPS and f.v_set >= CRUISE_MIN_MPS:
-      if not f.pulse_glide_by_driver and f.v_ego < self.pulse_glide_max_mps:
+      # a cold engine keeps running through the glide (warm-up): Pulse and Glide then only adds speed swings
+      if not f.pulse_glide_by_driver and f.v_ego < self.pulse_glide_max_mps and f.engine_warm:
         options.append(('pulse_glide', band(f.v_ego)))
       options.append(('cruise', band(f.v_ego)))
       options.append(('hold', band(f.v_ego)))
-    if self._ev_ok(f):
+    if self._ev_ok(f) and f.engine_warm:
       options.append(('ev', 'ev'))
     if not options:
       return None

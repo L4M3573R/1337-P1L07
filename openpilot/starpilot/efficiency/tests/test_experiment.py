@@ -290,3 +290,34 @@ def test_normal_stop_leaves_the_planner_alone_and_the_episode_ends_with_the_stop
 def test_a_stop_without_a_distance_still_blocks_the_other_experiments():
   exp = Experimenter()
   assert exp.sample(cruise(0.0, grade=0.0, stop_ahead=True)).tag is None
+
+
+def test_a_test_ends_when_the_speed_leaves_its_band():
+  # 2026-11-18: a "60+ mph" follow test kept running at 56 mph after traffic slowed
+  exp = Experimenter(rng=random.Random(3))
+  lead = {'lead_gap_s': 1.5}
+  plans = run(exp, [cruise(i * 0.05, v=66 * MPH, v_set=70 * MPH, **lead) for i in range(100)])
+  assert plans[-1].tag.startswith('follow|60+|')
+  # just under the band edge: within the margin, the same test goes on (no flapping at 60 mph)
+  plans = run(exp, [cruise(5 + i * 0.05, v=59 * MPH, v_set=70 * MPH, **lead) for i in range(20)])
+  assert plans[-1].tag.startswith('follow|60+|')
+  # clearly slower, still inside the 15 s minimum: it ends and a 45-60 test starts
+  plans = run(exp, [cruise(6 + i * 0.05, v=56 * MPH, v_set=70 * MPH, **lead) for i in range(20)])
+  assert plans[-1].tag.startswith('follow|45-60|')
+
+
+def test_pulse_and_glide_swing_does_not_end_its_own_test():
+  assert not ex.outside_band('pulse_glide', '45-60', 41 * MPH)   # 45-60 band gliding 4 mph under its edge
+  assert ex.outside_band('cruise', '45-60', 41 * MPH)
+  assert not ex.outside_band('stop', '60+', 10 * MPH) and not ex.outside_band('accelerate', '45-60', 20 * MPH)
+
+
+def test_a_cold_engine_gets_no_pulse_and_glide_or_electric_only_test():
+  exp = Experimenter()
+  tags = set()
+  for turn in range(6):
+    exp.episode, exp.cruise_turn = None, turn
+    p = exp.sample(cruise(turn * 100.0, v=40 * MPH, v_set=40 * MPH, grade=0.0, soc=80.0, engine_warm=False))
+    tags.add((p.tag or '').split('|')[0])
+    assert p.pulse_glide is not True
+  assert 'pulse_glide' not in tags and 'ev' not in tags and tags & {'cruise', 'hold'}

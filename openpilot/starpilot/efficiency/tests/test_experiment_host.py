@@ -58,6 +58,7 @@ def test_status_reaches_the_ledger_reader(tmp_path):
 def test_pulse_glide_experiment_hands_back_and_respects_the_driver(tmp_path):
   h = host(tmp_path, winners={'pulse_glide|45-60': 'pg'})
   h._new_drive(1)
+  h.engine_warm = True
   h.exp.rng.random = lambda: 0.99   # no exploring
   owner = NS(pulse_glide=False, change_reason='start')
   h.sample(sm(), NS(owner=owner), drive=1, force_stop_forcing=False)
@@ -131,3 +132,30 @@ def test_the_budget_and_the_judges_result_reach_a_running_drive(tmp_path):
   for _ in range(150):   # 7.5 s: past the reload check
     h.sample(sm(), NS(owner=Owner()), drive=1, force_stop_forcing=False)
   assert h.exp.state['cruise|45-60'].center == {'u': 1.0} and h.pitch_zero == 0.016
+
+
+def test_no_pulse_and_glide_until_the_engine_is_warm(tmp_path):
+  """2026-11-19: Pulse and Glide ran at 54-57 C coolant and the engine never stopped through the glide."""
+  h = host(tmp_path, winners={'pulse_glide|45-60': 'pg'})
+  h._new_drive(1)
+  h.exp.rng.random = lambda: 0.99
+  owner = NS(pulse_glide=False, change_reason='start')
+  h.observe_coolant(56.0)
+  for _ in range(5):
+    plan = h.sample(sm(), NS(owner=owner), drive=1, force_stop_forcing=False)
+    assert not owner.pulse_glide and not (plan.tag or '').startswith('pulse_glide')
+  h._new_drive(2)   # same start, warm this time
+  h.exp.rng.random = lambda: 0.99
+  assert not h.engine_warm   # every drive starts cold until the coolant says otherwise
+  h.observe_coolant(66.0)
+  h.sample(sm(), NS(owner=owner), drive=2, force_stop_forcing=False)
+  assert owner.pulse_glide
+
+
+def test_coolant_warm_and_cold_edges():
+  h = ExperimentHost()
+  assert not h.engine_warm   # nothing read yet: cold
+  for reading, warm in ((40.0, False), (64.9, False), (65.0, True), (55.0, True), (None, True), (True, True),
+                        (200.0, True), (49.0, False), (None, False)):
+    h.observe_coolant(reading)
+    assert h.engine_warm is warm, reading

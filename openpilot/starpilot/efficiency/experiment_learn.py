@@ -38,7 +38,7 @@ import numpy as np
 
 from openpilot.starpilot.efficiency.dials import (DIALS, Situation, blocked_by_veto, decode, encode, is_dial_variant,
                                                   load_state, new_situation, state_doc, step_back, vetoed_values)
-from openpilot.starpilot.efficiency.experiment import CATEGORIES, TIME_BUDGET_S_PER_H, VETO_LIMIT, load_vetoes
+from openpilot.starpilot.efficiency.experiment import CATEGORIES, TIME_BUDGET_S_PER_H, VETO_LIMIT, load_vetoes, outside_band
 from openpilot.starpilot.efficiency.ledger import BATTERY_KWH, GAL_PER_BATTERY_KWH
 
 METERS_PER_MILE = 1609.344
@@ -169,6 +169,14 @@ def adjusted_gal(stretch: dict) -> float | None:
   return gal - battery   # charge used (soc_d < 0) adds the fuel it stands for
 
 
+def _stretch_outside_band(category: str, context: str, stretch: dict) -> bool:
+  """The stretch's mean speed is clearly outside the band its test was labelled with."""
+  v0, v1 = stretch.get('v0'), stretch.get('v1')
+  if not isinstance(v0, (int, float)) or not isinstance(v1, (int, float)):
+    return False
+  return outside_band(category, context, (v0 + v1) / 2.0)
+
+
 def samples(drives: list[list[dict]], corrections: dict | None = None,
             season: str | None = None) -> dict[tuple[str, str, str], list[Run]]:
   """(category, context, variant) -> runs per stretch (steady) or per episode window (launches): gallons corrected for
@@ -205,6 +213,8 @@ def samples(drives: list[list[dict]], corrections: dict | None = None,
           out.setdefault((category, context, variant), []).append(
             Run(gal, metres, seconds, _curve(s), run_season, s.get('climate'), drive))
       else:
+        if _stretch_outside_band(category, context, s):
+          continue   # stored before tests ended on leaving their band: this fuel belongs to another speed
         g, m = corrected_gal(s, corrections), s.get('m') or 0.0
         if g is not None and m > 0:
           out.setdefault((category, context, variant), []).append(
