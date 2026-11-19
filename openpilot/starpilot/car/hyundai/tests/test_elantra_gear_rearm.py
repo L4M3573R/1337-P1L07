@@ -147,3 +147,57 @@ def test_cancel_after_main_in_park_still_cancels():
   owner.update(state('park', main=False, buttons=('cancel',)), now_ns=20, fault_active=True)
   owner.update(state('drive'), now_ns=30, fault_active=False)
   assert not owner.allowed_latch
+
+
+def press(owner, *, main, now_ns, fault_active=None, gear='drive'):
+  owner.update(state(gear, main=main, buttons=('mainCruise',)), now_ns=now_ns, fault_active=fault_active)
+  owner.update(state(gear, main=main), now_ns=now_ns + 1, fault_active=fault_active)  # release
+
+
+def test_main_press_follows_the_cars_main_when_aol_was_armed_in_park_at_startup():
+  # Drive 000000cd (2026-11-19): AOL came up armed in Park with main off; the first press turned main on
+  # and the plain toggle turned AOL off, so every later press armed AOL as main went off.
+  owner = ClassicLongCardIntent(elantra_cp(marked=True), ON)
+  owner.update(state('drive', main=False), now_ns=1)
+  owner.allowed_latch = True
+  press(owner, main=True, now_ns=10)
+  assert owner.allowed_latch
+  press(owner, main=False, now_ns=20)
+  assert not owner.allowed_latch and owner.latch_clear_reason in ('main_off', 'physical_toggle')
+  press(owner, main=True, now_ns=30)
+  assert owner.allowed_latch
+
+
+def test_main_press_never_arms_aol_while_main_turns_off():
+  owner = ClassicLongCardIntent(elantra_cp(marked=True), ON)
+  owner.update(state('drive', main=True), now_ns=1)
+  assert not owner.allowed_latch  # main already on, AOL off (e.g. LKAS turned it off)
+  press(owner, main=False, now_ns=10)
+  assert not owner.allowed_latch
+  press(owner, main=True, now_ns=20)
+  assert owner.allowed_latch
+
+
+def test_a_main_on_press_during_a_lagging_fault_inhibit_arms_when_it_clears():
+  owner = ClassicLongCardIntent(elantra_cp(marked=True), ON)
+  owner.update(state('drive', main=False), now_ns=1, fault_active=True)  # stale inhibit from an earlier fault
+  owner.update(state('drive', main=True, buttons=('mainCruise',)), now_ns=10)
+  assert not owner.allowed_latch
+  owner.update(state('drive', main=True), now_ns=11, fault_active=False)
+  assert owner.allowed_latch
+
+
+def test_a_fault_that_does_not_clear_soon_needs_a_fresh_press():
+  owner = ClassicLongCardIntent(elantra_cp(marked=True), ON)
+  owner.update(state('drive', main=False), now_ns=1, fault_active=True)
+  owner.update(state('drive', main=True, buttons=('mainCruise',)), now_ns=10, fault_active=True)
+  for i in range(60):
+    owner.update(state('drive', main=True), now_ns=11 + i)  # inhibit stays set
+  owner.update(state('drive', main=True), now_ns=100, fault_active=False)
+  assert not owner.allowed_latch
+
+
+def test_main_off_in_drive_drops_aol():
+  owner = armed()
+  press(owner, main=False, now_ns=10)
+  assert not owner.allowed_latch

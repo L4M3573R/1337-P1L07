@@ -9,6 +9,8 @@ DRIVING_GEARS = (GearShifter.drive, GearShifter.sport, GearShifter.low, GearShif
 # Leaving Drive withdraws steering through the transport/fault path, which also clears the latch.
 GEAR_REARM_REASONS = ('disarming_fault', 'native_rejection')
 DRIVER_DECISION_BUTTONS = (ButtonType.mainCruise, ButtonType.cancel, ButtonType.lkas)
+# A Main press that turned main on while the fault inhibit was still set arms once it clears, within 0.5 s.
+MAIN_ON_WAIT_FRAMES = 50
 
 
 class ClassicLongCardIntent(AolCardIntent):
@@ -24,6 +26,7 @@ class ClassicLongCardIntent(AolCardIntent):
     # resumes it with no time limit, until the driver presses Main/Cancel/LKAS or the car reports a fault.
     self.gear_rearm = cp.carFingerprint in CAMERA_LONG_IDS
     self.gear_rearm_pending = False
+    self._main_on_wait = 0
 
   def _arm_from_full_engagement(self, CS, *, source_ns):
     if not (CS.steerFaultTemporary or CS.gasPressed or CS.brakePressed):
@@ -48,10 +51,13 @@ class ClassicLongCardIntent(AolCardIntent):
     if not self.gear_rearm:
       return
     driving = CS.gearShifter in DRIVING_GEARS
+    main_pressed = any(event.type == ButtonType.mainCruise and event.pressed for event in CS.buttonEvents)
+    healthy = (CS.canValid and not CS.canTimeout and not CS.accFaulted and not CS.steerFaultPermanent and
+               not self._fault_inhibit and not kwargs.get('fault_active'))
+    self._follow_main(CS, driving=driving, main_pressed=main_pressed, healthy=healthy, now_ns=kwargs.get('now_ns', 0))
     if latched and not self.allowed_latch and not driving and self.latch_clear_reason in GEAR_REARM_REASONS:
       # The latch fell only because the car left Drive; the driver never turned AOL off.
       self.gear_rearm_pending = True
-    main_pressed = any(event.type == ButtonType.mainCruise and event.pressed for event in CS.buttonEvents)
     if not driving and main_pressed and self.settings.enabled and self._main_toggles_aol():
       # Out of Drive AOL is paused and ignores the press, but the car's cruise main still toggles. Leaving the
       # choice to the car's main state in Drive keeps the two in step: a press in Park used to drop the re-arm
@@ -66,9 +72,47 @@ class ClassicLongCardIntent(AolCardIntent):
     if not CS.canValid or CS.canTimeout or CS.accFaulted or CS.steerFaultPermanent:
       self.gear_rearm_pending = False  # no longer healthy: a fresh button press is required
       return
-    healthy = (CS.canValid and not CS.canTimeout and not CS.accFaulted and not CS.steerFaultPermanent and
-               not self._fault_inhibit and not kwargs.get('fault_active'))
     if driving and healthy and CS.cruiseState.available and not self.allowed_latch:
-      self.allowed_latch = True
-      self.pause_lateral = False
+      self._arm(now_ns=kwargs.get('now_ns', 0))
       self.gear_rearm_pending = False
+
+  def _arm(self, *, now_ns: int) -> None:
+    self.allowed_latch = True
+    self.pause_lateral = False
+    if now_ns:
+      self.physical_arm_ns = now_ns
+      self._last_latch_edge_ns = now_ns
+
+  def _follow_main(self, CS, *, driving: bool, main_pressed: bool, healthy: bool, now_ns: int) -> None:
+    """In Drive a Main press leaves AOL matching the car's own cruise main, never the opposite of it.
+
+    The base gesture flips the latch on every press. The car flips main on every press too, but a press the
+    gesture skips (stale fault inhibit, or AOL already armed in Park at startup) put the two out of step for
+    good: each later press armed AOL as main turned off, arming without main is a hard transport fault, and
+    the fault skipped the next press again (drive 000000cd, 2026-11-19: eight presses, never armed).
+    """
+    if not driving or not self.settings.enabled or not self._main_toggles_aol():
+      self._main_on_wait = 0
+      return
+    main_on = bool(CS.cruiseState.available)
+    if main_pressed:
+      self._main_on_wait = 0
+      if self.allowed_latch and not main_on:
+        self._record_latch_clear('main_off')
+        self.allowed_latch = False
+      elif not self.allowed_latch and main_on:
+        if healthy:
+          self._arm(now_ns=now_ns)
+        else:
+          # The fault inhibit can lag the press by a frame or two; wait briefly, never indefinitely.
+          self._main_on_wait = MAIN_ON_WAIT_FRAMES
+      return
+    if self._main_on_wait <= 0:
+      return
+    self._main_on_wait -= 1
+    if (not main_on or self.allowed_latch or CS.steerFaultPermanent or CS.accFaulted or
+        any(event.type in DRIVER_DECISION_BUTTONS and event.pressed for event in CS.buttonEvents)):
+      self._main_on_wait = 0
+    elif healthy:
+      self._main_on_wait = 0
+      self._arm(now_ns=now_ns)

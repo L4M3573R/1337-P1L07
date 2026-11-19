@@ -206,6 +206,56 @@ class HardwareComma(HardwareBase):
 
     return network_strength
 
+  NM_KEYFILE_DIRS = ("/run/NetworkManager/system-connections", "/data/etc/NetworkManager/system-connections")
+
+  def _wifi_keyfile_metered(self, ssid: str) -> bool | None:
+    """NetworkManager's metered setting for this SSID: True / False, or None for "let NM guess".
+
+    The keyfiles are root-only, so each read is a sudo process. hardwared asks every 10 s; spawning four sudo
+    processes each time lined up with CAN delivery gaps of 15-24 ms (pandad, drive 000000ce, 2026-11-19).
+    The answer only changes with the SSID or a keyfile, so it is re-read only when one of those changes.
+    """
+    files = sorted(p for d in self.NM_KEYFILE_DIRS for p in Path(d).glob("*.nmconnection"))
+    stamp = []
+    for fpath in files:
+      try:
+        st = fpath.stat()
+        stamp.append((str(fpath), st.st_mtime_ns, st.st_size))
+      except OSError:
+        stamp.append((str(fpath), 0, 0))
+    key = (ssid, tuple(stamp))
+    cached = getattr(self, '_metered_cache', None)
+    if cached is not None and cached[0] == key:
+      return cached[1]
+
+    # wpa_supplicant escapes non-printable bytes as \xNN; NM keyfile stores ASCII SSIDs as a literal and others as a byte;byte; list
+    ssid_bytes = ssid.encode().decode('unicode_escape').encode('latin-1')
+    ssid_keyfile_list = ';'.join(str(b) for b in ssid_bytes) + ';'
+    result = None
+    complete = True
+    for fpath in files:
+      raw = sudo_read(str(fpath))
+      if not raw:
+        complete = False  # unreadable now; do not remember an answer built without it
+        continue
+      cp = configparser.ConfigParser(interpolation=None)
+      try:
+        cp.read_string(raw)
+        keyfile_ssid = cp.get("wifi", "ssid", fallback="")
+        if keyfile_ssid != ssid and keyfile_ssid != ssid_keyfile_list:
+          continue
+        metered = cp.getint("connection", "metered", fallback=0)
+      except (configparser.Error, ValueError):
+        continue
+      if metered == 1:  # NM_METERED_YES
+        result, complete = True, True
+      elif metered == 2:  # NM_METERED_NO
+        result, complete = False, True
+      break
+    if complete:
+      self._metered_cache = (key, result)
+    return result
+
   def get_network_metered(self, network_type) -> bool:
     if network_type in (NetworkType.cell2G, NetworkType.cell3G, NetworkType.cell4G, NetworkType.cell5G):
       if self.get_modem_state().get("iccid", "").startswith(WEBBING_ICCID_PREFIX):
@@ -216,29 +266,9 @@ class HardwareComma(HardwareBase):
       if network_type == NetworkType.wifi:
         ssid = wpa_supplicant_cmd("STATUS").get("ssid", "")
         if ssid:
-          # wpa_supplicant escapes non-printable bytes as \xNN; NM keyfile stores ASCII SSIDs as a literal and others as a byte;byte; list
-          ssid_bytes = ssid.encode().decode('unicode_escape').encode('latin-1')
-          ssid_keyfile_list = ';'.join(str(b) for b in ssid_bytes) + ';'
-
-          nm_dirs = ("/run/NetworkManager/system-connections", "/data/etc/NetworkManager/system-connections")
-          for fpath in (p for d in nm_dirs for p in Path(d).glob("*.nmconnection")):
-            raw = sudo_read(str(fpath))
-            if not raw:
-              continue
-            cp = configparser.ConfigParser(interpolation=None)
-            try:
-              cp.read_string(raw)
-              keyfile_ssid = cp.get("wifi", "ssid", fallback="")
-              if keyfile_ssid != ssid and keyfile_ssid != ssid_keyfile_list:
-                continue
-              metered = cp.getint("connection", "metered", fallback=0)
-            except (configparser.Error, ValueError):
-              continue
-            if metered == 1:  # NM_METERED_YES
-              return True
-            if metered == 2:  # NM_METERED_NO
-              return False
-            break
+          metered = self._wifi_keyfile_metered(ssid)
+          if metered is not None:
+            return metered
     except Exception:
       pass
 

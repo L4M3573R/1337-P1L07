@@ -43,3 +43,77 @@ def test_wifi_never_borrows_cellular_prime_override():
 ])
 def test_comma_profile_still_requires_provider_and_shared_prefix(provider, iccid, expected):
   assert Profile(iccid, '', True, provider).is_comma is expected
+
+
+def _keyfiles(tmp_path, files):
+  d = tmp_path / 'nm'
+  d.mkdir(exist_ok=True)
+  for name, body in files.items():
+    (d / name).write_text(body)
+  return d
+
+
+def _wifi_hardware(keyfile_dir):
+  hardware = HardwareComma.__new__(HardwareComma)
+  hardware.NM_KEYFILE_DIRS = (str(keyfile_dir),)
+  return hardware
+
+
+def _sudo_read_counter():
+  calls = []
+  def read(path):
+    calls.append(path)
+    with open(path) as f:
+      return f.read()
+  return calls, read
+
+
+def test_wifi_metered_keyfiles_are_read_once_while_nothing_changes(tmp_path):
+  # hardwared asks every 10 s; four sudo processes each time lined up with pandad CAN gaps (2026-11-19).
+  d = _keyfiles(tmp_path, {'home.nmconnection': '[wifi]\nssid=home\n[connection]\nmetered=1\n',
+                           'other.nmconnection': '[wifi]\nssid=other\n'})
+  hardware = _wifi_hardware(d)
+  calls, read = _sudo_read_counter()
+  with patch('openpilot.common.hardware.comma.hardware.wpa_supplicant_cmd', return_value={'ssid': 'home'}), \
+       patch('openpilot.common.hardware.comma.hardware.sudo_read', side_effect=read):
+    for _ in range(5):
+      assert hardware.get_network_metered(NetworkType.wifi) is True
+  assert 0 < len(calls) <= 2
+
+
+def test_wifi_metered_rereads_when_the_ssid_or_a_keyfile_changes(tmp_path):
+  d = _keyfiles(tmp_path, {'home.nmconnection': '[wifi]\nssid=home\n[connection]\nmetered=1\n',
+                           'phone.nmconnection': '[wifi]\nssid=phone\n[connection]\nmetered=2\n'})
+  hardware = _wifi_hardware(d)
+  calls, read = _sudo_read_counter()
+  with patch('openpilot.common.hardware.comma.hardware.sudo_read', side_effect=read):
+    with patch('openpilot.common.hardware.comma.hardware.wpa_supplicant_cmd', return_value={'ssid': 'home'}):
+      assert hardware.get_network_metered(NetworkType.wifi) is True
+    with patch('openpilot.common.hardware.comma.hardware.wpa_supplicant_cmd', return_value={'ssid': 'phone'}):
+      assert hardware.get_network_metered(NetworkType.wifi) is False
+    (d / 'phone.nmconnection').write_text('[wifi]\nssid=phone\n[connection]\nmetered=1\n# edited\n')
+    with patch('openpilot.common.hardware.comma.hardware.wpa_supplicant_cmd', return_value={'ssid': 'phone'}):
+      assert hardware.get_network_metered(NetworkType.wifi) is True
+
+
+def test_wifi_metered_unknown_falls_back_to_networkmanager_and_is_cached(tmp_path):
+  d = _keyfiles(tmp_path, {'home.nmconnection': '[wifi]\nssid=home\n'})
+  hardware = _wifi_hardware(d)
+  calls, read = _sudo_read_counter()
+  with patch('openpilot.common.hardware.comma.hardware.wpa_supplicant_cmd', return_value={'ssid': 'home'}), \
+       patch('openpilot.common.hardware.comma.hardware.sudo_read', side_effect=read), \
+       patch('openpilot.common.hardware.base.HardwareBase.get_network_metered', return_value=False):
+    assert hardware.get_network_metered(NetworkType.wifi) is False
+    assert hardware.get_network_metered(NetworkType.wifi) is False
+  assert len(calls) == 1
+
+
+def test_an_unreadable_keyfile_is_not_remembered(tmp_path):
+  d = _keyfiles(tmp_path, {'home.nmconnection': '[wifi]\nssid=home\n[connection]\nmetered=1\n'})
+  hardware = _wifi_hardware(d)
+  reads = iter(['', '[wifi]\nssid=home\n[connection]\nmetered=1\n'])
+  with patch('openpilot.common.hardware.comma.hardware.wpa_supplicant_cmd', return_value={'ssid': 'home'}), \
+       patch('openpilot.common.hardware.comma.hardware.sudo_read', side_effect=lambda p: next(reads)), \
+       patch('openpilot.common.hardware.base.HardwareBase.get_network_metered', return_value=False):
+    assert hardware.get_network_metered(NetworkType.wifi) is False  # sudo failed once
+    assert hardware.get_network_metered(NetworkType.wifi) is True   # tried again, not cached
