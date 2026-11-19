@@ -230,7 +230,7 @@ for _profile, _geometry in {"large": (112, 70, 165, 294), "compact": (45, 28, 22
 
 ROAD_BASE_WIDTH = 1860
 SIDEBAR_EXTRA = 300
-ANCHOR_SHIFT = {"steering_wheel": 1.0, NAV_CARD_WIDGET: 1.0, NAV_MAP_WIDGET: 1.0,
+ANCHOR_SHIFT = {"steering_wheel": 1.0, "pip_right": 1.0, NAV_CARD_WIDGET: 1.0, NAV_MAP_WIDGET: 1.0,
                 "current_speed": .5, "torque_bar": .5, MODE_WIDGET: .5, CLOCK_WIDGET: .5, WEATHER_WIDGET: .5}
 for _key, _widget_data in PROFILES["large"]["widgets"].items():
   if _key in ANCHOR_SHIFT:
@@ -291,12 +291,12 @@ WIDGET_COLORS = {
 
 # Back-to-front order used when a layout first opts into custom layers.
 DEFAULT_WIDGET_ORDER = {
-  "large": (NAV_MAP_WIDGET, "pip_left", "pip_right", "cruise_limits", "speed_limit_actions", CEM_GAUGE_WIDGET, "current_speed",
+  "large": (NAV_MAP_WIDGET, "cruise_limits", "speed_limit_actions", CEM_GAUGE_WIDGET, "current_speed",
             "steering_wheel", "torque_bar", "following_distance", "driver_monitor", MODE_WIDGET, CLOCK_WIDGET, WEATHER_WIDGET,
-            STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, JETLINK_WIDGET, "rear_fog"),
-  "compact": ("pip_left", "pip_right", "speed_limit", "max_speed", "steering_wheel", "torque_bar",
+            STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, JETLINK_WIDGET, "rear_fog", "pip_left", "pip_right"),
+  "compact": ("speed_limit", "max_speed", "steering_wheel", "torque_bar",
               "speed_limit_actions", "driver_monitor", *RAIL_WIDGETS, MODE_WIDGET, CLOCK_WIDGET, WEATHER_WIDGET,
-              STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, "rear_fog"),
+              STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, "rear_fog", "pip_left", "pip_right"),
 }
 
 

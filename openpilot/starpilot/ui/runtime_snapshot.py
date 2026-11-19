@@ -703,6 +703,7 @@ class RuntimeSnapshotAdapter:
     cruise_state = getattr(car, 'cruiseState', None)
     wheel_confirmation = bool(
       system_long and control is not None and getattr(control, 'enabled', False) and
+      not (cp is not None and cp.brand == 'ford' and cp.pcmCruise) and
       cruise_state is not None and getattr(cruise_state, 'available', False) and
       not (cp is not None and getattr(cp, 'brand', '') == 'toyota' and
            (car.standstill or cruise_state.standstill or not cruise_state.enabled)))
@@ -728,11 +729,14 @@ class RuntimeSnapshotAdapter:
     weather_location = None
     if (started and getattr(ui, 'replay_clock', None) is None and
         any(layout.get('weather', {}).get('enabled', False) for layout in self._customization_value['layouts'].values())):
-      from openpilot.starpilot.ui.weather import valid_location
-      for service in ('gpsLocationExternal', 'gpsLocation'):
-        gps = current_message(sm, service, now_ns, after_frame=after)
-        if gps is not None and gps.hasFix and valid_location((gps.latitude, gps.longitude)):
-          weather_location = (gps.latitude, gps.longitude)
+      from openpilot.starpilot.gps.source import GPS_SOURCES, SOURCE_SERVICES, observation as gps_observation
+      # Weather needs a recent location, not the high-frequency driving-message age gate.
+      # Include car/phone fixes when this device has no native GNSS receiver.
+      for service in GPS_SOURCES:
+        carrier = SOURCE_SERVICES.get(service, service)
+        fix = gps_observation(sm, service, now_ns)
+        if fix is not None and int(sm.recv_frame.get(carrier, 0)) > after:
+          weather_location = (fix[1].latitude, fix[1].longitude)
           break
     aol_latched = (display_aol_latch(sm, now_ns, after_frame=after)
                    if started and getattr(ui, "aol_runtime", False) else None)
@@ -887,9 +891,12 @@ class RuntimeSnapshotAdapter:
     available = _flag(params, "UpdaterFetchAvailable")
     status = "updater status unavailable" if not updater_state else updater_state if updater_state != "idle" else (
       "update available" if available else "up to date, last checked " + ("previously" if _text(params, "LastUpdateTime") else "never"))
+    if updater_state == "idle" and _text(params, "UpdateFailedCount", "0") not in ("", "0"):
+      error = _text(params, "LastUpdateException", "Updater reported a failure")[:4096]
+      status = "Update failed: " + " ".join(error.split())
     software_actions: set[SoftwareRequest] = set()
     if confirmed_offroad:
-      software_actions.add(SoftwareRequest.OPEN_UNINSTALL_CONFIRMATION)
+      software_actions.update((SoftwareRequest.OPEN_UNINSTALL_CONFIRMATION, SoftwareRequest.OPEN_ERROR_LOG))
       if updater_state == "idle":
         software_actions.update((SoftwareRequest.FAST_UPDATE, SoftwareRequest.ROLLBACK))
         software_actions.add(SoftwareRequest.DOWNLOAD_UPDATE if available else SoftwareRequest.CHECK_FOR_UPDATES)

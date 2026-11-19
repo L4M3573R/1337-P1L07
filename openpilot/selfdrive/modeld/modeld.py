@@ -50,6 +50,7 @@ from openpilot.starpilot.lateral.lane_change_status_wire import (
 )
 from openpilot.starpilot.models.receipt import ModelReceiptOwner
 from openpilot.starpilot.car.volkswagen.model_smoothing import seconds as volkswagen_smoothing
+from openpilot.starpilot.car.hyundai.model_smoothing import seconds as kona_smoothing
 from openpilot.starpilot.models.status import ModelVariant
 from openpilot.starpilot.models.startup import report_load_timeout, wait_for_chestnut_power
 from openpilot.starpilot.models.recovery import STARTUP_FALLBACK_EXIT
@@ -381,6 +382,7 @@ def main(demo=False):
   cloudlog.info("modeld got CarParams: %s", CP.brand)
   from openpilot.starpilot.car.subaru.smoothing import read_frozen, seconds as subaru_smooth_seconds, filter_action
   subaru_smoothing = read_frozen(CP, params)
+  kona_tau = kona_smoothing(CP)
 
   st = time.monotonic()
   cloudlog.warning("loading model")
@@ -399,11 +401,11 @@ def main(demo=False):
                                                  prefetch=small_prefetch, report=cloudlog.warning)
         return selected, prepared, False
       except Exception:
-        cloudlog.exception("selected small model load failed, using shipped RDFv4")
+        cloudlog.exception("selected small model load failed, using shipped Cheddar")
     from openpilot.starpilot.models.manager import shipped_default
     path = shipped_default()
     if path is None:
-      raise RuntimeError("Shipped RDFv4 is missing or corrupt")
+      raise RuntimeError("Shipped Cheddar is missing or corrupt")
     fallback, prepared = load_verified_model(cam_w, cam_h,
                                              path, BY_ID[DEFAULT_SMALL].version, False,
                                              DEFAULT_SMALL, DEFAULT_SMALL_SHA256, coherent_warp=coherent_warp)
@@ -589,7 +591,7 @@ def main(demo=False):
     v_ego = max(sm["carState"].vEgo, 0.)
     subaru_tau = subaru_smooth_seconds(v_ego, subaru_smoothing)
     volkswagen_tau = volkswagen_smoothing(CP, receipt_owner.load)
-    lat_delay = sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS + subaru_tau + volkswagen_tau
+    lat_delay = sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS + subaru_tau + volkswagen_tau + kona_tau
     if sm.updated["extrinsicsCalibration"] and sm.seen['narrowRoadCameraState'] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["extrinsicsCalibration"].rpyCalib, dtype=np.float32)
       dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['narrowRoadCameraState'].sensor))]
@@ -685,7 +687,7 @@ def main(demo=False):
         action = laboratory_action
       else:
         action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
-      filter_action(action, prev_action, v_ego, subaru_tau + volkswagen_tau)
+      filter_action(action, prev_action, v_ego, subaru_tau + volkswagen_tau + kona_tau)
       prev_action = action
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
@@ -705,13 +707,18 @@ def main(demo=False):
                     auto_evidence(sm, modelv2_send.modelV2, direction, runtime_lane_policy.minimum_lane_width_m,
                                   now_mono_ns=mono_now_ns, now_boot_ns=boot_now_ns,
                                   model_valid=bool(modelv2_send.valid), vehicle_capable=auto_vehicle_capable))
+      signal_turn = navigation_turn.signal_model.observe(
+        sm, modelv2_send.modelV2, model_ns=int(modelv2_send.logMonoTime), now_ns=mono_now_ns, now_boot_ns=boot_now_ns,
+        valid=bool(modelv2_send.valid), enabled=bool(turn_supported and navigation_turn.steering_capable and
+                                                  runtime_lane_policy.turn_signal_guidance),
+        clock_skew_ns=clock_skew_ns, lane_change_state=DH.lane_change_state)
       engaged = bool(sm['carControl'].latActive)
       no_lane = direction != 0 and lane_clearly_absent(modelv2_send.modelV2, direction)
       navigation_turn.no_lane_side = direction if no_lane else 0
       DH.update(car_state, sm['carControl'].latActive, lane_change_prob,
                 auto_evidence=auto_ready, engaged=auto_trigger_engaged(sm, runtime_lane_policy,
                   openpilot_longitudinal=bool(CP.openpilotLongitudinalControl), now_mono_ns=mono_now_ns),
-                navigation_turn=matching_turn_signal(sm, mono_now_ns, supported=turn_supported),
+                navigation_turn=signal_turn or matching_turn_signal(sm, mono_now_ns, supported=turn_supported),
                 no_lane=no_lane)
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction

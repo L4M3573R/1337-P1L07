@@ -7,6 +7,9 @@ on:
       - Domathon
       - Dom
       - StarPilot
+      - stable
+      - testing
+      - dev
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -36,12 +39,14 @@ jobs:
     steps:
     - uses: actions/checkout@v7
     - name: Validate published device build receipt
-      if: github.event_name == 'push' && (github.ref == 'refs/heads/Dom' || github.ref == 'refs/heads/StarPilot')
+      if: github.event_name == 'push' && (github.ref == 'refs/heads/Dom' || github.ref == 'refs/heads/StarPilot' || github.ref == 'refs/heads/stable' || github.ref == 'refs/heads/testing' || github.ref == 'refs/heads/dev')
       run: python3 tools/ci/check_prebuilt_receipt.py --revision HEAD
     - name: Check shipped device runtime dependencies
       run: |
         python3 -m unittest tools.laptop_device_build.tests.test_runtime_dependencies -v
         python3 -c 'from pathlib import Path; assert b"starting pandad (comma hardware)" in Path("openpilot/selfdrive/pandad/pandad").read_bytes(), "Shipped pandad must use the comma hardware build profile"'
+    - name: Test one-shot branch migration
+      run: python3 -m unittest discover -s scripts/tests -v
     - name: Validate tracked dependencies
       run: python3 tools/vendor/check.py --revision HEAD
     - run: ./tools/op.sh setup
@@ -88,7 +93,7 @@ jobs:
       env:
         GOTOOLCHAIN: local
       run: |
-        sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config zlib1g-dev
+        sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends pkg-config zlib1g-dev
         (cd mapd_repo && go mod download)
         PYTHONPATH="$GITHUB_WORKSPACE" python3 -m openpilot.starpilot.maps.package_shadow
     - name: Build devel
@@ -298,7 +303,7 @@ jobs:
         .venv/bin/python -c "import av; assert 'libx264' in av.codecs_available"
     - name: Provide Mesa software graphics for pixel-level tests
       if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-      run: sudo apt-get update && sudo apt-get install -y libegl1 libgles-dev libgl1-mesa-dri
+      run: sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y libegl1 libgles-dev libgl1-mesa-dri
     - name: Test every assigned custom pytest node serially
       if: ${{ !cancelled() && steps.build.outcome == 'success' }}
       timeout-minutes: 20
@@ -405,7 +410,7 @@ jobs:
         go-version: '1.25.1'
         cache-dependency-path: mapd_repo/go.sum
     - name: Install native build dependencies
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config zlib1g-dev
+      run: sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends pkg-config zlib1g-dev
     - name: Test and build pinned map provider
       run: python3 tools/ci/run_map_tests.py --output ci-results/map-provider
     - name: Save test and build evidence

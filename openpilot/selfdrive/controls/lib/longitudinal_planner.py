@@ -23,7 +23,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDX
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.swaglog import cloudlog
-from openpilot.starpilot.navigation.intent import cruise_ceiling as navigation_ceiling
+from openpilot.starpilot.navigation.intent import NAVIGATION_BRAKE_MAGNITUDE, cruise_ceiling as navigation_ceiling
 from openpilot.starpilot.car.tesla.preap_adaptive import startup_owner as preap_adaptive_owner
 from openpilot.starpilot.longitudinal.vehicle_policy import forecast_should_stop, planner_cost_owner, far_follow_owner
 from openpilot.starpilot.longitudinal.cruise_ceiling import CruiseCeiling, CurveCeiling, select_cruise_ceiling, select_curve_ceiling
@@ -37,6 +37,7 @@ from openpilot.starpilot.longitudinal.experimental_release import ConditionalHan
 from openpilot.starpilot.longitudinal.force_stop import StopPlan
 from openpilot.starpilot.longitudinal.force_stop_braking import distance_target, eligible as distance_braking_eligible
 from openpilot.starpilot.longitudinal.follow_jerk import FollowJerk
+from openpilot.starpilot.longitudinal.highlander_cruise import owner_for as highlander_cruise_owner
 from openpilot.starpilot.longitudinal.lead_takeoff import LeadTakeoff, project as project_takeoff
 from openpilot.starpilot.longitudinal.lead_behavior import adjust as adjust_lead_behavior
 from openpilot.starpilot.longitudinal.hkg_vision_stop import owner_for as vision_stop_owner
@@ -144,6 +145,7 @@ class LongitudinalPlanner:
     self.follow_jerk = FollowJerk(CP)
     self.vehicle_cost_owner = planner_cost_owner(CP)
     self.lead_takeoff = LeadTakeoff()
+    self.button_cruise = highlander_cruise_owner(CP, dt)
     self.vehicle_far_follow = far_follow_owner(CP, dt)
     self.vision_stop_buffer = vision_stop_owner(CP)
     self.ford_stop_approach = ford_stop_owner(CP, STOP_DISTANCE - .5) or vw_stop_owner(CP, STOP_DISTANCE - .5)
@@ -410,6 +412,12 @@ class LongitudinalPlanner:
                                                                           abs(A_CRUISE_MIN)))
     if curve.effective_mps is not None:
       global_floor = min(global_floor, A_CRUISE_MIN)
+    if navigation_target is not None and not sm['controlsState'].forceDecel:
+      # A later turn approach must remain reachable with a soft cruise profile.
+      global_floor = min(global_floor, -NAVIGATION_BRAKE_MAGNITUDE)
+      if cruise_profile is not None:
+        cruise_profile = replace(cruise_profile, cruise_brake_magnitude=max(cruise_profile.cruise_brake_magnitude,
+                                                                          NAVIGATION_BRAKE_MAGNITUDE))
     if selected_acceleration is not None and cruise_profile is not None:
       # The selected curve owns acceleration; following/jerks retain their owner.
       cruise_profile = replace(cruise_profile, acceleration_max=selected_acceleration)
@@ -430,6 +438,17 @@ class LongitudinalPlanner:
                                      accel_coast, self.allow_throttle, cruise_profile,
                                      base_brake_floor=global_floor, selected_acceleration_max=selected_acceleration, faster_takeoffs=faster_takeoffs,
                                      a_target_prev=self.output_a_target)
+    if self.button_cruise is not None:
+      button_target = self.button_cruise.sample(
+        sm, now_ns=sample_now_ns, drive_id=drive_id, target_speed=v_cruise,
+        brake_floor=max(ACCEL_MIN, -cruise_profile.cruise_brake_magnitude if cruise_profile is not None else global_floor),
+        speed=self.v_desired_filter.x, previous_accel=self.output_a_target, reference=self.mpc,
+        blocked=bool(reset_state or not profile_eligible or not self.allow_throttle or traffic_mode is not False or self.fcw or
+                     self.force_stop_plan.forcing or self.force_stop_plan.should_stop or output_should_stop_mpc or
+                     sm['modelV2'].action.shouldStop or wheel_coast is not None or
+                     any(lead.present for lead in (sm['radarState'].leadOne, sm['radarState'].leadTwo))))
+      if button_target is not None:
+        self.a_cruise = button_target
     cruise_should_stop = should_stop(v_ego, self.a_cruise)
 
     encouraged_model = self.encouragement.update(

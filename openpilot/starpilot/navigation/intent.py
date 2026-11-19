@@ -6,10 +6,12 @@ from openpilot.cereal import log
 from openpilot.common.constants import CV
 
 from openpilot.starpilot.navigation.wire import navigation_state
+from openpilot.starpilot.lateral.signal_turn import SignalTurnEvidence
 
 SERVICE = 'starpilotNavigation'
 MAX_AGE_NS = 2_500_000_000
 SIGNAL_STOP_RELEASE_NS = 1_000_000_000  # retired: StarPilot holds a predicted stop until standstill
+NAVIGATION_BRAKE_MAGNITUDE = 1.0
 TARGET_MPH = {'uturn': 5., 'sharpLeft': 10., 'sharpRight': 10., 'left': 14., 'right': 14.}
 
 
@@ -73,8 +75,9 @@ def turn_speed(maneuver, min_steer_speed: float) -> float | None:
   if target is None or not math.isfinite(maneuver.distanceMeters) or maneuver.distanceMeters < 0:
     return None
   target = max(target * CV.MPH_TO_MS, min_steer_speed)
-  approach_decel = .5 if kind == 'turn' and modifier in ('left', 'right') else .45
-  return math.sqrt(target * target + 2 * approach_decel * max(0., maneuver.distanceMeters - 8.))
+  ordinary = kind == 'turn' and modifier in ('left', 'right')
+  approach_decel, settling_distance = (.75, 20.) if ordinary else (.45, 8.)
+  return math.sqrt(target * target + 2 * approach_decel * max(0., maneuver.distanceMeters - settling_distance))
 
 
 def cruise_ceiling(sm, CP, now_ns: int, cruise_mps: float) -> float | None:
@@ -116,6 +119,7 @@ class TurnIntent:
     from openpilot.starpilot.lateral.lane_change_preferences import LiveLaneChangePolicy
     self.guidance = LiveLaneChangePolicy(params) if params is not None else None
     self.steering_capable = steering_capable(cp)
+    self.signal_model = SignalTurnEvidence()
     self.signal_stop_hold = False
     self.signal_stop_completed = False
     self.no_lane_side = 0  # -1 left / 1 right: modeld's lane_clearly_absent for the blinker side, last frame
@@ -294,7 +298,10 @@ class TurnIntent:
                                                          log.Desire.laneChangeRight)),
                ('steering inactive', not cc.latActive),
                ('CAN invalid', not cs.canValid or cs.canTimeout), ('not in drive', str(cs.gearShifter) != 'drive'),
-               ('speed outside 0.1-20 mph', not math.isfinite(cs.vEgo) or not cs.vEgo < 20 * CV.MPH_TO_MS),
+               # upstream (testing 2026-11-18): above 20 mph only while the model forecasts this turn and the driver
+               # is not steering (SignalTurnEvidence, observed by modeld; it also needs slowing and under ~31 mph)
+               ('speed outside 0.1-20 mph', not math.isfinite(cs.vEgo) or (cs.vEgo >= 20 * CV.MPH_TO_MS and
+                                             (cs.steeringPressed or not self.signal_model.current(sm, now_ns)))),
                ('not started', not device.started))
       blocked = next((name for name, failed in gates if failed), None)
       if blocked is not None:
