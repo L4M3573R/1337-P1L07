@@ -24,12 +24,13 @@ const post = (fetcher, path, body, signal) => fetcher(path, {
 
 export const SETTINGS_SECTIONS = Object.freeze([
   { id: "lateral", label: "Lateral (Steering)", icon: "bi-arrows-move", pages: ["aol", "lane_change", "lane", "torque", "torque/developer"] },
-  { id: "longitudinal", label: "Longitudinal (Speed & Following)", icon: "bi-speedometer2", pages: ["driving_options", "profiles", "conditional", "curve", "slc", "personalities", "aggressive", "standard", "relaxed", "traffic"] },
+  { id: "longitudinal", label: "Longitudinal (Speed & Following)", icon: "bi-speedometer2", pages: ["profiles", "conditional", "curve", "slc", "personalities", "aggressive", "standard", "relaxed", "traffic"] },
   { id: "wheel", label: "Wheel Controls", icon: "bi-controller", pages: ["wheel"] },
   { id: "visual", label: "Visual (Display & UI)", icon: "bi-eye", pages: ["display", "appearance", "ui_layout", "favorites", "pip"] },
   { id: "sounds", label: "Sounds & Alerts", icon: "bi-volume-up", pages: ["sounds"] },
   { id: "vehicle", label: "Vehicle", icon: "bi-car-front", pages: ["vehicle"] },
   { id: "device", label: "Device & System", icon: "bi-hdd", pages: ["power", "data", "starport_options", "browser_preferences", "localization"] },
+  { id: "developer", label: "Developer", icon: "bi-code-slash", pages: ["developer"] },
 ])
 
 // Crop numeric rows and the inline editor row are controlled from the dedicated
