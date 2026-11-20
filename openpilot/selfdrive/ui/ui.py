@@ -56,6 +56,9 @@ def main():
   star_ui = selection.custom
   gui_app.init_window("UI")
   if star_ui:
+    # The StarPilot UI rereads the same small settings files every frame or second; skip files that have not changed.
+    from openpilot.starpilot.saved_source import keep_unchanged_reads
+    keep_unchanged_reads()
     from openpilot.starpilot.ui.runtime_app import StarMainLayout, StarMiciMainLayout
     from openpilot.starpilot.ui.layout_preview_runtime import LayoutPreviewRuntime
     layout = StarMainLayout() if BIG_UI else StarMiciMainLayout()

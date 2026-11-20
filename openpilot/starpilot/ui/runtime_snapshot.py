@@ -389,6 +389,8 @@ class RuntimeSnapshotAdapter:
     # Messages are not cached this way: every one the snapshot reads arrives at 20 Hz or faster, so it is new each frame.
     self._lateral_supported = _LastInput(lateral_supported)
     self._longitudinal_supported = _LastInput(longitudinal_supported)
+    # The settings owner returns the same snapshot object until it rereads (every 0.5 s).
+    self._settings_fingerprint = _LastInput(settings_fingerprint)
     self._device_after_mono_ns = mono_clock()
     self._device_offset_ns: int | None = None
     self._last_pair_offset_ns: int | None = None
@@ -612,7 +614,7 @@ class RuntimeSnapshotAdapter:
           self._traffic_profile_valid = False
         self._traffic_context_ns = now_ns
       if traffic_clock is not None and abs(traffic_clock[0] - now_ns) <= 10_000_000:
-        fingerprint = settings_fingerprint(self._traffic_settings.refresh(now_ns))
+        fingerprint = self._settings_fingerprint(self._traffic_settings.refresh(now_ns))
         traffic = self._traffic.project(
           traffic_envelope, now_mono_ns=now_ns, now_boot_ns=traffic_clock[1],
           drive_id=drive_id,
