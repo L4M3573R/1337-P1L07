@@ -20,7 +20,10 @@ REPORT_S = 30.0
 
 def _stats(values: list[float]) -> dict[str, float]:
   ordered = sorted(values)
-  pick = lambda q: ordered[min(len(ordered) - 1, int(q * len(ordered)))]
+
+  def pick(q: float) -> float:
+    return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
+
   return {"p50": round(pick(0.50), 2), "p90": round(pick(0.90), 2), "max": round(ordered[-1], 2)}
 
 
