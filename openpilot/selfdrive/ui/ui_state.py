@@ -27,6 +27,58 @@ from openpilot.tools.replay.display_clock import BOOT_TIME_SERVICES, DisplayCloc
 
 BACKLIGHT_OFFROAD = 65 if HARDWARE.get_device_type() == "mici" else 50
 PARAM_UPDATE_TIME = 1 / 5.0
+RECENT_CHANGE_NS = 1_000_000_000  # file times come from a coarse clock; do not trust them right after a change
+CHESTNUT_ALERT_KEYS = tuple(k for k, a in OFFROAD_ALERTS.items() if k.startswith("Offroad_Chestnut") and a["severity"] >= 0)
+
+
+class SettledParams:
+  """Params reads that reuse the last value while that key's file is unchanged.
+
+  update_params rereads the same keys five times a second. Each key's file is stat'ed first; when device, inode,
+  size, mtime and ctime match the read that produced the cached value, and that change is over RECENT_CHANGE_NS old
+  (a second write in the same coarse clock tick would not move the times), the value is reused. Params writes
+  replace the file (new inode) and removals make it missing, so either forces a real read on the next pass.
+  """
+
+  def __init__(self, params: Params):
+    self.params = params
+    self._paths: dict[str, str] = {}
+    self._values: dict[tuple[str, str], tuple[tuple, object]] = {}
+
+  def _signature(self, key: str) -> tuple | None:
+    path = self._paths.get(key)
+    if path is None:
+      try:
+        path = self._paths[key] = self.params.get_param_path(key)
+      except (AttributeError, RuntimeError, TypeError, ValueError):
+        return None
+    try:
+      st = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+      return ("missing",)
+    except (OSError, TypeError, ValueError):  # unreadable, or a Params stand-in without real paths
+      return None
+    if time.time_ns() - max(st.st_mtime_ns, st.st_ctime_ns) <= RECENT_CHANGE_NS:
+      return None
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+  def _value(self, key: str, kind: str, read: Callable[[], object]) -> object:
+    signature = self._signature(key)
+    hit = self._values.get((key, kind)) if signature is not None else None
+    if hit is not None and hit[0] == signature:
+      return hit[1]
+    value = read()  # the signature was taken first, so a write after it shows up as a change on the next pass
+    if signature is not None:
+      self._values[(key, kind)] = (signature, value)
+    else:
+      self._values.pop((key, kind), None)
+    return value
+
+  def get_bool(self, key: str) -> bool:
+    return self._value(key, "bool", lambda: self.params.get_bool(key))  # type: ignore[return-value]
+
+  def get(self, key: str, return_default: bool = False):
+    return self._value(key, "default" if return_default else "raw", lambda: self.params.get(key, return_default=return_default))
 
 
 class UIStatus(Enum):
@@ -464,33 +516,36 @@ class UIState:
   def update_params(self) -> None:
     # For slower operations
     # Update longitudinal control state
-    CP_bytes = get_cache(self.params, "CarParamsPersistent")
+    settled = getattr(self, "_settled_params", None)
+    if settled is None or settled.params is not self.params:
+      settled = self._settled_params = SettledParams(self.params)
     if (getattr(self, "replay_clock", None) is not None and
         self.sm.seen["carParams"] and self.sm.valid["carParams"]):
       self.CP = self.sm["carParams"]
       self.has_longitudinal_control = self.CP.openpilotLongitudinalControl
-    elif CP_bytes is not None:
-      self.CP = messaging.log_from_bytes(CP_bytes, car.CarParams)
-      # The saved Alpha Long choice can survive an unavailable configuration.
-      self.has_longitudinal_control = self.CP.openpilotLongitudinalControl
     else:
-      self.CP = None
-      self.has_longitudinal_control = False
+      # Verified and parsed again only when the stored bytes change (get_cache reads them through the same cache).
+      raw = settled.get("CarParamsPersistent")
+      if raw is None or raw != getattr(self, "_cp_raw", None):
+        CP_bytes = get_cache(settled, "CarParamsPersistent")
+        self._cp_raw, self._cp_parsed = raw, (messaging.log_from_bytes(CP_bytes, car.CarParams) if CP_bytes is not None else None)
+      self.CP = self._cp_parsed
+      # The saved Alpha Long choice can survive an unavailable configuration.
+      self.has_longitudinal_control = bool(self.CP is not None and self.CP.openpilotLongitudinalControl)
 
     self.aol_runtime = bool(self.CP is not None and feature_enabled(self.params, self.CP, "aol", os.environ))
-    self.recording_audio = self.params.get_bool("RecordAudio") and self.started
-    self.is_metric = self.params.get_bool("IsMetric")
-    self.initial_cruise_speed = self.params.get("InitialCruiseSpeedKph", return_default=True)
-    self.always_on_dm = self.params.get_bool("AlwaysOnDM")
-    self.experimental_mode = self.params.get_bool("ExperimentalMode")
-    self.navigation_enabled = self.params.get_bool("NavigationEnabled")
-    self.nav_destination_set = self.params.get("NavDestination") is not None
-    raw_chestnut = self.params.get("ChestnutActive")
+    self.recording_audio = settled.get_bool("RecordAudio") and self.started
+    self.is_metric = settled.get_bool("IsMetric")
+    self.initial_cruise_speed = settled.get("InitialCruiseSpeedKph", return_default=True)
+    self.always_on_dm = settled.get_bool("AlwaysOnDM")
+    self.experimental_mode = settled.get_bool("ExperimentalMode")
+    self.navigation_enabled = settled.get_bool("NavigationEnabled")
+    self.nav_destination_set = settled.get("NavDestination") is not None
+    raw_chestnut = settled.get("ChestnutActive")
     self.chestnut_active = raw_chestnut if type(raw_chestnut) is bool else (
       True if raw_chestnut in (b"1", "1") else False if raw_chestnut in (b"0", "0") else None)
-    self.chestnut_loading = self.params.get_bool("ChestnutLoading")
-    self.chestnut_alert = any(self.params.get(k) is not None for k, a in OFFROAD_ALERTS.items()
-                              if k.startswith("Offroad_Chestnut") and a["severity"] >= 0)
+    self.chestnut_loading = settled.get_bool("ChestnutLoading")
+    self.chestnut_alert = any(settled.get(k) is not None for k in CHESTNUT_ALERT_KEYS)
     if getattr(self, "replay_clock", None) is not None:
       self.chestnut_compiled = self.chestnut_active is True or self.chestnut_output_seen
       return
