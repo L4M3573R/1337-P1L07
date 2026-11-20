@@ -1,4 +1,5 @@
 import math
+import os
 import numpy as np
 from openpilot.starpilot.ui.raylib import rl
 from openpilot.cereal import log, messaging
@@ -21,6 +22,14 @@ from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.lib.shader_polygon import draw_polygon, Gradient
 from openpilot.system.ui.widgets import Widget
 from openpilot.selfdrive.ui.onroad.model_renderer import ModelGeometry, ModelPoints
+
+try:
+  from openpilot.starpilot.ui.native import _raylib_extra
+  _project_polygons = getattr(_raylib_extra, "project_polygons", None)
+except ImportError:
+  _project_polygons = None
+# Native line-to-polygon projection. MODEL_GEOMETRY_NATIVE=0, or a prebuilt module without it, keeps the numpy version.
+USE_NATIVE_GEOMETRY = _project_polygons is not None and os.getenv("MODEL_GEOMETRY_NATIVE", "1") == "1"
 
 CLIP_MARGIN = 500
 MIN_DRAW_DISTANCE = 10.0
@@ -167,9 +176,12 @@ class ModelRenderer(ModelGeometry, Widget):
       lead_one = None
     render_lead_indicator = self._lead_indicator_enabled
 
-    # Update model data when needed
+    # Update model data when needed. Path and lanes are hidden while disengaged, so their projection waits until they
+    # show again; the first visible frame then projects everything from the latest model.
+    hidden = self._visual_status() == UIStatus.DISENGAGED
     model_updated = sm.updated['modelV2']
-    if model_updated or sm.updated['radarState'] or self._transform_dirty:
+    stale = getattr(self, '_geometry_stale', False)
+    if model_updated or sm.updated['radarState'] or self._transform_dirty or (stale and not hidden):
       if model_updated:
         self._update_raw_points(model)
 
@@ -177,7 +189,11 @@ class ModelRenderer(ModelGeometry, Widget):
       if path_x_array.size == 0:
         return
 
-      self._update_model(lead_one, path_x_array, update_lane_geometry=model_updated or self._transform_dirty)
+      if hidden:
+        self._geometry_stale = True
+      else:
+        self._update_model(lead_one, path_x_array, update_lane_geometry=model_updated or self._transform_dirty or stale)
+        self._geometry_stale = False
       self._transform_dirty = False
 
     lead_ready = render_lead_indicator and bool(self._path.raw_points.size)
@@ -315,12 +331,19 @@ class ModelRenderer(ModelGeometry, Widget):
       widths.extend((0.16, 0.16, y_off))
       source = [line.raw_points[:lane_max_idx + 1] for line in lines]
       source.append(self._path.raw_points[:max_idx + 1])
-      polygons = self._map_lines_to_polygons(source, widths, max(lane_max_idx, max_idx),
-                                            z_offsets=(0, 0, 0, 0, 0, 0, self._path_offset_z), invert_last=True)
+      z_offsets = (0, 0, 0, 0, 0, 0, self._path_offset_z)
+      if USE_NATIVE_GEOMETRY:
+        polygons = self._native_polygons(source, widths, z_offsets)
+      else:
+        polygons = self._map_lines_to_polygons(source, widths, max(lane_max_idx, max_idx),
+                                              z_offsets=z_offsets, invert_last=True)
       for line, polygon in zip(lines, polygons[:-1], strict=True):
         line.projected_points = polygon
       self._path.projected_points = polygons[-1]
       self._lane_projection_clip = clip_key
+    elif USE_NATIVE_GEOMETRY:
+      self._path.projected_points = self._native_polygons([self._path.raw_points[:max_idx + 1]], (y_off,),
+                                                          (self._path_offset_z,))[0]
     else:
       self._path.projected_points = self._map_line_to_polygon(
         self._path.raw_points, y_off, self._path_offset_z, max_idx, allow_invert=False
@@ -567,6 +590,12 @@ class ModelRenderer(ModelGeometry, Widget):
       right_screen = right_screen[:, keep]
 
     return np.vstack((left_screen.T, right_screen[:, ::-1].T)).astype(np.float32)
+
+  def _native_polygons(self, lines: list[np.ndarray], widths, z_offsets) -> list[np.ndarray]:
+    """Same result as _map_lines_to_polygons(..., invert_last=True) for pre-sliced lines, in one native call."""
+    clip = self._clip_region
+    return _project_polygons(lines, np.asarray(widths, dtype=np.float32), np.asarray(z_offsets, dtype=np.float32),
+                             self._car_space_transform, clip.x, clip.y, clip.width, clip.height, True)
 
   def _map_lines_to_polygons(self, lines: list[np.ndarray], widths: list[float], max_idx: int,
                              *, z_offsets: tuple[float, ...] | None = None, invert_last: bool = False) -> list[np.ndarray]:

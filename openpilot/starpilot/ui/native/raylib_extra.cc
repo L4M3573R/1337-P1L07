@@ -1,4 +1,6 @@
 #include <dlfcn.h>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -7,6 +9,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 #include <raylib.h>
 #include <rlgl.h>
 
@@ -27,6 +30,84 @@ int index(int i, int size) {
   return i;
 }
 }
+// Native twin of ModelRenderer._map_lines_to_polygons (selfdrive/ui/mici/onroad/model_renderer.py), kept in this module
+// so it ships with the existing prebuilt artifact. Projects model lines (lanes, road edges, path) into screen-space
+// ribbon polygons in one call, replacing ~60 small numpy operations per model update. Same steps and float32 arithmetic:
+//   drop points with x < 0, offset each point by -/+ width in y and by its z offset, multiply by the 3x3 car-space
+//   transform, drop pairs whose projected z is under 1e-6, divide, keep pairs whose both sides are inside the clip
+//   rectangle (inclusive), and for the last line optionally keep only points that climb the screen (hill inversion).
+// Output per line: float32 (2k, 2) array, left side in order then right side reversed; (0, 2) when nothing is left.
+namespace geometry {
+using Points = nb::ndarray<const float, nb::shape<-1, 3>, nb::device::cpu>;
+using Vector = nb::ndarray<const float, nb::ndim<1>, nb::device::cpu>;
+using Matrix = nb::ndarray<const float, nb::shape<3, 3>, nb::device::cpu>;
+using Polygon = nb::ndarray<nb::numpy, float, nb::shape<-1, 2>>;
+
+Polygon make_polygon(const std::vector<float> &lx, const std::vector<float> &ly,
+                     const std::vector<float> &rx, const std::vector<float> &ry) {
+  const size_t k = lx.size();
+  float *data = new float[k ? 4 * k : 1];
+  for (size_t i = 0; i < k; ++i) {
+    data[2 * i] = lx[i];
+    data[2 * i + 1] = ly[i];
+    data[2 * (k + i)] = rx[k - 1 - i];
+    data[2 * (k + i) + 1] = ry[k - 1 - i];
+  }
+  nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<float *>(p); });
+  return Polygon(data, {2 * k, size_t(2)}, owner);
+}
+
+nb::list project_polygons(const std::vector<Points> &lines, const Vector &widths, const Vector &z_offsets,
+                          const Matrix &transform, float clip_x, float clip_y, float clip_w, float clip_h,
+                          bool invert_last) {
+  if (widths.shape(0) != lines.size() || z_offsets.shape(0) != lines.size()) {
+    throw nb::value_error("widths and z_offsets need one value per line");
+  }
+  float t[9];
+  for (size_t r = 0; r < 3; ++r)
+    for (size_t c = 0; c < 3; ++c) t[3 * r + c] = transform(r, c);
+  const float x_min = clip_x, x_max = clip_x + clip_w, y_min = clip_y, y_max = clip_y + clip_h;
+
+  nb::list out;
+  std::vector<float> lx, ly, rx, ry;
+  for (size_t li = 0; li < lines.size(); ++li) {
+    const Points &line = lines[li];
+    const float w = widths(li), zo = z_offsets(li);
+    lx.clear(); ly.clear(); rx.clear(); ry.clear();
+    for (size_t i = 0; i < line.shape(0); ++i) {
+      const float px = line(i, 0), py = line(i, 1), pz = line(i, 2);
+      if (!(px >= 0.0f)) continue;
+      const float yl = py - w, yr = py + w, z = pz + zo;
+      const float lX = t[0] * px + t[1] * yl + t[2] * z;
+      const float lY = t[3] * px + t[4] * yl + t[5] * z;
+      const float lZ = t[6] * px + t[7] * yl + t[8] * z;
+      const float rX = t[0] * px + t[1] * yr + t[2] * z;
+      const float rY = t[3] * px + t[4] * yr + t[5] * z;
+      const float rZ = t[6] * px + t[7] * yr + t[8] * z;
+      if (!(std::fabs(lZ) >= 1e-6f) || !(std::fabs(rZ) >= 1e-6f)) continue;
+      const float sx_l = lX / lZ, sy_l = lY / lZ, sx_r = rX / rZ, sy_r = rY / rZ;
+      if (!(sx_l >= x_min && sx_l <= x_max && sy_l >= y_min && sy_l <= y_max &&
+            sx_r >= x_min && sx_r <= x_max && sy_r >= y_min && sy_r <= y_max)) continue;
+      lx.push_back(sx_l); ly.push_back(sy_l); rx.push_back(sx_r); ry.push_back(sy_r);
+    }
+    if (invert_last && li + 1 == lines.size() && lx.size() > 1) {
+      size_t keep = 0;
+      float running = ly[0];
+      for (size_t i = 0; i < lx.size(); ++i) {
+        running = std::fmin(running, ly[i]);
+        if (ly[i] == running) {
+          lx[keep] = lx[i]; ly[keep] = ly[i]; rx[keep] = rx[i]; ry[keep] = ry[i];
+          ++keep;
+        }
+      }
+      lx.resize(keep); ly.resize(keep); rx.resize(keep); ry.resize(keep);
+    }
+    out.append(make_polygon(lx, ly, rx, ry));
+  }
+  return out;
+}
+}  // namespace geometry
+
 NB_MODULE(_raylib_extra, module) {
   nb::class_<GlyphView>(module, "GlyphView")
     .def("__len__", [](GlyphView &v) { return v.font->glyphCount; })
@@ -177,4 +258,7 @@ NB_MODULE(_raylib_extra, module) {
     target.attr("RL_ONE") = RL_ONE;
     backend = path;
   });
+  module.def("project_polygons", &geometry::project_polygons, nb::arg("lines"), nb::arg("widths"), nb::arg("z_offsets"),
+             nb::arg("transform"), nb::arg("clip_x"), nb::arg("clip_y"), nb::arg("clip_w"), nb::arg("clip_h"),
+             nb::arg("invert_last"));
 }

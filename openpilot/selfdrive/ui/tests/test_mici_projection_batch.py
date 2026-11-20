@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
+from openpilot.selfdrive.ui.mici.onroad import model_renderer as mici_model_renderer
 from openpilot.selfdrive.ui.mici.onroad.model_renderer import ModelRenderer
 from openpilot.selfdrive.ui.onroad.model_renderer import ModelRenderer as LargeModelRenderer
 from openpilot.selfdrive.ui.onroad.model_renderer import ModelPoints
@@ -121,7 +122,10 @@ def test_transform_guard_preserves_render_projection_updates(renderer, monkeypat
   renderer._torque_filter = Mock()
   renderer._path = SimpleNamespace(raw_points=np.array([[10, 0, 0]], dtype=np.float32))
   renderer._lead_indicator_enabled = False
-  renderer._visual_status = lambda: model_renderer.UIStatus.DISENGAGED
+  # Path visible: while disengaged the projection is deferred (covered by the hidden-path test below).
+  renderer._visual_status = lambda: model_renderer.UIStatus.ENGAGED
+  renderer._draw_lane_lines = Mock()
+  renderer._draw_path = Mock()
   renderer._update_model = Mock()
   renderer._update_raw_points = Mock()
   renderer._transform_dirty = True
@@ -163,6 +167,9 @@ def test_transform_guard_preserves_render_projection_updates(renderer, monkeypat
 @pytest.mark.parametrize("renderer_class", [ModelRenderer, LargeModelRenderer])
 def test_radar_only_reuses_lane_geometry_without_changing_path_filters_or_clip(renderer, renderer_class, monkeypatch):
   import copy
+
+  # This test counts calls into the numpy batch; native projection has its own parity test below.
+  monkeypatch.setattr(mici_model_renderer, "USE_NATIVE_GEOMETRY", False)
 
   if renderer_class is LargeModelRenderer:
     large_renderer = object.__new__(renderer_class)
@@ -264,3 +271,71 @@ def test_large_render_preserves_lead_cadence_and_lane_invalidation(renderer, mon
   view._update_raw_points.assert_called_once_with(sm["modelV2"])
   assert view._update_model.call_count == view._update_leads.call_count == 3
   assert view._draw_path.call_count == view._draw_lead_indicator.call_count == 4
+
+
+@pytest.mark.skipif(mici_model_renderer._project_polygons is None, reason="native projection not in this _raylib_extra build")
+def test_native_projection_matches_numpy_batch():
+  rng = np.random.default_rng(7)
+  view = object.__new__(ModelRenderer)
+  view._clip_region = SimpleNamespace(x=-500.0, y=-500.0, width=1536.0, height=1240.0)
+  # Camera-like transform: screen x from lateral offset, screen y from height, depth from distance.
+  view._car_space_transform = np.array([[268.0, 910.0, 0.0], [120.0, 0.0, 910.0], [1.0, 0.0, 0.0]], dtype=np.float32)
+  for _ in range(200):
+    lines = []
+    for _line in range(7):
+      n = int(rng.integers(0, 34))
+      x = np.sort(rng.uniform(-5, 120, n)).astype(np.float32)
+      pts = np.column_stack((x, rng.uniform(-8, 8, n), rng.uniform(-1.5, 1.5, n))).astype(np.float32)
+      lines.append(pts.T.copy().T)  # column-major like the renderer's raw points
+    widths = [float(w) for w in rng.uniform(0.0, 1.0, 7)]
+    z_offsets = (0, 0, 0, 0, 0, 0, float(rng.uniform(0.8, 1.6)))
+    native = view._native_polygons(lines, widths, z_offsets)
+    numpy = view._map_lines_to_polygons(lines, widths, max(len(line) for line in lines) - 1, z_offsets=z_offsets, invert_last=True)
+    for a, b in zip(native, numpy, strict=True):
+      assert a.dtype == np.float32 and a.shape == b.shape
+      np.testing.assert_allclose(a, b, rtol=0, atol=1e-3)
+
+
+def test_hidden_path_defers_projection_until_it_shows(renderer, monkeypatch):
+  from openpilot.selfdrive.ui.mici.onroad import model_renderer
+
+  class Messages(dict):
+    recv_frame = {"extrinsicsCalibration": 1, "modelV2": 1}
+    updated = {"carParams": False, "modelV2": False, "radarState": False}
+    valid = {"radarState": False}
+
+  sm = Messages(carOutput=SimpleNamespace(actuatorsOutput=SimpleNamespace(torque=0)),
+                selfdriveState=SimpleNamespace(experimentalMode=False),
+                extrinsicsCalibration=SimpleNamespace(height=[]), modelV2=object())
+  monkeypatch.setattr(model_renderer, "ui_state", SimpleNamespace(sm=sm, started_frame=0))
+  status = [model_renderer.UIStatus.DISENGAGED]
+  renderer._torque_filter = Mock()
+  renderer._path = SimpleNamespace(raw_points=np.array([[10, 0, 0]], dtype=np.float32))
+  renderer._lead_indicator_enabled = False
+  renderer._visual_status = lambda: status[0]
+  renderer._draw_lane_lines = Mock()
+  renderer._draw_path = Mock()
+  renderer._update_model = Mock()
+  renderer._update_raw_points = Mock()
+  renderer._transform_dirty = True
+
+  # Hidden: new model frames still refresh the raw points (leads use them) but nothing is projected or drawn.
+  for _ in range(3):
+    sm.updated["modelV2"] = True
+    renderer._render(renderer._clip_region)
+  sm.updated["modelV2"] = False
+  assert renderer._update_raw_points.call_count == 3
+  renderer._update_model.assert_not_called()
+  renderer._draw_path.assert_not_called()
+  assert not renderer._transform_dirty
+
+  # First visible frame projects everything (lanes included) without waiting for the next model message.
+  status[0] = model_renderer.UIStatus.ENGAGED
+  renderer._render(renderer._clip_region)
+  assert renderer._update_model.call_count == 1
+  assert renderer._update_model.call_args.kwargs == {"update_lane_geometry": True}
+  renderer._draw_path.assert_called_once()
+
+  # Visible with no new input: no reprojection.
+  renderer._render(renderer._clip_region)
+  assert renderer._update_model.call_count == 1
