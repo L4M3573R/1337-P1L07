@@ -52,6 +52,7 @@ from openpilot.starpilot.models.receipt import ModelReceiptOwner
 from openpilot.starpilot.car.volkswagen.model_smoothing import seconds as volkswagen_smoothing
 from openpilot.starpilot.car.hyundai.model_smoothing import seconds as kona_smoothing
 from openpilot.starpilot.models.status import ModelVariant
+from openpilot.starpilot.models.step_timing import StepTiming
 from openpilot.starpilot.models.startup import report_load_timeout, wait_for_chestnut_power
 from openpilot.starpilot.models.recovery import STARTUP_FALLBACK_EXIT
 from openpilot.starpilot.navigation.intent import TurnIntent, matching_turn_signal
@@ -545,6 +546,7 @@ def main(demo=False):
   DH = DesireHelper(runtime_lane_policy)
   navigation_turn = TurnIntent(params, CP)
   turn_log = ChangeLog('turn_intent')  # decision log for remote route review
+  step_timing = StepTiming(lambda **packet: cloudlog.event("modeld.steps", **packet))
   lane_status_session = uuid.uuid4().hex
   lane_status_sequence = 0
 
@@ -668,6 +670,8 @@ def main(demo=False):
       model_output = None
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
+    if model_output is not None:
+      step_timing.add(getattr(model, 'step_ns', None), model_execution_time, str(getattr(model, 'model_id', '')), bool(model.chestnut))
     if model is jetlink_model and HOOKS.handed_over(model):
       frame_dropped_filter.x = 0.
       frame_drop_ratio = 0.
