@@ -28,9 +28,30 @@ INPUT_W, INPUT_H = 448, 256
 MIN_INTERVAL_S = 0.25
 BUSY_FACTOR = 2.5  # never spend more than 1/BUSY_FACTOR of a little core
 MODEL_CHECK_S = 10.0
+# Look hard only where a stop can matter (2026-11-19: it ran at its 40 % cap everywhere, parked and highway included).
+STOPPED_MPS = 0.5          # at rest there is nothing new to find; the rest score needs no frames
+HIGHWAY_MPS = 29.0         # about 65 mph
+NEAR_STOP_M = 150.0        # the driving model plans a stop this close: look at full rate
+BRAKING_MPS2 = -0.7        # slowing like an approach: look at full rate
+SEEN_P = 0.2               # our model saw something stop-like in its latest frame
+CRUISE_INTERVAL_S = 1.0
+HIGHWAY_INTERVAL_S = 2.0
 LABEL_RANGE_M = 120.0
 CHECKPOINTS_M = (60.0, 30.0, 15.0)
 HISTORY_M = 150.0
+
+
+def scan_interval(speed_mps: float, model_stop_m: float | None, ours_active: bool, seen_p: float,
+                  accel_mps2: float, full_interval_s: float) -> float | None:
+  """Seconds until the next look, or None to pause while stopped."""
+  if not math.isfinite(speed_mps) or speed_mps < STOPPED_MPS:
+    return None
+  near = (ours_active or seen_p >= SEEN_P or
+          (model_stop_m is not None and math.isfinite(model_stop_m) and 0.0 <= model_stop_m <= NEAR_STOP_M) or
+          (math.isfinite(accel_mps2) and accel_mps2 <= BRAKING_MPS2))
+  if near:
+    return full_interval_s
+  return max(full_interval_s, HIGHWAY_INTERVAL_S if speed_mps >= HIGHWAY_MPS else CRUISE_INTERVAL_S)
 
 
 def model_path():
@@ -52,9 +73,14 @@ class Shadow:
     self.approached = False
     self.last: Choice | None = None
     self.model_stop_m: float | None = None  # chestnut's latest planned stop, fed to a corrector model
+    self.last_probability = 0.0  # our model's latest stop probability, for the scan rate
+    self.speed_mps = 0.0
+    self.accel_mps2 = 0.0
 
   def inference(self, out, odometer_m: float, now_s: float) -> None:
-    self.fuser.update(decode(out), odometer_m, now_s)
+    inf = decode(out)
+    self.last_probability = inf.probability if math.isfinite(inf.probability) else 0.0
+    self.fuser.update(inf, odometer_m, now_s)
 
   def tick(self, now_s: float, speed_mps: float, model_stop_m: float | None, model_big: bool, model_should_stop: bool,
            ours_available: bool, lead_m: float | None = None) -> Choice:
@@ -62,6 +88,7 @@ class Shadow:
       self.odometer_m += max(speed_mps, 0.0) * min(max(now_s - self.last_t, 0.0), 0.5)
     self.last_t = now_s
     self.model_stop_m = model_stop_m
+    self.speed_mps = speed_mps
     self.fuser.passed(self.odometer_m, speed_mps)
     c = choose(self.fuser, self.odometer_m, now_s, model_stop_m, model_big, model_should_stop, ours_available)
     self.last = c
@@ -167,7 +194,7 @@ def main() -> None:
   shadow = Shadow()
   client = VisionIpcClient('camerad', VisionStreamType.VISION_STREAM_NARROW_ROAD, True)
   net, net_mtime, last_check, corrector = None, None, -1e9, False
-  next_inference, interval = 0.0, MIN_INTERVAL_S
+  next_inference, took_s, last_look = 0.0, MIN_INTERVAL_S / BUSY_FACTOR, None
   while True:
     sm.update(50)
     now = time.monotonic()
@@ -184,7 +211,12 @@ def main() -> None:
       except Exception as e:
         net, net_mtime = None, None
         log_error(FEATURE, e, where='load')
-    if net is not None and now >= next_inference:
+    full = max(MIN_INTERVAL_S, BUSY_FACTOR * took_s)
+    wait = scan_interval(shadow.speed_mps, shadow.model_stop_m, shadow.fuser.point_m is not None,
+                         shadow.last_probability, shadow.accel_mps2, full)
+    if wait is not None and last_look is not None:
+      next_inference = last_look + wait  # a faster need (a stop just showed up) is not held to the slow wait
+    if net is not None and wait is not None and now >= next_inference:
       try:
         if not client.is_connected():
           client.connect(False)
@@ -199,14 +231,15 @@ def main() -> None:
             else:
               net.setInput(blob)
             out = net.forward().reshape(-1)[:3]
-            took = time.monotonic() - t0
+            took_s = time.monotonic() - t0
             shadow.inference(out, odometer, time.monotonic())
-            interval = max(MIN_INTERVAL_S, BUSY_FACTOR * took)
       except Exception as e:
         log_error(FEATURE, e, where='inference')
-      next_inference = now + interval
+      last_look = now
+      next_inference = now + full
     if sm.updated['modelV2']:
       md, cs, lead = sm['modelV2'], sm['carState'], sm['radarState'].leadOne
+      shadow.accel_mps2 = cs.aEgo
       stop = model_stop_distance(md.position.x, md.velocity.x)
       shadow.tick(now, cs.vEgo, stop, md.big, md.action.shouldStop, net is not None,
                   lead.dRel if lead.present else None)
