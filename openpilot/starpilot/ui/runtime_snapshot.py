@@ -62,6 +62,24 @@ from openpilot.starpilot.speed_limits import offset_document
 
 SLC_SIGN_HOLD_NS = 150_000_000
 EVENTS_DISPLAY_MAX_AGE_NS = 1_500_000_000  # selfdrived sends onroadEvents on every change and at least once a second
+_UNSET = object()
+
+
+class _LastInput:
+  """Reuse a pure function's result while its input is the same object as last time.
+
+  Holding the input keeps its identity from being reused by a new object.
+  """
+  __slots__ = ('fn', 'source', 'value')
+
+  def __init__(self, fn: Callable[[Any], Any]):
+    self.fn, self.source, self.value = fn, _UNSET, None
+
+  def __call__(self, source: Any) -> Any:
+    if source is not self.source:
+      self.value = self.fn(source)
+      self.source = source
+    return self.value
 
 
 def _boot_time_ns() -> int:
@@ -367,6 +385,10 @@ class RuntimeSnapshotAdapter:
     self._vision_stop = StopConfirmation(display_only=True)
     self._slc_sign_cache: tuple[int, tuple[int, int], str, SpeedLimitObservation] | None = None
     self._mono_clock, self._boot_clock = mono_clock, boot_clock
+    # CarParams is one object per drive, so these capability checks only rerun when it changes (see _LastInput).
+    # Messages are not cached this way: every one the snapshot reads arrives at 20 Hz or faster, so it is new each frame.
+    self._lateral_supported = _LastInput(lateral_supported)
+    self._longitudinal_supported = _LastInput(longitudinal_supported)
     self._device_after_mono_ns = mono_clock()
     self._device_offset_ns: int | None = None
     self._last_pair_offset_ns: int | None = None
@@ -572,7 +594,7 @@ class RuntimeSnapshotAdapter:
     traffic_eligible = False
     if getattr(traffic_wire, 'version', 0) == 1 and cp is not None:
       try:
-        traffic_eligible = longitudinal_supported(cp)
+        traffic_eligible = self._longitudinal_supported(cp)
       except (AttributeError, TypeError, ValueError):
         pass  # A partial or unreadable CP never qualifies a display receipt.
     if traffic_eligible:
@@ -761,7 +783,7 @@ class RuntimeSnapshotAdapter:
                          gas_pressed_override=bool(display_events is not None and any(
                            e.name == log.OnroadEvent.EventName.gasPressedOverride for e in display_events)),
                          right_hand_drive=getattr(self, '_display_rhd', False),
-                         switchback_mode=bool(lateral_supported(cp) and display_control is not None and display_control.latActive and
+                         switchback_mode=bool(self._lateral_supported(cp) and display_control is not None and display_control.latActive and
                            self._switchback.sample_state(slc, drive_id=drive_id, now_ns=now_ns,
                              event_ns=int(sm.logMonoTime['slcState']))),
                          traffic_mode=bool(traffic is not None and traffic.state == 'active'),
