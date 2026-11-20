@@ -8,8 +8,10 @@ Every few seconds it prints one row: engaged / speed; the three test switches in
 (boost mode, chestnut_irq_core, ui_cores); the clocks both clusters actually run at; max temperature and fan;
 model execution time (mean / max over the row); the Chestnut USB interrupt rate and the core taking most of it;
 the UI main thread's CPU use and its time spent waiting for a free core; and the CPU use of card, controlsd,
-selfdrived, plannerd, radard and modeld (percent of one core). At the start it checks that the UI's native
-model-path projection is in the installed build. Ctrl-C (or --minutes) ends it with averages per switch setting.
+selfdrived, plannerd, radard and modeld (percent of one core). When modeld publishes its modeld.steps timing
+event (every 30 s), a line shows each step's p50/max (prepare, warp, policy, wait, parse). At the start it checks
+that the UI's native model-path projection is in the installed build. Ctrl-C (or --minutes) ends it with averages
+per switch setting.
 
 --rotate SWITCH cycles ONE switch every --window minutes, editing only that key (atomic write, every change
 logged, the file restored byte for byte at the end), so one update can still be read change by change:
@@ -101,6 +103,31 @@ def switches():
           "irq": "stock" if irq is None else str(irq),
           "ui": "stock" if not isinstance(ui, list) else "".join(str(c) for c in ui)}
 
+STEPS = ("total", "prepare", "warp", "policy", "wait", "parse")
+
+def plain(v):
+  """Drop swaglog type suffixes ($s, $b, ...) from keys, if present."""
+  if isinstance(v, dict):
+    return {k.split("$", 1)[0]: plain(x) for k, x in v.items()}
+  return v
+
+def steps_event(raw):
+  if b"modeld.steps" not in raw:
+    return None
+  try:
+    msg = plain(json.loads(raw)).get("msg")
+  except (ValueError, AttributeError):
+    return None
+  if not isinstance(msg, dict) or msg.get("event") != "modeld.steps":
+    return None
+  out = {"model": msg.get("modelId"), "chestnut": msg.get("chestnut"), "frames": msg.get("frames"),
+         "timed": msg.get("timedFrames")}
+  for step in STEPS:
+    d = msg.get(step)
+    if isinstance(d, dict):
+      out[step] = [d.get("p50"), d.get("max")]
+  return out
+
 try:
   from openpilot.starpilot.ui.native import _raylib_extra
   native = hasattr(_raylib_extra, "project_polygons")
@@ -111,6 +138,7 @@ print(json.dumps({"start": True, "native_projection": native,
 
 import cereal.messaging as messaging
 sm = messaging.SubMaster(["selfdriveState", "carState", "deviceState", "modelV2"])
+log_sock = messaging.sub_sock("logMessage", conflate=False)
 procs = pids()
 def snap():
   out = {name: ticks(f"/proc/{pid}/stat") for name, pid in procs.items()}
@@ -122,11 +150,15 @@ def ui_sched():
 prev, pt, prev_sched, prev_irq = snap(), time.monotonic(), ui_sched(), usb_irq()
 while True:
   end = time.monotonic() + every
-  model_ms = []
+  model_ms, steps = [], None
   while time.monotonic() < end:
     sm.update(200)
     if sm.updated["modelV2"]:
       model_ms.append(sm["modelV2"].modelExecutionTime * 1000)
+    for m in messaging.drain_sock(log_sock):
+      ev = steps_event(m.logMessage.encode() if isinstance(m.logMessage, str) else bytes(m.logMessage))
+      if ev is not None:
+        steps = ev
   cur, ct, cur_sched, cur_irq = snap(), time.monotonic(), ui_sched(), usb_irq()
   if any(v is None for v in cur.values()):
     procs = pids(); prev, pt, prev_sched, prev_irq = snap(), time.monotonic(), ui_sched(), usb_irq()
@@ -147,7 +179,7 @@ while True:
                     "temp": round(float(ds.maxTempC), 1), "fan": int(ds.fanSpeedPercentDesired),
                     "model_mean": round(sum(model_ms) / len(model_ms), 2) if model_ms else None,
                     "model_max": round(max(model_ms), 2) if model_ms else None,
-                    "ui_wait": ui_wait, "usb_irq_rate": irq_rate, "usb_irq_cpu": irq_cpu, "cpu": cpu}), flush=True)
+                    "ui_wait": ui_wait, "usb_irq_rate": irq_rate, "usb_irq_cpu": irq_cpu, "cpu": cpu, "steps": steps}), flush=True)
 '''
 
 SET_KEY = r'''
@@ -175,6 +207,7 @@ ROTATIONS = {
   "irq": ("chestnut_irq_core", [None, 6]),
   "ui": ("ui_cores", [None, [0, 1, 2, 6], [4, 5, 6]]),
 }
+STEPS = ("total", "prepare", "warp", "policy", "wait", "parse")
 COLUMNS = ("ui_main", "card", "controlsd", "selfdrived", "plannerd", "radard", "modeld")
 
 
@@ -244,6 +277,11 @@ def main():
               f"{row['irq']:>5s} {row['ui']:>6s} {row['little_mhz']:>5d}/{row['big_mhz']:<5d} {row['temp']:5.1f} "
               f"{row['fan']:3d}% {model:>11s} {irq:>12s} {fmt(row['ui_wait'], '6.1f', 6)}%  "
               + " ".join(f"{row['cpu'].get(c, float('nan')):9.1f}%" for c in COLUMNS), flush=True)
+        if row.get("steps"):
+          st = row["steps"]
+          parts = " ".join(f"{k} {fmt(st[k][0], '.1f', 1)}/{fmt(st[k][1], '.1f', 1)}" for k in STEPS if k in st)
+          print(f"    modeld.steps p50/max ms ({st.get('model')}, timed {st.get('timed')}/{st.get('frames')}): "
+                f"{parts or 'no timed frames'}", flush=True)
         if n and n % 20 == 0:
           print(header)
         if args.rotate and time.monotonic() >= next_change:
@@ -279,6 +317,18 @@ def main():
     print(f"{' / '.join(key):32s} {len(rows) * args.every / 60:5.1f} {max(r['temp'] for r in rows):8.1f} "
           f"{mean('model_mean'):5.1f}/{model_max:<5.1f} {mean('usb_irq_rate'):8.0f} {mean('ui_wait'):6.1f}%  "
           + " ".join(f"{sum(r['cpu'].get(c, 0.0) for r in rows) / len(rows):9.1f}%" for c in COLUMNS))
+  if any(r.get("steps") for rows in groups.values() for r in rows):
+    print("\nmodeld.steps per setting: mean of the 30 s p50s, ms (events)")
+    print(f"{'state / boost / irq / ui':32s} " + " ".join(f"{k:>8s}" for k in STEPS))
+    for key, rows in sorted(groups.items()):
+      evs = [r["steps"] for r in rows if r.get("steps")]
+      if not evs:
+        continue
+      cells = []
+      for k in STEPS:
+        vals = [e[k][0] for e in evs if k in e and isinstance(e[k][0], (int, float))]
+        cells.append(f"{sum(vals) / len(vals):8.2f}" if vals else f"{'-':>8s}")
+      print(f"{' / '.join(key):32s} " + " ".join(cells) + f"  ({len(evs)})")
   print("baseline 2026-11-20 (stock clocks, before the UI changes): ui_main 44 engaged / 39 parked, ui wait 31 %; "
         "card 68, selfdrived 58, controlsd 45-55, plannerd 22-31, radard 6-12; model 35.5 ms p50")
   return 0
