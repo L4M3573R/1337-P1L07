@@ -104,12 +104,14 @@ def pass_profile(curve: list, approach_speed: float) -> list[list[float]]:
   v = np.array([x.v for x in curve])
   k = np.array([abs(x.curvature) for x in curve])
   s = np.concatenate([[0.0], np.cumsum(0.5 * (v[1:] + v[:-1]) * np.diff(t))])
-  if s[-1] <= 0:
+  if not np.all(np.isfinite(k)) or not np.all(np.isfinite(s)) or s[-1] <= 0:
     return []
   pos = s / s[-1]
   out = []
   for target in np.linspace(0.0, 1.0, PROFILE_POINTS):
     near = np.abs(pos - target) <= 0.5 / (PROFILE_POINTS - 1) + 1e-9
+    if not near.any():  # a gap in the samples (11-20: a NaN here crashed curvemapd): use the closest sample
+      near = np.abs(pos - target) == np.abs(pos - target).min()
     kk, vv = float(np.median(k[near])), float(np.median(v[near]))
     out.append([round(float(target), 2), kk, kk * vv * vv, 1.0 if vv <= approach_speed - SLOWED_MPS else 0.0])
   return out
@@ -281,7 +283,7 @@ class CurveMemory:
     if p.profile and p.verdict in ('manual', 'confirmed', 'following'):
       # every part of the curve teaches comfort at its own tightness: a tightening curve covers several at once
       for _pos, kk, lat_here, chosen in p.profile:
-        if kk < CURVE_K:
+        if not (math.isfinite(kk) and math.isfinite(lat_here)) or kk < CURVE_K:
           continue
         if p.verdict == 'manual' and chosen:
           self.comfort.observe(kk, lat_here)
@@ -324,8 +326,8 @@ class CurveMemory:
 
   def _learn_profile(self, record: CurveRecord, p: CurvePass, before: float) -> None:
     """Keep each curve's shape and the speed it is taken at along it, point by point."""
-    if not p.profile:
-      return
+    if not p.profile or not all(math.isfinite(x) for point in p.profile for x in point):
+      return  # never store a NaN in the saved curve memory
     if not record.profile:
       record.profile = [[pos, kk, max(lat_here, self.comfort.comfort(max(kk, CURVE_K))) if not chosen or p.verdict != 'manual'
                          else lat_here] for pos, kk, lat_here, chosen in p.profile]

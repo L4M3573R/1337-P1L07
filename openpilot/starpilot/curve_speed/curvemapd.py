@@ -307,6 +307,7 @@ def lead_of(sm, v: float) -> tuple[float, float]:
 def main() -> None:
   import openpilot.cereal.messaging as messaging
   from openpilot.common.swaglog import cloudlog
+  from openpilot.starpilot.diagnostics.features import log_error
 
   os.nice(10)
   root = storage()
@@ -368,7 +369,11 @@ def main() -> None:
           with open(clog, 'a') as f:
             f.write(json.dumps(check, separators=(',', ':')) + '\n')
       experimental = bool(sm['selfdriveState'].experimentalMode) if sm.seen['selfdriveState'] else False
-      line = shadow.add(sample_from(sm), experimental)
+      try:
+        line = shadow.add(sample_from(sm), experimental)
+      except (ValueError, ArithmeticError) as e:  # one bad pass skips that curve; it never stops curve speed for the drive
+        log_error('curve_map', e, where='learn')
+        line = None
       if line is not None:
         log = folder / 'shadow' / f"{time.strftime('%Y-%m-%d')}.jsonl"
         log.parent.mkdir(parents=True, exist_ok=True)

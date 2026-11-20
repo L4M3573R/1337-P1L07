@@ -569,3 +569,23 @@ def test_measured_curvature_prefers_the_cars_yaw_rate_and_falls_back():
   assert measured_curvature(sm) == pytest.approx(0.004)
   sm['carState'].vEgo, sm['carState'].yawRate = 20.0, float('nan')
   assert measured_curvature(sm) == pytest.approx(0.004)
+
+
+def test_a_gap_in_the_samples_never_puts_nan_in_a_curve_profile():
+  # 11-20 drive: an empty profile bin came out NaN and crashed curvemapd in learn()
+  from types import SimpleNamespace
+  from openpilot.starpilot.curve_speed.curve_memory import pass_profile
+  curve = [SimpleNamespace(t=t, v=15.0, curvature=0.01) for t in (0.0, 0.1, 0.2, 0.6, 0.7, 0.8)]
+  profile = pass_profile(curve, 15.0)
+  assert len(profile) == 11 and all(math.isfinite(x) for point in profile for x in point)
+
+
+def test_learning_skips_nan_profile_points_and_never_saves_them(tmp_path):
+  memory = CurveMemory(tmp_path / 'curves.json')
+  base = {'start_t': 0.0, 'duration': 4.0, 'curvature': 1 / 100, 'apex_speed': 15.0, 'latitude': 34.0, 'longitude': -117.0,
+          'bearing': 90.0, 'comma_speed': True, 'comma_steering': True}
+  profile = [[i / 10, 0.01, 2.25, 0.0] for i in range(11)]
+  profile[5] = [0.5, math.nan, math.nan, 0.0]
+  for verdict in ('confirmed', 'manual', 'struggled'):
+    record = memory.learn(CurvePass(lateral=2.2, verdict=verdict, profile=[list(p) for p in profile], **base))
+  assert all(math.isfinite(x) for point in record.profile for x in point)
