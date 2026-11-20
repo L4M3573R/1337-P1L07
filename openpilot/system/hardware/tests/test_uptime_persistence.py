@@ -71,7 +71,7 @@ def test_uptime_disk_persistence_cannot_hold_temperature_updates(monkeypatch, te
   monkeypatch.setattr(hardwared, "HardwareLoopTiming", lambda: SimpleNamespace(mark=lambda phase: None))
   monkeypatch.setattr(hardwared, "PowerMonitoring", lambda: SimpleNamespace(calculate=lambda *args: None, get_power_used=lambda: 0.,
                                                                           get_car_battery_capacity=lambda: 0., should_shutdown=lambda *args: False))
-  monkeypatch.setattr(hardwared, "FanController", lambda hz: SimpleNamespace(update=lambda *args: 50))
+  monkeypatch.setattr(hardwared, "FanController", lambda hz: SimpleNamespace(update=lambda *args, **kwargs: 50))
   monkeypatch.setattr(hardwared, "Chestnut", lambda: SimpleNamespace(update=lambda *args: None, failed=False, flashing=False))
   monkeypatch.setattr(hardwared, "ChestnutStatus", lambda: SimpleNamespace(update=lambda *args: None))
   monkeypatch.setattr(hardwared, "get_usb_state", lambda: None)

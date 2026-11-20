@@ -33,6 +33,7 @@ from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.power_telemetry import PowerTelemetry
 from openpilot.system.hardware.hardware_timing import HardwareLoopTiming
 from openpilot.system.hardware.fan_controller import FanController
+from openpilot.starpilot.power.cpu_boost import CONFIG_NAME as CPU_BOOST_CONFIG, CpuBoost
 from openpilot.system.hardware.chestnut.monitoring import chestnut_state_thread
 from openpilot.system.hardware.chestnut.status import ChestnutStatus
 from openpilot.common.version import terms_version, training_version
@@ -287,6 +288,11 @@ def hardware_thread(end_event, hw_queue, power_telemetry: PowerTelemetry) -> Non
   thermal_config = HARDWARE.get_thermal_config()
 
   fan_controller = FanController(int(1./DT_HW))
+  cpu_boost = None
+  if COMMA_HARDWARE:
+    from openpilot.common.utils import sudo_write
+    cpu_boost = CpuBoost(starpilot_storage_root() / CPU_BOOST_CONFIG, sudo_write,
+                         log=lambda name, **kw: cloudlog.event(name, **kw))
   aggressive_cooling = read_aggressive_cooling(params)
   cooling_ignition_prev = False
   chestnut = Chestnut()
@@ -395,7 +401,8 @@ def hardware_thread(end_event, hw_queue, power_telemetry: PowerTelemetry) -> Non
     if onroad_conditions["ignition"] and not cooling_ignition_prev:
       aggressive_cooling = read_aggressive_cooling(params)
     cooling_ignition_prev = onroad_conditions["ignition"]
-    msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"], aggressive_cooling)
+    msg.deviceState.fanSpeedPercentDesired = fan_controller.update(all_comp_temp, onroad_conditions["ignition"], aggressive_cooling,
+                                                                   boost=cpu_boost is not None and cpu_boost.fan_boost(onroad_conditions["ignition"]))
 
     is_offroad_for_5_min = (started_ts is None) and ((not started_seen) or (off_ts is None) or (time.monotonic() - off_ts > 60 * 5))
     if is_offroad_for_5_min and offroad_comp_temp > OFFROAD_DANGER_TEMP:
@@ -472,7 +479,14 @@ def hardware_thread(end_event, hw_queue, power_telemetry: PowerTelemetry) -> Non
     should_pwrsave = not (onroad_conditions["ignition"] or should_start) and msg.deviceState.screenBrightnessPercent < 1e-3
     if should_pwrsave != pwrsave or (count == 0):
       HARDWARE.set_power_save(should_pwrsave)
+      if cpu_boost is not None:
+        cpu_boost.reset()
     pwrsave = should_pwrsave
+    if cpu_boost is not None:
+      try:
+        cpu_boost.update(onroad_conditions["ignition"], not should_pwrsave, all_comp_temp)
+      except Exception:
+        cloudlog.exception("cpu_boost update failed")
 
     if onroad_conditions["ignition"]:
       physical_off_ts = None

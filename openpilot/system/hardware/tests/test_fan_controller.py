@@ -80,3 +80,32 @@ class TestFanController(OpenpilotTestCase):
       assert aggressive_out == stock_out
     finally:
       fan_controller.IS_MICI = original
+
+  def test_mici_cpu_boost_runs_a_little_more_fan(self):
+    original = fan_controller.IS_MICI
+    fan_controller.IS_MICI = True
+    try:
+      for temp in (75., 80., 90.):
+        stock, boost = FanController(2), FanController(2)
+        for _ in range(20):
+          stock_out = stock.update(temp, True)
+          boost_out = boost.update(temp, True, boost=True)
+        assert boost_out > stock_out, temp
+      offroad = FanController(2)
+      for _ in range(1000):
+        offroad.update(100, False, boost=True)
+      assert offroad.update(100, False, boost=True) <= 30
+    finally:
+      fan_controller.IS_MICI = original
+
+  def test_cpu_boost_fan_is_mici_only(self):
+    original = fan_controller.IS_MICI
+    fan_controller.IS_MICI = False
+    try:
+      stock, boost = FanController(2), FanController(2)
+      for _ in range(20):
+        stock_out = stock.update(70, True)
+        boost_out = boost.update(70, True, boost=True)
+      assert boost_out == stock_out
+    finally:
+      fan_controller.IS_MICI = original

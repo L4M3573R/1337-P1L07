@@ -3,6 +3,7 @@ import numpy as np
 
 from openpilot.common.pid import PIDController
 from openpilot.common.hardware import HARDWARE
+from openpilot.starpilot.power.cpu_boost import BOOST_FAN_CURVE
 
 IS_MICI = HARDWARE.get_device_type() == "mici"
 
@@ -20,16 +21,20 @@ class FanController:
     self.rate = rate
     self.last_ignition = False
     self.last_aggressive = False
+    self.last_boost = False
     self.controller = PIDController(k_p=STOCK_CURVE["k_p"], k_i=K_I, rate=rate)
 
-  def update(self, cur_temp: float, ignition: bool, aggressive_cooling: bool = False) -> int:
+  def update(self, cur_temp: float, ignition: bool, aggressive_cooling: bool = False, boost: bool = False) -> int:
     aggressive = aggressive_cooling and not IS_MICI
-    curve = AGGRESSIVE_CURVE if aggressive else STOCK_CURVE
+    # 1337: while the big cores run boosted (starpilot/power/cpu_boost.py) the mici fan runs a little harder
+    boost = boost and IS_MICI and not aggressive
+    curve = AGGRESSIVE_CURVE if aggressive else BOOST_FAN_CURVE if boost else STOCK_CURVE
 
-    if ignition != self.last_ignition or aggressive != self.last_aggressive:
+    if ignition != self.last_ignition or aggressive != self.last_aggressive or boost != self.last_boost:
       self.controller = PIDController(k_p=curve["k_p"], k_i=K_I, rate=self.rate)
     self.last_ignition = ignition
     self.last_aggressive = aggressive
+    self.last_boost = boost
 
     self.controller.pos_limit = 100 if ignition else 30
     self.controller.neg_limit = 30 if ignition else 0
