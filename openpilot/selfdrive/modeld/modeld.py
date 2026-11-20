@@ -671,7 +671,10 @@ def main(demo=False):
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
     if model_output is not None:
-      step_timing.add(getattr(model, 'step_ns', None), model_execution_time, str(getattr(model, 'model_id', '')), bool(model.chestnut))
+      try:   # timing is a diagnostic: it must never be able to stop the model loop
+        step_timing.add(getattr(model, 'step_ns', None), model_execution_time, str(getattr(model, 'model_id', '')), bool(model.chestnut))
+      except Exception:
+        cloudlog.exception("modeld step timing failed")
     if model is jetlink_model and HOOKS.handed_over(model):
       frame_dropped_filter.x = 0.
       frame_drop_ratio = 0.
