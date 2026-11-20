@@ -17,6 +17,10 @@ DT_HW = 0.5  # hardwared and manager
 DT_DMON = 0.05  # driver monitoring
 
 
+# plannerd and radard (Priority.CTRL_LOW). Core 3 stays pandad's alone.
+PLANNING_CORES = [4, 5]
+
+
 class Priority:
   # CORE 2
   # - modeld = 55

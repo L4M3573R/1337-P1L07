@@ -12,7 +12,7 @@ from openpilot.cereal import messaging, log
 from opendbc.car.structs import car
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.params import Params
-from openpilot.common.realtime import DT_MDL, Priority, config_realtime_process, set_core_affinity
+from openpilot.common.realtime import PLANNING_CORES, DT_MDL, Priority, config_realtime_process, set_core_affinity
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.simple_kalman import KF1D
 from openpilot.starpilot.conditional_mode.adjacent import (
@@ -430,7 +430,9 @@ def main() -> None:
   fusion_log = ChangeLog('tandem_fusion')  # decision log for remote route review
   lead_loss_log = LeadLossLog()  # decision log: a near or closing lead disappearing, its return, and the lead-hold shadow
   lead_accel_shadow = LeadAccelShadow()  # shadow: the radar's own lead acceleration vs radard's Kalman estimate
-  set_core_affinity([3, 5])
+  # Not core 3: that core is pandad's, and the kernel SPI worker it waits on runs there at FIFO 1, below these
+  # FIFO 51 loops. plannerd was mid-compute in 63 of 65 CAN gaps over 14 ms (drives c8-cf, 2026-11-19).
+  set_core_affinity(PLANNING_CORES)
 
   while 1:
     sm.update()

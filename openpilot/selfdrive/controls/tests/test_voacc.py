@@ -106,7 +106,7 @@ class VoaccTest(unittest.TestCase):
            patch.object(radard, 'RadarD', side_effect=create):
         with self.assertRaises(StopIteration):
           radard.main()
-      affinity.assert_called_once_with([3, 5])
+      affinity.assert_called_once_with([4, 5])
       read.assert_called_once_with(params, cp)
       self.assertTrue(instances[0].use_voacc)
       self.assertFalse(instances[0].radar_state.leadOne.radar)

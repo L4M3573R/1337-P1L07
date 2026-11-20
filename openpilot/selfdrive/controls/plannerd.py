@@ -4,7 +4,7 @@ from collections import deque
 
 from opendbc.car.structs import car
 from openpilot.common.params import Params
-from openpilot.common.realtime import Priority, config_realtime_process, set_core_affinity
+from openpilot.common.realtime import PLANNING_CORES, Priority, config_realtime_process, set_core_affinity
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.controls.lib.ldw import LaneDepartureWarning
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner, NATIVE_PLAN_INPUTS
@@ -402,7 +402,9 @@ def starpilot_main():
                            ignore_alive=optional_conditional, ignore_valid=optional_conditional,
                            ignore_avg_freq=optional_conditional)
 
-  set_core_affinity([3, 5])
+  # Not core 3: that core is pandad's, and the kernel SPI worker it waits on runs there at FIFO 1, below these
+  # FIFO 51 loops. plannerd was mid-compute in 63 of 65 CAN gaps over 14 ms (drives c8-cf, 2026-11-19).
+  set_core_affinity(PLANNING_CORES)
 
   try:
     while True:
