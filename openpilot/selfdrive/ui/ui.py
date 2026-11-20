@@ -41,7 +41,14 @@ def main():
   device_type = HARDWARE.get_device_type() if COMMA_HARDWARE else ""
   camera_core_ui = device_type in ("mici", "tici", "tizi")
   background_ui = camera_core_ui
-  cores = {0, 1, 2, 7} if background_ui else {5}
+  stock_cores = frozenset({0, 1, 2, 7} if background_ui else {5})
+  cores = stock_cores
+  # Mid-drive switchable for interleaved tests ("ui_cores" in cpu_boost.json); missing or invalid = stock_cores.
+  core_switch = None
+  if background_ui and COMMA_HARDWARE:
+    from openpilot.common.swaglog import cloudlog
+    from openpilot.starpilot.ui.ui_cores import UiCoreSwitch
+    core_switch = UiCoreSwitch(stock_cores, log=lambda name, **kw: cloudlog.event(name, **kw))
   display_nice = 5 if background_ui else 0
   main_thread_configured = False
   if background_ui:
@@ -97,12 +104,18 @@ def main():
           if os.sched_getscheduler(0) != os.SCHED_OTHER or os.getpriority(os.PRIO_PROCESS, 0) != display_nice:
             raise RuntimeError("Could not configure display scheduling")
           main_thread_configured = True
-        # reaffine after power save offlines our core
+        # reaffine after power save offlines our core, or when the configured set changes
+        if core_switch is not None:
+          cores = core_switch.current(time.monotonic())
         if COMMA_HARDWARE and os.sched_getaffinity(0) != cores:
           try:
             set_core_affinity(list(cores))
           except OSError:
-            pass
+            if cores != stock_cores:  # e.g. only big cores requested while power save has them offline
+              try:
+                set_core_affinity(list(stock_cores))
+              except OSError:
+                pass
 
         msg = messaging.new_message('uiDebug')
         msg.uiDebug.cpuTimeMillis = cpu_time * 1000
