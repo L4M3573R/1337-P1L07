@@ -226,6 +226,8 @@ class TestCatalogRunner(unittest.TestCase):
       callback = Mock()
       runner.run(frames, transforms, inputs, callback)
       callback.assert_called_once_with()
+      self.assertEqual(len(runner.step_ns), 5)   # prepare, warp, policy, wait, parse
+      self.assertTrue(all(isinstance(ns, int) and ns >= 0 for ns in runner.step_ns))
       np.testing.assert_array_equal(runner.npy["desire"], inputs["desire_pulse"])
       np.testing.assert_array_equal(runner.npy["prev_action"], [[2, 3]])
       np.testing.assert_allclose(runner.npy["lateral_control_params"], [[20, .2]])
@@ -237,6 +239,7 @@ class TestCatalogRunner(unittest.TestCase):
       artifact["run_policy"].return_value = (Mock(numpy=lambda: np.array([np.nan])),)
       with self.assertRaisesRegex(ValueError, "not finite"):
         runner.run(frames, transforms, inputs)
+      self.assertIsNone(runner.step_ns)   # a failed frame reports no step times
 
   def test_verified_load_rejects_changed_bytes_before_deserialization(self):
     from openpilot.starpilot.models.receipt import artifact_digest, artifact_identity

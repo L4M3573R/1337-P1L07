@@ -398,6 +398,7 @@ class CatalogModelState:
           after_enqueue: Callable[[], None] | None = None, *, shared_warp: SharedCameraWarp | None = None) -> tuple:
     if self._pending_frame is not None:
       raise RuntimeError("Finish the current model frame before enqueueing another")
+    t_start = time.perf_counter_ns()   # step marks for step_timing: clock reads only, nothing waits on them
     self.last_warp = None
     road_pointer, wide_pointer = (np.frombuffer(bufs[name].data, dtype=np.uint8).ctypes.data for name in self.vision_input_names)
     pointers = (road_pointer, wide_pointer)
@@ -413,13 +414,16 @@ class CatalogModelState:
     for name, value in self.npy.items():
       if name not in ("desire", "tfm", "big_tfm", "prev_feat") and name in inputs:
         value[:] = inputs[name]
+    t_prepared = time.perf_counter_ns()
     if shared_warp is None:
       warped = self.warp_frames(pointers, transforms["img"], transforms["big_img"])
     else:
       warped = shared_warp.tensor
+    t_warped = time.perf_counter_ns()
     policy_inputs = {key: self.input_queues[key] for key in self.policy_input_keys}
     output_tensors = (self.run_policy(**policy_inputs, warped=warped) if self.image_history_pipeline == "policy" else
                       self.run_policy(**policy_inputs, img=warped[0], big_img=warped[1]))
+    self._enqueue_marks = (t_start, t_prepared, t_warped, time.perf_counter_ns())
     if after_enqueue is not None:
       after_enqueue()
     if self.camera_warp_descriptor is not None:
@@ -433,13 +437,20 @@ class CatalogModelState:
       raise ValueError("Model frame belongs to a different or completed enqueue")
     self._pending_frame = None
     output_tensors = queued[0]
+    self.step_ns = None
+    t_wait = time.perf_counter_ns()   # after_enqueue ran between the enqueue and here: it is not part of any step
     try:
       outputs = [output.numpy().flatten() for output in output_tensors]
+      t_read = time.perf_counter_ns()
       if not all(np.isfinite(output).all() for output in outputs):
         raise ValueError("catalog model output not finite")
       parsed = self._parse(outputs)
       if not REQUIRED_OUTPUTS <= parsed.keys() or not all(np.isfinite(value).all() for value in parsed.values()):
         raise ValueError("catalog model parsed outputs invalid")
+      marks = getattr(self, "_enqueue_marks", None)
+      if marks is not None:   # ns spent in prepare, warp, policy, wait, parse (step_timing.STEPS)
+        self.step_ns = (marks[1] - marks[0], marks[2] - marks[1], marks[3] - marks[2], t_read - t_wait,
+                        time.perf_counter_ns() - t_read)
       if os.getenv("SEND_RAW_PRED"):
         parsed["raw_pred"] = np.concatenate(outputs)
       return parsed
