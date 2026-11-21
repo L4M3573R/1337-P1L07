@@ -29,3 +29,21 @@ def no_push_back(torque: float, *, v_ego: float, left_blinker: bool, right_blink
       (steering_angle_deg * side < HOLD_ANGLE_DEG and not pushing_toward)):
     return torque
   return torque if torque * side >= 0.0 else 0.0
+
+
+# Driver yield (2026-11-20): whenever the driver clearly has the wheel, the comma drops any torque against them, at any
+# speed and without a blinker. In a parking lot on 2026-11-20 (12:36:30-33) the driver held full lock at 452 deg with
+# the driver torque pinned at 1022 while the comma commanded full torque the other way; the EPS faulted after ~1 s.
+# Torque in the driver's direction is kept, so letting go never unwinds the wheel (the 2026-11-17 turn yield lesson), and
+# the integrator already freezes while steering is pressed. 250 is Hyundai raw driver torque: well over hands resting on
+# the wheel (steeringPressed trips at 150).
+DRIVER_YIELD_TORQUE = 250.0
+
+
+def driver_yield(torque: float, *, steering_pressed: bool, steering_torque: float, lat_active: bool,
+                 min_driver_torque: float = DRIVER_YIELD_TORQUE) -> float:
+  """The command with any torque against a driver who has the wheel removed. Both torques are positive to the left."""
+  if (not lat_active or not steering_pressed or not math.isfinite(steering_torque) or
+      abs(steering_torque) < min_driver_torque):
+    return torque
+  return torque if torque * steering_torque >= 0.0 else 0.0

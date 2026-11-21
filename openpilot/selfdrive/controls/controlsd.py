@@ -279,6 +279,24 @@ class Controls:
     except Exception:
       return torque
 
+  def _driver_yield(self, CS, CC, torque: float) -> float:
+    """When the driver clearly has the wheel the comma never pushes against them (starpilot/lateral/turn_yield.py).
+    Hyundai only: the threshold is in Hyundai raw driver-torque units."""
+    if self.CP.brand != 'hyundai':
+      return torque
+    try:
+      from openpilot.starpilot.lateral.turn_yield import driver_yield
+      limited = driver_yield(torque, steering_pressed=bool(CS.steeringPressed), steering_torque=float(CS.steeringTorque),
+                             lat_active=bool(CC.latActive))
+      if getattr(self, 'driver_yield_log', None) is None:
+        from openpilot.starpilot.diagnostics.features import ChangeLog
+        self.driver_yield_log = ChangeLog('driver_yield', min_gap_s=0.5)
+      self.driver_yield_log.observe({'yielding': limited != torque},
+                                    {'v_ego': CS.vEgo, 'steering_deg': CS.steeringAngleDeg, 'driver_torque': CS.steeringTorque})
+      return limited
+    except Exception:
+      return torque
+
   def _create_lane_shadow(self, predict_lane_clearance: bool):
     """Lane centering v2 (starpilot/lateral/lane_centering_v2.py) steers by default with the current controller shadowed
     beside it; lane_centering_v2.json mode 'shadow' swaps them, 'off' keeps only the current one. A failure leaves the
@@ -792,6 +810,7 @@ class Controls:
     )
     actuators.torque = float(steer)
     actuators.torque = self._turn_no_push_back(CS, CC, actuators.torque)
+    actuators.torque = self._driver_yield(CS, CC, actuators.torque)
     if self.CP.steerControlType == car.CarParams.SteerControlType.curvature:
       actuators.curvature = float(lateral_output)
     else:
