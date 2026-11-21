@@ -1,5 +1,6 @@
-"""Self-learning fuel efficiency, shadow mode: learns from the energy ledger what Pulse and Glide should do on this
-car and reports it. Nothing here commands the car; the PC summary shows the result for review.
+"""Self-learning fuel efficiency, report only: learns from the energy ledger what Pulse and Glide should do on this
+car and reports it. Nothing here commands the car; the PC summary shows the result for review. (What drives the car
+is the experiment engine in experiment_learn; the report names its mode, read from experiment.json.)
 
 Fuel is always the BlueDriver's measured fuel with the hybrid battery change paid back (never the dash average), and
 stretches the BlueDriver did not fully cover are left out. Everything stays inside the driver's time budget: at most
@@ -245,7 +246,7 @@ def learn(drives: list[list[dict]], flow: dict[str, list[float]], mass_kg: float
           budget_min_per_hr: float = TIME_BUDGET_MIN_PER_HR, recent_flow: dict[str, list[float]] | None = None,
           window_days: float | None = None, ambient_c: float | None = None) -> dict:
   records = [r for rs in drives for r in rs if isinstance(r, dict)]
-  return {'mode': 'shadow', 'time_budget_min_per_hr': budget_min_per_hr, 'max_under_mph': MAX_UNDER_MPH,
+  return {'mode': 'report_only', 'time_budget_min_per_hr': budget_min_per_hr, 'max_under_mph': MAX_UNDER_MPH,
           'ev_cutoff': learn_ev_cutoff(flow, recent_flow, window_days=window_days, ambient_c=ambient_c),
           'bands': learn_bands(records, budget_min_per_hr),
           'downhill': learn_downhill([[r for r in rs if isinstance(r, dict)] for rs in drives], mass_kg)}
@@ -297,13 +298,31 @@ def learn_stored(root: Path, mass_kg: float = DEFAULT_MASS_KG, window_days: floa
         _add_flow(recent, drive_flow)
         temps += [s['ambient_c'] for s in stretches if isinstance(s, dict) and isinstance(s.get('ambient_c'), (int, float))]
     ambient = round(statistics.median(temps), 1) if temps else None
-  return learn(drives, flow, mass_kg, recent_flow=recent, window_days=window_days if recent is not None else None,
-               ambient_c=ambient)
+  result = learn(drives, flow, mass_kg, recent_flow=recent, window_days=window_days if recent is not None else None,
+                 ambient_c=ambient)
+  result['engine'] = stored_engine(root)
+  return result
+
+
+ENGINE_NAMES = {'dials': 'the learned dials drive', 'shadow': 'fixed variants drive, the dials only log',
+                'presets': 'presets drive'}
+
+
+def stored_engine(root: Path) -> str | None:
+  """The comma's experiment engine from its experiment.json, or None when there is no copy of it (unknown, rather than
+  the engine's own 'shadow' default for a missing file)."""
+  if not (root / 'experiment.json').is_file():
+    return None
+  from openpilot.starpilot.efficiency.experiment_learn import engine
+  return engine(root)
 
 
 def report_lines(result: dict) -> list[str]:
   """Plain-language summary for the terminal."""
-  lines = [f"Efficiency learner (shadow, budget {result['time_budget_min_per_hr']:g} min/hr):"]
+  driving = ENGINE_NAMES.get(result.get('engine'), 'unknown, no experiment.json copy')
+  lines = [f"Fuel experiments on the comma: {result.get('engine') or 'unknown'} ({driving}), "
+           + f"budget {result['time_budget_min_per_hr']:g} min/hr",
+           "Efficiency learner (report only: the recommendations below do not drive the car):"]
   ev = result['ev_cutoff']
   where = EV_SOURCE_NAMES.get(ev.get('source'), 'power flow')
   if ev.get('window_days'):

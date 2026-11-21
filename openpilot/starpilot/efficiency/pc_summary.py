@@ -30,7 +30,8 @@ def pull(hosts: list[str], local: Path, key: str) -> str | None:
     if r.returncode == 0:
       for remote, name in (('/data/starpilot/bluedriver/health.json', 'health.json'),
                            ('/data/starpilot/efficiency/learner_ledger.json', 'learner_ledger.json'),
-                           ('/data/starpilot/efficiency/tank_history.json', 'tank_history.json')):
+                           ('/data/starpilot/efficiency/tank_history.json', 'tank_history.json'),
+                           ('/data/starpilot/efficiency/experiment.json', 'experiment.json')):
         subprocess.run(['rsync', '-a', '--timeout=20', '-e', f'ssh -i {key} -o BatchMode=yes -o ConnectTimeout=6',
                         f'comma@{host}:{remote}', f'{local}/{name}'], capture_output=True, check=False)
       return host

@@ -108,7 +108,7 @@ def test_learn_stored_reads_drive_files_and_reports(tmp_path):
   (drives / 'old.json').write_text(json.dumps({'version': 0, 'stretches': [_stretch('chill', 50.0, 55.0, 0.1)]}))
   (drives / 'bad.json').write_text('{broken')
   result = learn_stored(tmp_path)
-  assert result['mode'] == 'shadow'
+  assert result['mode'] == 'report_only' and result['engine'] is None
   assert result['bands']['45-60 mph']['recommend'] == 'pulse-glide'
   assert result['ev_cutoff']['learned_mph'] == 64
   text = '\n'.join(report_lines(result))
@@ -154,3 +154,15 @@ def test_learn_stored_relearns_the_cutoff_from_the_newest_drives(tmp_path):
   ev = learn_stored(tmp_path)['ev_cutoff']
   assert ev['source'] == 'bluedriver' and ev['status'] == 'engine_on' and ev['ambient_c'] == 9.0  # October is out of the window
   assert learn_stored(tmp_path, window_days=60)['ev_cutoff']['ambient_c'] == 14.5  # both drives inside a longer window
+
+
+def test_report_names_the_comma_engine_not_a_fixed_shadow_label(tmp_path):
+  (tmp_path / 'drives').mkdir()
+  assert 'unknown' in report_lines(learn_stored(tmp_path))[0]
+  (tmp_path / 'experiment.json').write_text(json.dumps({'mode': 'on', 'engine': 'dials', 'cruise_over_mph': 2}))
+  result = learn_stored(tmp_path)
+  assert result['engine'] == 'dials'
+  text = '\n'.join(report_lines(result))
+  assert 'dials (the learned dials drive)' in text and 'shadow' not in text
+  (tmp_path / 'experiment.json').write_text(json.dumps({'engine': 'shadow'}))
+  assert 'shadow (fixed variants drive' in report_lines(learn_stored(tmp_path))[0]
