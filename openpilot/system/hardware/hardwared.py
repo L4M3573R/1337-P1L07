@@ -288,6 +288,7 @@ def hardware_thread(end_event, hw_queue, power_telemetry: PowerTelemetry) -> Non
   thermal_config = HARDWARE.get_thermal_config()
 
   fan_controller = FanController(int(1./DT_HW))
+  metered_written: bool | None = None
   cpu_boost = None
   if COMMA_HARDWARE:
     from openpilot.common.utils import sudo_write
@@ -568,7 +569,11 @@ def hardware_thread(end_event, hw_queue, power_telemetry: PowerTelemetry) -> Non
           cloudlog.exception("failed to save offroad status")
 
     timing.mark("bookkeeping")
-    params.put_bool("NetworkMetered", msg.deviceState.networkMetered)
+    # 1337: written on change (and once a minute in case anything else rewrote it), not every loop: every 0.5 s was ~2
+    # blocking writes per second (mkstemp + fsync + rename + dir fsync), 60 of 68 params writes on the comma (2026-11-20)
+    if msg.deviceState.networkMetered != metered_written or count % int(60. / DT_HW) == 0:
+      params.put_bool("NetworkMetered", msg.deviceState.networkMetered)
+      metered_written = msg.deviceState.networkMetered
 
     now_ts = time.monotonic()
     if off_ts:
