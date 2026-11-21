@@ -3,7 +3,7 @@ import numpy as np
 
 from openpilot.common.pid import PIDController
 from openpilot.common.hardware import HARDWARE
-from openpilot.starpilot.power.cpu_boost import BOOST_FAN_CURVE
+from openpilot.starpilot.power.cpu_boost import BOOST_FAN_EXTRA
 
 IS_MICI = HARDWARE.get_device_type() == "mici"
 
@@ -21,25 +21,25 @@ class FanController:
     self.rate = rate
     self.last_ignition = False
     self.last_aggressive = False
-    self.last_boost = False
     self.controller = PIDController(k_p=STOCK_CURVE["k_p"], k_i=K_I, rate=rate)
 
   def update(self, cur_temp: float, ignition: bool, aggressive_cooling: bool = False, boost: bool = False) -> int:
     aggressive = aggressive_cooling and not IS_MICI
-    # 1337: while the big cores run boosted (starpilot/power/cpu_boost.py) the mici fan runs a little harder
-    boost = boost and IS_MICI and not aggressive
-    curve = AGGRESSIVE_CURVE if aggressive else BOOST_FAN_CURVE if boost else STOCK_CURVE
+    curve = AGGRESSIVE_CURVE if aggressive else STOCK_CURVE
 
-    if ignition != self.last_ignition or aggressive != self.last_aggressive or boost != self.last_boost:
+    if ignition != self.last_ignition or aggressive != self.last_aggressive:
       self.controller = PIDController(k_p=curve["k_p"], k_i=K_I, rate=self.rate)
     self.last_ignition = ignition
     self.last_aggressive = aggressive
-    self.last_boost = boost
 
     self.controller.pos_limit = 100 if ignition else 30
     self.controller.neg_limit = 30 if ignition else 0
 
-    return int(self.controller.update(
+    out = int(self.controller.update(
                  error=(cur_temp - (75 + curve["offset"])),  # temperature setpoint in C
                  feedforward=np.interp(cur_temp, [curve["ff_low"], curve["ff_high"]], [0, 100])
               ))
+    # 1337: while the CPU clocks are boosted (starpilot/power/cpu_boost.py) the mici fan runs 5 points over stock
+    if boost and IS_MICI and not aggressive:
+      out = min(out + BOOST_FAN_EXTRA, int(self.controller.pos_limit))
+    return out

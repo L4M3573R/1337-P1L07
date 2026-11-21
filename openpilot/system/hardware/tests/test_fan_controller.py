@@ -81,16 +81,16 @@ class TestFanController(OpenpilotTestCase):
     finally:
       fan_controller.IS_MICI = original
 
-  def test_mici_cpu_boost_runs_a_little_more_fan(self):
+  def test_mici_cpu_boost_runs_exactly_5_points_over_stock(self):
     original = fan_controller.IS_MICI
     fan_controller.IS_MICI = True
     try:
-      for temp in (75., 80., 90.):
+      for temp in (60., 68.7, 70., 72., 75., 80., 90., 100.):
         stock, boost = FanController(2), FanController(2)
-        for _ in range(20):
+        for _ in range(600):
           stock_out = stock.update(temp, True)
           boost_out = boost.update(temp, True, boost=True)
-        assert boost_out > stock_out, temp
+        assert boost_out == min(stock_out + 5, 100), temp  # 2026-11-20: a shifted curve gave ~60 % at 70 C
       offroad = FanController(2)
       for _ in range(1000):
         offroad.update(100, False, boost=True)

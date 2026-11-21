@@ -116,3 +116,74 @@ def test_someone_else_rewriting_a_cap_is_put_back(tmp_path):
 def test_unknown_tables_stay_stock(tmp_path):
   b, fs, _ = boost(tmp_path, steps={})
   assert b.update(True, True, 60.0, now=0.0) == STOCK
+
+
+INTERRUPTS = """           CPU0       CPU1
+  7:     12345          0     GICv3  27 Level     arch_timer
+994:    327000          0     GICv3 165 Level     dwc3, xhci-hcd:usb3
+995:        10          0     GICv3 166 Level     xhci-hcd:usb1
+"""
+
+
+class FakeIrq:
+  def __init__(self):
+    self.affinity = {994: '0-1'}
+    self.writes = []
+
+  def write(self, value, path):
+    irq = int(path.split('/')[3])
+    self.affinity[irq] = value
+    self.writes.append((irq, value))
+
+
+def irq_boost(tmp_path, config):
+  from openpilot.starpilot.power.cpu_boost import IrqPin
+  path = tmp_path / 'cpu_boost.json'
+  path.write_text(json.dumps(config))
+  fs, fi = Sysfs(), FakeIrq()
+  pin = IrqPin(fi.write, read=lambda irq: fi.affinity[irq], interrupts=lambda: INTERRUPTS)
+  return CpuBoost(path, fs.write, steps=STEPS, read=lambda policy: fs.cap[policy], irq_pin=pin), fi, path
+
+
+def test_find_irq_matches_the_action_name_exactly():
+  from openpilot.starpilot.power.cpu_boost import find_irq
+  assert find_irq('xhci-hcd:usb3', INTERRUPTS) == 994
+  assert find_irq('xhci-hcd:usb2', INTERRUPTS) is None
+
+
+def test_chestnut_irq_is_never_touched_without_the_key(tmp_path):
+  b, fi, _ = irq_boost(tmp_path, {})
+  b.update(True, True, 60.0, now=0.0)
+  b.update(False, True, 60.0, now=10.0)
+  assert fi.writes == [] and read_config(tmp_path / 'cpu_boost.json').irq_core is None
+
+
+def test_chestnut_irq_moves_with_ignition_and_its_original_comes_back(tmp_path):
+  b, fi, path = irq_boost(tmp_path, {"chestnut_irq_core": 6})
+  assert b.update(True, True, 60.0, now=0.0)['irq'] == '6'
+  assert fi.affinity[994] == '6'
+  assert 'irq' not in b.update(True, True, 60.0, now=0.5)  # written once
+  assert b.update(False, True, 60.0, now=1.0)['irq'] == '0-1'  # ignition off: original back
+  b.update(True, True, 60.0, now=2.0)
+  path.write_text('{}')  # key removed mid-drive
+  assert b.update(True, True, 60.0, now=10.0)['irq'] == '0-1'
+  assert fi.writes == [(994, '6'), (994, '0-1'), (994, '6'), (994, '0-1')]
+
+
+def test_chestnut_irq_is_put_back_if_something_else_moves_it_and_bad_cores_are_ignored(tmp_path):
+  b, fi, _ = irq_boost(tmp_path, {"chestnut_irq_core": 6})
+  b.update(True, True, 60.0, now=0.0)
+  fi.affinity[994] = '0-1'
+  assert b.update(True, True, 60.0, now=5.0)['irq'] == '6'
+  (tmp_path / 'bad.json').write_text('{"chestnut_irq_core": 9}')
+  assert read_config(tmp_path / 'bad.json').irq_core is None
+
+
+def test_a_kernel_refusal_leaves_the_irq_stock_and_stops_trying(tmp_path):
+  from openpilot.starpilot.power.cpu_boost import IrqPin
+  calls = []
+  def refuse(value, path):
+    calls.append(value)
+    raise OSError('EIO')
+  pin = IrqPin(refuse, read=lambda irq: '0-1', interrupts=lambda: INTERRUPTS)
+  assert pin.update(6) is None and pin.update(6) is None and calls == ['6']

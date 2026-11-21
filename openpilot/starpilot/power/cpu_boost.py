@@ -7,7 +7,10 @@ at or below the target, lifts the little cluster (0-3, the busiest cores at 85-9
 stock cap), and runs the fan a little harder to pay for the heat.
 
 cpu_boost.json in the StarPilot storage root, re-read every few seconds so it can be flipped during a drive:
-  {"mode": "on" | "off", "big_mhz": 2200, "little": "max" | "stock"}
+  {"mode": "on" | "off", "big_mhz": 2200, "little": "max" | "stock", "chestnut_irq_core": 6 | null}
+chestnut_irq_core (default null = stock, never touched): with ignition, the Chestnut's USB controller interrupt
+("xhci-hcd:usb3", ~2,200/s, AGNOS puts all of it on CPU0, one of the busiest cores) is moved to that core; its original
+affinity comes back when the key goes or ignition drops. Independent of "mode".
 Missing or unreadable file = on at DEFAULT_BIG_MHZ. A heat guard drops back to the stock cap at GUARD_HOT_C and returns
 only below GUARD_COOL_C, far under the mici's overheated band (100 C).
 """
@@ -29,9 +32,10 @@ LITTLE_POLICY = '/sys/devices/system/cpu/cpufreq/policy0'
 BIG_POLICY = '/sys/devices/system/cpu/cpufreq/policy4'
 CONFIG_NAME = 'cpu_boost.json'
 
-# mici fan: stock is setpoint 75 C, feedforward 0 % at 60 C to 100 % at 100 C. Boosted: 2 C cooler setpoint and the
-# feedforward ramp moved 2 C lower, about 5 % more fan at every temperature (user's pick 2026-11-20; 5 C was too much).
-BOOST_FAN_CURVE = {"offset": -2, "k_p": 0., "ff_low": 58., "ff_high": 98.}
+# mici fan while boosted: the stock controller's output plus 5 points (user's pick 2026-11-20). A shifted curve does not
+# work: the fan PID floors its integrator at the 30 % onroad minimum whenever the feedforward alone is above 30 %, so
+# moving the feedforward ramp 2 C lower jumped the fan from 30 % to ~60 % at 70-72 C (seen on the comma 2026-11-20).
+BOOST_FAN_EXTRA = 5
 
 
 @dataclass
@@ -39,6 +43,7 @@ class Config:
   on: bool = True
   big_mhz: int = DEFAULT_BIG_MHZ
   little_max: bool = True
+  irq_core: int | None = None
 
 
 def read_config(path: Path) -> Config:
@@ -48,8 +53,10 @@ def read_config(path: Path) -> Config:
     mhz = doc.get('big_mhz', DEFAULT_BIG_MHZ)
     if type(mhz) not in (int, float) or not math.isfinite(mhz):
       mhz = DEFAULT_BIG_MHZ
+    core = doc.get('chestnut_irq_core')
+    core = core if type(core) is int and 0 <= core <= 7 else None
     return Config(doc.get('mode', 'on') != 'off', int(min(max(mhz, STOCK_KHZ / 1000), MAX_BIG_MHZ)),
-                  doc.get('little', 'max') != 'stock')
+                  doc.get('little', 'max') != 'stock', core)
   except (OSError, ValueError, AttributeError):
     return Config()
 
@@ -74,6 +81,59 @@ def read_steps(policy: str) -> list[int]:
     return []
 
 
+CHESTNUT_IRQ_NAME = 'xhci-hcd:usb3'
+
+
+def find_irq(name: str, interrupts: str) -> int | None:
+  """The IRQ number whose /proc/interrupts line ends with this action name."""
+  for line in interrupts.splitlines():
+    head, _, rest = line.partition(':')
+    if head.strip().isdigit() and rest.split() and rest.split()[-1] == name:
+      return int(head)
+  return None
+
+
+class IrqPin:
+  """Moves one IRQ to a core while asked, and puts its original affinity back after."""
+  def __init__(self, write, read=None, interrupts=None, name: str = CHESTNUT_IRQ_NAME):
+    self.write = write
+    self.read = read or (lambda irq: Path(f'/proc/irq/{irq}/smp_affinity_list').read_text().strip())
+    self.interrupts = interrupts or (lambda: Path('/proc/interrupts').read_text())
+    self.name = name
+    self.irq: int | None = None
+    self.original: str | None = None
+    self.applied: str | None = None
+    self.broken = False
+
+  def update(self, core: int | None, recheck: bool = False) -> str | None:
+    """Returns the affinity written this call, or None."""
+    if self.broken:
+      return None
+    try:
+      if core is None:
+        if self.applied is None:
+          return None
+        want = self.original
+      else:
+        if self.irq is None:
+          self.irq = find_irq(self.name, self.interrupts())
+          if self.irq is None:
+            return None
+        if self.original is None:
+          self.original = self.read(self.irq)
+        want = str(core)
+        if recheck and self.applied == want and self.read(self.irq) != want:
+          self.applied = None  # something else moved it: put ours back
+      if want is None or want == self.applied:
+        return None
+      self.write(want, f'/proc/irq/{self.irq}/smp_affinity_list')
+      self.applied = None if core is None else want
+      return want
+    except (OSError, ValueError):
+      self.broken = True  # the kernel refused: stop trying for this run, stock stays
+      return None
+
+
 @dataclass(eq=False)  # identity: used as a dict key
 class Cluster:
   policy: str
@@ -82,7 +142,8 @@ class Cluster:
 
 
 class CpuBoost:
-  def __init__(self, config_path: Path, write, steps: dict[str, list[int]] | None = None, log=None, read=read_cap):
+  def __init__(self, config_path: Path, write, steps: dict[str, list[int]] | None = None, log=None, read=read_cap,
+               irq_pin: IrqPin | None = None):
     self.config_path = config_path
     self.write = write  # write(value, sysfs path)
     self.read = read  # read(policy): the cap the kernel holds now, to notice anything else rewriting it
@@ -94,6 +155,7 @@ class CpuBoost:
     self.config = Config()
     self.hot = False
     self.next_read = 0.0
+    self.irq_pin = IrqPin(write) if irq_pin is None else irq_pin
 
   @property
   def on(self) -> bool:
@@ -111,11 +173,12 @@ class CpuBoost:
     """The harder fan curve follows the switch, not the clock: it stays on while the heat guard holds the stock cap."""
     return ignition and self.config.on
 
-  def update(self, ignition: bool, online: bool, temp_c: float, now: float | None = None) -> dict[str, int]:
+  def update(self, ignition: bool, online: bool, temp_c: float, now: float | None = None) -> dict[str, int | str]:
     """Call every hardwared loop. ignition: boost allowed; online: big cores up (not power save).
     Returns {policy: cap} for what was written this call."""
     now = time.monotonic() if now is None else now
-    if now >= self.next_read:
+    recheck = now >= self.next_read
+    if recheck:
       self.next_read = now + READ_PERIOD_S
       self.config = read_config(self.config_path)
       for c in (self.little, self.big):
@@ -132,12 +195,16 @@ class CpuBoost:
     wants = {self.little: pick_step(self.little.steps, math.inf) if boost and self.config.little_max else STOCK_KHZ}
     if online:
       wants[self.big] = pick_step(self.big.steps, self.config.big_mhz) if boost else STOCK_KHZ
-    written = {}
+    written: dict[str, int | str] = {}
     for c, want in wants.items():
       if want != c.applied:
         self.write(str(want), f'{c.policy}/scaling_max_freq')
         c.applied = written[c.policy] = want
+    irq = self.irq_pin.update(self.config.irq_core if ignition else None, recheck)
+    if irq is not None:
+      written['irq'] = irq
     if written and self.log is not None:
       self.log('cpu_boost', little_khz=self.little.applied, big_khz=self.big.applied, on=self.config.on, hot=self.hot,
-               temp_c=round(temp_c, 1) if math.isfinite(temp_c) else None)
+               temp_c=round(temp_c, 1) if math.isfinite(temp_c) else None, chestnut_irq=self.irq_pin.applied,
+               chestnut_irq_number=self.irq_pin.irq)
     return written
