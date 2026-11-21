@@ -7,7 +7,9 @@ import gc
 from functools import cached_property
 import os
 os.environ['GMMU'] = '0' # for chestnut fast loading, noop for qcom
-os.environ.setdefault('AM_POWER_LIMIT', '100')
+# 1337: Chestnut (RX 9060 XT) capped at 80 W, user's pick 2026-11-20 (upstream 100 W, #38992). Clocks stay on auto, so it
+# boosts as it needs: tinygrad leaves AM_PERF_LEVEL on auto whenever a power limit is set. Measured draw ~30 W.
+os.environ.setdefault('AM_POWER_LIMIT', '80')
 from openpilot.starpilot.models.runtime_bridge.runtime import prepare as prepare_model_runtime, selected_legacy
 prepare_model_runtime('driving')
 from tinygrad.device import Buffer, Device
