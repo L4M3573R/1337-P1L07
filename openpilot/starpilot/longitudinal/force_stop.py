@@ -27,6 +27,13 @@ QUEUE_LEAD_LENGTH_M = 4.5
 QUEUE_CLEAR_M = 5.0
 QUEUE_SIGN_RECENT_NS = 10_000_000_000
 QUEUE_MAX_SPEED_MPS = 6.0
+# 1337 (2026-11-20 bookmark): a committed light stop keeps its lowest model-horizon dip and counts it down, so it can
+# end ~10 m short of a stopped car the model itself stops behind. Behind a stopped car (radar, under 1 m/s) whose
+# standstill gap the model's horizon reaches to within LEAD_MODEL_AGREE_M, the stop is never short of that gap.
+# A stopped car well past the line (the model stops at the line instead) keeps the line.
+LEAD_STOP_GAP_M = 6.0
+LEAD_STOPPED_MPS = 1.0
+LEAD_MODEL_AGREE_M = 10.0
 
 
 @dataclass(frozen=True)
@@ -382,6 +389,11 @@ class ForceStop:
             not self.sign_confirmed and not frame.model_should_stop):
           # A moving model preview is not a fixed world endpoint to count down.
           self.distance = self.distance_cap = horizon
+        if (self.from_light and not self.sign_confirmed and self.queue_line is None and available and
+            frame.lead_present and frame.lead_speed_mps < LEAD_STOPPED_MPS and math.isfinite(frame.lead_distance_m)):
+          lead_stop = frame.lead_distance_m - LEAD_STOP_GAP_M
+          if self.distance < lead_stop <= horizon + LEAD_MODEL_AGREE_M:
+            self.distance = lead_stop
         terminal_distance = self.distance
         if sign_estimate is not None and (self.sign_confirmed or frame.sign and available and horizon < SIGN_MODEL_AGREE_M):
           self.distance = min(sign_estimate, cap)

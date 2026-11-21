@@ -124,6 +124,33 @@ class ForceStopTests(unittest.TestCase):
     plan = self.owner.step(frame(15, lead_present=True, lead_distance_m=20, lead_speed_mps=0, tracking_lead=True), self.tune)
     self.assertTrue(plan.forcing)
 
+  def _committed_light_stop(self, lead_distance_m, horizon_m):
+    for tick in range(15):
+      self.owner.step(frame(tick), self.tune)
+    self.owner.distance = 5.   # a latched horizon dip, counted down well short of the model's current stop
+    self.owner.distance_cap = 80.
+    return self.owner.step(frame(15, speed_mps=3., horizon_m=horizon_m, lead_present=True, lead_distance_m=lead_distance_m,
+                                 lead_speed_mps=0., tracking_lead=True), self.tune)
+
+  def test_committed_light_stop_is_not_short_of_a_stopped_car_the_model_stops_behind(self):
+    plan = self._committed_light_stop(lead_distance_m=25., horizon_m=15.)
+    self.assertTrue(plan.forcing)
+    self.assertAlmostEqual(self.owner.distance, 19.)
+    self.assertFalse(plan.should_stop)
+
+  def test_stopped_car_well_past_the_line_keeps_the_line(self):
+    plan = self._committed_light_stop(lead_distance_m=40., horizon_m=12.)
+    self.assertTrue(plan.forcing)
+    self.assertLess(self.owner.distance, 12.)
+
+  def test_moving_car_does_not_move_the_stop(self):
+    for tick in range(15):
+      self.owner.step(frame(tick), self.tune)
+    self.owner.distance = 5.
+    self.owner.step(frame(15, speed_mps=3., horizon_m=15., lead_present=True, lead_distance_m=25., lead_speed_mps=3.,
+                          tracking_lead=True), self.tune)
+    self.assertLess(self.owner.distance, 6.)
+
   def test_accelerator_releases_then_suppresses_for_ten_seconds(self):
     for tick in range(15):
       self.owner.step(frame(tick), self.tune)
