@@ -323,3 +323,30 @@ def test_the_pitch_zero_takes_the_constant_nose_up_reading_out_of_the_hills():
   assert corrections['pitch_zero'] == pytest.approx(0.016)
   assert el.climb_m(flat[0], corrections['pitch_zero']) == pytest.approx(0.0, abs=1e-6)
   assert el.corrected_gal(flat[0], corrections) == pytest.approx(0.01)     # nothing taken off for a climb that is not there
+
+
+def test_dial_hold_climbs_back_instead_of_flickering_at_the_dip_edge():
+  """2026-11-20 21:05:33, hold|30-45|d1.00k1.00 at 44 mph: below_target crossed 1 mph every few tenths of a second and
+  the throttle cap went 0 / off each time ("gas gas gas"). Replays the edge with 0.05 mph of noise."""
+  exp = DialExperimenter(rng=random.Random(3))
+  exp.draw = lambda category, context: 'd1.00k1.00' if category == 'hold' else dl.encode(category, dl.start_values(category))
+  set_mps = 45.0 * MPH
+  plan = None
+  for turn in range(8):
+    exp.cruise_turn = turn
+    exp.episode = None
+    plan = exp.sample(Frame(0.0, set_mps, set_mps, True, grade=0.0))
+    if (plan.tag or '').startswith('hold|'):
+      break
+  assert plan.tag.startswith('hold|') and plan.tag.endswith('|d1.00k1.00') and plan.accel_max == 0.0
+  caps = []
+  for i in range(60):   # 3 s riding the 1 mph edge
+    v = set_mps - (1.0 + (0.05 if i % 2 else -0.05)) * MPH
+    caps.append(exp.sample(Frame(0.05 * (i + 1), v, set_mps, True, grade=0.0)).accel_max)
+  switches = sum((a == 0.0) != (b == 0.0) for a, b in zip(caps, caps[1:]))
+  assert switches <= 1 and caps[-1] != 0.0   # the one switch: the dip used, the climb starts
+  assert all(b is None or a is None or b - a <= 0.5 * 0.05 + 1e-9 for a, b in zip(caps, caps[1:]))   # eases in
+  p = exp.sample(Frame(3.1, set_mps - 0.1 * MPH, set_mps, True, grade=0.0))
+  assert p.accel_max == 0.0   # back within 0.2 mph of the target: the next dip starts
+  p = exp.sample(Frame(3.15, set_mps - 0.5 * MPH, set_mps, True, grade=0.0))
+  assert p.accel_max == 0.0   # and it dips the full allowance again, no throttle at half of it

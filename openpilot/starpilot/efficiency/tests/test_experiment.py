@@ -226,7 +226,10 @@ def test_hold_flat_holds_the_throttle_until_a_mile_an_hour_under():
   p = exp.sample(cruise(0.08, v=40 * MPH - 1.5 * MPH, grade=0.0))
   assert p.accel_max == 0.0                           # still inside the 2 mph band
   p = exp.sample(cruise(0.1, v=40 * MPH - 2.5 * MPH, grade=0.0))
-  assert p.accel_max is None                          # past the band: the planner wins the speed back
+  assert 0.0 < p.accel_max < 0.1                      # past the band: the throttle eases back in
+  for i in range(100):
+    p = exp.sample(cruise(0.15 + 0.05 * i, v=40 * MPH - 2.5 * MPH, grade=0.0))
+  assert p.accel_max is None                          # and then the planner wins the speed back
   _, normal = _hold_episode('normal')
   assert normal.tag == 'hold|30-45|normal' and normal.accel_max is None
 
@@ -321,3 +324,17 @@ def test_a_cold_engine_gets_no_pulse_and_glide_or_electric_only_test():
     tags.add((p.tag or '').split('|')[0])
     assert p.pulse_glide is not True
   assert 'pulse_glide' not in tags and 'ev' not in tags and tags & {'cruise', 'hold'}
+
+
+def test_hold_flat_never_flickers_at_the_band_edge():
+  """2026-11-20 21:05: a car riding the dip edge got throttle 0 / full two or three times a second."""
+  exp, _ = _hold_episode('flat')
+  edge = 40 * MPH - ex.HOLD_BAND_MPH * MPH
+  caps = [exp.sample(cruise(0.05 * (i + 1), v=edge + (0.02 if i % 2 else -0.02) * MPH, grade=0.0)).accel_max
+          for i in range(40)]
+  switches = sum((a == 0.0) != (b == 0.0) for a, b in zip(caps, caps[1:]))
+  assert caps[0] != 0.0 and switches == 0                  # once the dip is used it climbs, it does not chatter
+  p = exp.sample(cruise(2.1, v=40 * MPH - 0.5 * MPH, grade=0.0))
+  assert p.accel_max != 0.0                                # still climbing half a mile an hour under
+  p = exp.sample(cruise(2.15, v=40 * MPH - 0.1 * MPH, grade=0.0))
+  assert p.accel_max == 0.0                                # back at the set speed: off the throttle again

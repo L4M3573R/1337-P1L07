@@ -65,6 +65,13 @@ STOP_MAX_DECEL = 1.6           # a stop first seen needing more than this is no 
 STOP_MIN_MPS = 6.0
 STOP_GAP_M = 6.0               # a stopped car ahead: the stop is this far behind it (the planner's standstill gap)
 HOLD_BAND_MPH = 2.0            # 'flat': hold the throttle (no acceleration) until this far under the set speed (the driver's allowance)
+# 1337 (2026-11-20 drive, 21:05:33): a hold switched the throttle cap 0 <-> off right at the dip edge, so a car riding
+# the edge got 0 / +0.46 m/s^2 two or three times a second ("gas gas gas"). Once the dip is used the hold now climbs
+# all the way back to within HOLD_RECOVERED_MPH of its target before it lets the speed dip again, and the throttle
+# comes back in at HOLD_RESUME_JERK instead of in one step.
+HOLD_RECOVERED_MPH = 0.2
+HOLD_RESUME_JERK = 0.5         # m/s^3
+HOLD_RAMP_MAX = 2.0            # m/s^2: past this the ramp no longer limits anything
 SPEED_BANDS = ((30 * MPH, '25-30'), (45 * MPH, '30-45'), (60 * MPH, '45-60'), (math.inf, '60+'))
 
 # category -> variants (the first is the baseline: the comma's normal driving)
@@ -284,6 +291,25 @@ class Experimenter:
   carry_spent_s: float = 0.0
   grace_s: float = BUDGET_GRACE_S
   frame: Frame | None = None     # the frame being sampled (a draw may need the set speed)
+  hold_climbing: bool = False    # a hold used its dip and is winning the speed back (see HOLD_RECOVERED_MPH)
+  hold_ramp: float = 0.0         # the throttle cap easing back in while it climbs
+
+  def _hold_throttle(self, below_mps: float, dip_mps: float, dt: float, active: bool) -> float | None:
+    """A hold's throttle cap now: 0.0 while the speed dips (until it is dip_mps under its target), then a cap rising
+    at HOLD_RESUME_JERK (None once it no longer limits) until the car is back within HOLD_RECOVERED_MPH of the target.
+    Not active (no hold, pedals, not engaged): None, and the next hold starts dipping."""
+    if not active or not dip_mps > 0 or not math.isfinite(below_mps):
+      self.hold_climbing, self.hold_ramp = False, 0.0
+      return None
+    if below_mps >= dip_mps:
+      self.hold_climbing = True
+    elif below_mps <= HOLD_RECOVERED_MPH * MPH:
+      self.hold_climbing = False
+    if not self.hold_climbing:
+      self.hold_ramp = 0.0
+      return 0.0
+    self.hold_ramp = min(self.hold_ramp + HOLD_RESUME_JERK * dt, HOLD_RAMP_MAX)
+    return self.hold_ramp if self.hold_ramp < HOLD_RAMP_MAX else None
 
   # ---------- budget ----------
   def budget_left_s(self) -> float:
@@ -467,10 +493,14 @@ class Experimenter:
         accel_max = FOLLOW_SMOOTH_ACCEL
       elif ep.category == 'ev' and v == 'gentle':
         accel_max = EV_GENTLE_ACCEL
-      elif ep.category == 'hold' and v == 'flat' and f.v_ego > f.v_set - HOLD_BAND_MPH * MPH:
-        accel_max = 0.0   # the pedal stays where it is: speed may sag, braking and slowing stay the planner's
+      elif ep.category == 'hold' and v == 'flat':
+        # the pedal stays where it is: speed may sag, braking and slowing stay the planner's
+        accel_max = self._hold_throttle(f.v_set - f.v_ego, HOLD_BAND_MPH * MPH, dt,
+                                        f.long_active and not f.gas and not f.brake)
       if ep.category == 'pulse_glide' and not f.pulse_glide_by_driver:
         pulse_glide = v == 'pg'
+    if ep is None or ep.category != 'hold' or ep.variant != 'flat':
+      self._hold_throttle(0.0, 0.0, dt, False)
     step = RAMP_MPS2 * dt
     self.offset_mps = min(max(target_offset, self.offset_mps - step), self.offset_mps + step)
     if f.gas or f.brake or not f.long_active:
@@ -620,9 +650,15 @@ class DialExperimenter(Experimenter):
       self.episode = ep = values = None
     own_target = f.v_set + min(self.offset_mps, 0.0)
     eff = Effect()
+    hold_cap = None
+    if values is not None and ep.category == 'hold':
+      hold_cap = self._hold_throttle(own_target - f.v_ego, values['d'] * MPH, dt,
+                                     f.long_active and not f.gas and not f.brake)
+    else:
+      self._hold_throttle(0.0, 0.0, dt, False)
     if values is not None:
       eff = effect(ep.category, values, v_ego=f.v_ego, v_target=f.v_set, normal=normal_accel(f.v_ego),
-                   below_target_mps=own_target - f.v_ego)
+                   below_target_mps=own_target - f.v_ego, climbing=self.hold_climbing)
     step = RAMP_MPS2 * dt
     self.offset_mps = min(max(eff.target_offset_mps, self.offset_mps - step), self.offset_mps + step)
     if f.gas or f.brake or not f.long_active:
@@ -640,4 +676,7 @@ class DialExperimenter(Experimenter):
     if ep is not None and ep.category == 'pulse_glide' and not f.pulse_glide_by_driver and values is not None:
       pulse_glide = eff.pulse_glide is not None
       tuning = eff.pulse_glide
-    return Plan(ceiling, bonus, eff.accel_max, pulse_glide, ep.tag() if ep is not None else None, tuning)
+    accel_max = eff.accel_max
+    if hold_cap is not None:
+      accel_max = hold_cap if accel_max is None else min(accel_max, hold_cap)
+    return Plan(ceiling, bonus, accel_max, pulse_glide, ep.tag() if ep is not None else None, tuning)

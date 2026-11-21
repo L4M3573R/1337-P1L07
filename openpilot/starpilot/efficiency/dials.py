@@ -237,9 +237,10 @@ class Effect:
 
 
 def effect(category: str, values: dict[str, float], *, v_ego: float, v_target: float, normal: float,
-           below_target_mps: float) -> Effect:
+           below_target_mps: float, climbing: bool = False) -> Effect:
   """What a setting does now. normal: the planner's own cruise acceleration at this speed; below_target_mps: how far
-  the car is under the speed it is being asked for (its own target, an experiment's offset included)."""
+  the car is under the speed it is being asked for (its own target, an experiment's offset included); climbing: a hold
+  already used its dip and is winning the speed back (the experimenter keeps that state, so the edge cannot flicker)."""
   if category in ('launch', 'follow', 'ev'):
     return Effect(accel_max=values['a'] * normal if values['a'] < 1.0 - 1e-9 else None)
   if category == 'accelerate':
@@ -258,7 +259,7 @@ def effect(category: str, values: dict[str, float], *, v_ego: float, v_target: f
     return Effect(target_offset_mps=-values['u'] * MPH)
   if category == 'hold':
     dip = values['d'] * MPH
-    if dip > 0 and below_target_mps < dip:
+    if dip > 0 and not climbing and below_target_mps < dip:
       return Effect(accel_max=0.0)   # the throttle stays where it is: the speed may dip this far before it acts
     if values['k'] < 1.0 - 1e-9 and below_target_mps > 0:
       return Effect(accel_max=values['k'] * normal)   # and climbs back this gently
