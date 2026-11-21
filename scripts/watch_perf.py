@@ -2,10 +2,10 @@
 """Watch the comma's CPU load, clocks, heat and model timing during a drive, from the PC.
 
   scripts/watch_perf.py [--host comma@100.117.14.62] [--minutes 30] [--every 5] [--log watch.jsonl]
-                        [--rotate boost|irq|ui] [--window 5]
+                        [--rotate boost|ui] [--window 5]
 
 Every few seconds it prints one row: engaged / speed; the three test switches in /data/starpilot/cpu_boost.json
-(boost mode, chestnut_irq_core, ui_cores); the clocks both clusters actually run at; max temperature and fan;
+(boost mode, ui_cores); the clocks both clusters actually run at; max temperature and fan;
 model execution time (mean / max over the row); the Chestnut USB interrupt rate and the core taking most of it;
 the UI main thread's CPU use and its time spent waiting for a free core; and the CPU use of card, controlsd,
 selfdrived, plannerd, radard and modeld (percent of one core). When modeld publishes its modeld.steps timing
@@ -16,7 +16,6 @@ per switch setting.
 --rotate SWITCH cycles ONE switch every --window minutes, editing only that key (atomic write, every change
 logged, the file restored byte for byte at the end), so one update can still be read change by change:
   boost: mode on <-> off (off = stock clocks and stock fan)
-  irq:   chestnut_irq_core unset (stock) <-> 6
   ui:    ui_cores unset (stock 0,1,2,7) -> [0,1,2,6] -> [4,5,6]
 Rotate one switch per stretch of driving; city and highway load differ a lot, so compare windows of similar driving.
 Baseline 2026-11-20 (stock clocks, before the UI changes): UI main 44 % engaged / 39 % parked, waiting for a core
@@ -89,18 +88,16 @@ def usb_irq():
 
 def switches():
   if not os.path.exists("/data/openpilot/openpilot/starpilot/power/cpu_boost.py"):
-    return {"boost": "n/a", "irq": "n/a", "ui": "n/a"}
+    return {"boost": "n/a", "ui": "n/a"}
   try:
     doc = json.loads(open(BOOST_FILE, "rb").read()[:4096])
     doc = doc if isinstance(doc, dict) else {}
   except FileNotFoundError:
     doc = {}
   except (OSError, ValueError):
-    return {"boost": "on?", "irq": "?", "ui": "?"}
+    return {"boost": "on?", "ui": "?"}
   ui = doc.get("ui_cores")
-  irq = doc.get("chestnut_irq_core")
   return {"boost": "off" if doc.get("mode", "on") == "off" else "on",
-          "irq": "stock" if irq is None else str(irq),
           "ui": "stock" if not isinstance(ui, list) else "".join(str(c) for c in ui)}
 
 STEPS = ("total", "prepare", "warp", "policy", "wait", "parse")
@@ -204,7 +201,6 @@ print(json.dumps(doc))
 
 ROTATIONS = {
   "boost": ("mode", ["on", "off"]),
-  "irq": ("chestnut_irq_core", [None, 6]),
   "ui": ("ui_cores", [None, [0, 1, 2, 6], [4, 5, 6]]),
 }
 STEPS = ("total", "prepare", "warp", "policy", "wait", "parse")
@@ -255,7 +251,7 @@ def main():
   groups, deadline = defaultdict(list), time.monotonic() + args.minutes * 60
   next_change, step = time.monotonic(), 0
   print(f"logging to {args.log}; Ctrl-C to stop")
-  header = (f"{'time':8s} {'state':8s} {'mph':>5s} {'boost':>5s} {'irq':>5s} {'ui':>6s} {'lit/big MHz':>11s} {'temp':>5s} "
+  header = (f"{'time':8s} {'state':8s} {'mph':>5s} {'boost':>5s} {'ui':>6s} {'lit/big MHz':>11s} {'temp':>5s} "
             f"{'fan':>4s} {'model ms':>11s} {'usbirq/s@cpu':>12s} {'ui wait':>7s}  " + " ".join(f"{c[:10]:>10s}" for c in COLUMNS))
   try:
     with open(args.log, "a") as log:
@@ -270,11 +266,11 @@ def main():
           print(header)
           continue
         state = "engaged" if row["en"] else ("parked" if row["mph"] < 0.5 else "manual")
-        groups[(state, row["boost"], row["irq"], row["ui"])].append(row)
+        groups[(state, row["boost"], row["ui"])].append(row)
         model = f"{fmt(row['model_mean'], '5.1f', 5)}/{fmt(row['model_max'], '<5.1f', 5)}"
         irq = f"{fmt(row['usb_irq_rate'], '6d', 6)}@{fmt(row['usb_irq_cpu'], 'd', 1)}"
         print(f"{time.strftime('%H:%M:%S', time.localtime(row['t']))} {state:8s} {row['mph']:5.1f} {row['boost']:>5s} "
-              f"{row['irq']:>5s} {row['ui']:>6s} {row['little_mhz']:>5d}/{row['big_mhz']:<5d} {row['temp']:5.1f} "
+              f"{row['ui']:>6s} {row['little_mhz']:>5d}/{row['big_mhz']:<5d} {row['temp']:5.1f} "
               f"{row['fan']:3d}% {model:>11s} {irq:>12s} {fmt(row['ui_wait'], '6.1f', 6)}%  "
               + " ".join(f"{row['cpu'].get(c, float('nan')):9.1f}%" for c in COLUMNS), flush=True)
         if row.get("steps"):
@@ -307,7 +303,7 @@ def main():
       print(f"switch file restored: {'ok' if r.returncode == 0 else 'FAILED, check ' + BOOST_FILE}")
 
   print("\naverages per setting (CPU in percent of one core)")
-  print(f"{'state / boost / irq / ui':32s} {'min':>5s} {'temp max':>8s} {'model ms':>11s} {'usbirq/s':>8s} {'ui wait':>7s}  "
+  print(f"{'state / boost / ui':32s} {'min':>5s} {'temp max':>8s} {'model ms':>11s} {'usbirq/s':>8s} {'ui wait':>7s}  "
         + " ".join(f"{c[:10]:>10s}" for c in COLUMNS))
   for key, rows in sorted(groups.items()):
     def mean(field, rows=rows):
@@ -319,7 +315,7 @@ def main():
           + " ".join(f"{sum(r['cpu'].get(c, 0.0) for r in rows) / len(rows):9.1f}%" for c in COLUMNS))
   if any(r.get("steps") for rows in groups.values() for r in rows):
     print("\nmodeld.steps per setting: mean of the 30 s p50s, ms (events)")
-    print(f"{'state / boost / irq / ui':32s} " + " ".join(f"{k:>8s}" for k in STEPS))
+    print(f"{'state / boost / ui':32s} " + " ".join(f"{k:>8s}" for k in STEPS))
     for key, rows in sorted(groups.items()):
       evs = [r["steps"] for r in rows if r.get("steps")]
       if not evs:
