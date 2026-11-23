@@ -1,11 +1,16 @@
 """Small, read-only support download; no raw routes, CarParams, GPS or credentials."""
 
 import json
+import math
+import os
+from pathlib import Path
 import re
+import stat
 from typing import Any
 
 from capnp import KjException
 
+from openpilot.starpilot.connect.provider import cloudlog_root
 from openpilot.starpilot.flm.offroad_cache import AssessmentCache, directory_for_params
 from openpilot.starpilot.flm.offroad_store import KEY, MAX_BYTES, NAMESPACE
 from openpilot.starpilot.flm.learned_lifecycle import decode
@@ -22,6 +27,8 @@ def _explanation(reason):
     'recording_for_offroad_analysis': 'Recording while driving. Route analysis runs after parking; this is not an analysis result.',
     'loading_parked_analysis': 'Starting the parked analysis worker.',
     'analyzing_last_completed_drive': 'Reading recorded drive data.',
+    'verifying_recorded_drive': 'The sections were read. FLM is verifying that the recording is unchanged.',
+    'Parked route input collection cancelled': 'Reading was interrupted before the drive assessment finished. This report has no specific blocker.',
     'checking_recorded_steering_recommendations': 'Checking recommendations against recorded controller and steering-delivery evidence.',
     'previous_analysis_interrupted_before_completion': 'The learner restarted before its previous analysis reported an outcome.',
     'analysis_interrupted_by_shutdown': 'Analysis was interrupted by shutdown or the return to driving.',
@@ -41,6 +48,12 @@ def _explanation(reason):
     'Known vehicle and no manual coordinates required': 'This older build rejected its vehicle/settings identity before route analysis. In the parked ' +
       'analysis path, missing or invalid recorded vehicle identity causes this refusal; it does not establish route corruption.',
     'Valid manual coordinate settings required': 'Saved manual steering settings require review; existing choices were preserved.',
+    'saved_gm_flm_profile_blocks_learning': 'Auto Learn is paused because an older manual GM FLM tune is active.',
+    'saved_gm_force_off_blocks_learning': 'A saved GM steering setting explicitly turns off learning for this vehicle.',
+    'Manual or explicitly disabled tuning selected':
+      'This older report did not distinguish a legacy GM FLM profile from a saved GM setting that turns learning off.',
+    'Manual coordinate settings require review: context_changed':
+      'The saved steering settings do not match the vehicle configuration or controller for this recording.',
     'partial_drive_provisional_only': 'Intact portions were analyzed. This partial recording can provide suggestions, not automatic changes.',
     'bounded_trial_configured_for_next_drive': 'A bounded adjustment was saved for the next drive.',
     'no_consistent_adjustment_in_completed_drive': 'The analyzed evidence did not support a consistent adjustment.',
@@ -66,6 +79,107 @@ def _result(value):
   return result
 
 
+def _finding_review(report, params, cache):
+  """Compare retained findings to the cached parked configuration without exporting it."""
+  from opendbc.car.structs import car
+  from openpilot.starpilot.flm.manual_coordinates import load
+  from openpilot.starpilot.flm.offroad_surface import ROUTE_NAMES
+  from openpilot.starpilot.galaxy.flm_acceptance import review_binding_issue
+  from openpilot.starpilot.lateral.controller_selection import read_selection
+  from openpilot.starpilot.schema_cache import inspect_cache
+
+  preference = report.get('preference') or {}
+  if preference.get('valid') is not True or preference.get('parked') is not True:
+    return {'status': 'parked_configuration_unavailable'}
+  key = 'CarParamsPersistent'
+  snapshot = read_saved(params, key, 1024 * 1024)
+  raw, readable = snapshot
+  payload = inspect_cache(key, raw).payload if readable and raw is not None else None
+  if payload is None:
+    return {'status': 'parked_configuration_unavailable'}
+  with car.CarParams.from_bytes(payload, traversal_limit_in_words=1024 * 1024 // 8) as cp:
+    if cp.notCar or cp.carFingerprint != preference.get('vehicle'):
+      return {'status': 'parked_configuration_unavailable'}
+    _, manual_state = load(cp, read_selection(params, cp).mode, params)
+    details = (report.get('current') or {}).get('details') or {}
+    findings, checked = {}, {}
+    for name, review, source in details.get('Recorded suggestion assessments', ())[:len(ROUTE_NAMES)]:
+      if name not in ROUTE_NAMES:
+        continue
+      binding = (review, source)
+      if binding not in checked:
+        try:
+          _, issue = review_binding_issue(cache, review, cp, source)
+          checked[binding] = issue or 'matches_parked_fingerprint'
+        except (OSError, ValueError, TypeError, KeyError):
+          checked[binding] = 'assessment_unavailable'
+      findings[name] = checked[binding]
+  if (read_saved(params, key, 1024 * 1024) != snapshot
+      or read_saved(params, 'IsOffroad', 1) != (b'1', True)):
+    return {'status': 'parked_configuration_unavailable'}
+  return {'status': 'checked', 'scope': 'Stored parked configuration at download', 'manual_coordinates': manual_state, 'findings': findings}
+
+
+def _hardwared_pauses(root):
+  """Read only recent, already recorded slow phases. Never return raw log records."""
+  try:
+    paths = sorted(Path(root).glob('swaglog.[0-9]*'), reverse=True)[:8]
+  except OSError:
+    return []
+  pauses = []
+  for path in paths:
+    try:
+      with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+          continue
+        offset = max(0, info.st_size - 256 * 1024)
+        stream.seek(offset)
+        data = stream.read(256 * 1024)
+      lines = data.splitlines()
+      for line in lines[1:] if offset else lines:
+        if b'hardwared.slow_phase' not in line:
+          continue
+        try:
+          entry = json.loads(line)
+          msg = entry['msg']
+          if entry['filename'] != 'hardware_timing.py' or msg['event$s'] != 'hardwared.slow_phase':
+            continue
+          phase, end = msg['phase$s'], entry['created']
+          elapsed, cpu = msg['elapsedMs$f'], msg['threadCpuMs$f']
+          if (re.fullmatch(r'[a-z_]{1,32}', phase) and type(end) in (int, float) and math.isfinite(end)
+              and 500 <= elapsed <= 60_000 and 0 <= cpu <= elapsed + 1):
+            pauses.append((end - elapsed / 1000, end, phase, round(elapsed), round(cpu)))
+        except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+          continue
+    except OSError:
+      continue
+  return pauses
+
+
+def _explain_parked_interruptions(history):
+  pauses = None
+  for event in [history['current'], history['last_attempt'], history['last_result'], *history['events']]:
+    if event is None:
+      continue
+    event['explanation'] = _explanation(event['reason'])
+    counts = event.get('analysis_counts', {})
+    interrupted = counts.pop('parked_interrupted_wall_ns', None)
+    age_ms = counts.get('device_state_receive_age_ms')
+    if interrupted is None or age_ms is None:
+      continue
+    if pauses is None:
+      pauses = _hardwared_pauses(cloudlog_root())
+    when = interrupted / 1e9
+    matches = [row for row in pauses if row[0] <= when <= row[1] + 0.5 and
+               row[1] >= when - age_ms / 1000 and row[1] <= when + 60]
+    if matches:
+      _, _, phase, elapsed, cpu = max(matches, key=lambda row: row[3])
+      event['hardwared_pause'] = {'status': 'overlapping_logged_phase', 'phase': phase, 'elapsed_ms': elapsed, 'thread_cpu_ms': cpu}
+    else:
+      event['hardwared_pause'] = {'status': 'no_matching_phase_in_recent_logs'}
+
+
 def diagnostics(report, params):
   current = report.get('current') or {}
   details = current.get('details') or {}
@@ -75,9 +189,11 @@ def diagnostics(report, params):
   result['current']['reason'] = _reason(current.get('reason', 'learner_report_unavailable'))
   result['current']['explanation'] = _explanation(result['current']['reason'])
   result['current']['analysis'] = {key: details[key] for key in (
+    'Parked analysis progress', 'Earlier analysis shown while updating',
     'Recorded steering observations', 'Retained control windows', 'Retained tracking windows', 'Recorded drive coverage',
     'Drives in steering evidence history', 'Saved route adjustment count', 'Saved route configuration state',
-            'Recorded coordinate recommendations', 'Recorded suggestion sources', 'Controller and encoder check windows', 'Automatic tune refusal reasons',
+            'Recorded coordinate recommendations', 'Recorded suggestion sources', 'Recorded suggestion assessments',
+            'Controller and encoder check windows', 'Automatic tune refusal reasons',
             'Recorded vehicle identity', 'Drive analysis is partial', 'Partial drive segments', 'Omitted recorded segments') if key in details}
   result['current']['skipped_drives'] = _result({'skipped_routes': details.get('Skipped recorded drives', [])})['skipped_drives']
   if params is None:
@@ -87,9 +203,7 @@ def diagnostics(report, params):
   result['learning_diagnostics'] = read_state(params)
   history = result['learning_diagnostics']
   if history['status'] == 'recorded':
-    for event in [history['current'], history['last_attempt'], history['last_result'], *history['events']]:
-      if event is not None:
-        event['explanation'] = _explanation(event['reason'])
+    _explain_parked_interruptions(history)
   if details.get('Diagnostic persistence error'):
     result['learning_diagnostics']['write_error'] = _reason(details['Diagnostic persistence error'])
   for key in ('GitCommit', 'GitBranch'):
@@ -119,6 +233,11 @@ def diagnostics(report, params):
       files = list(directory.iterdir())
       result['storage'] = {'status': 'readable', 'documents': len(files), 'bytes': sum(path.lstat().st_size for path in files)}
       result['checkpoints'] = [_result(row['result']) for row in cache.checkpoints()]
+      if details.get('Recorded suggestion assessments'):
+        try:
+          result['finding_review'] = _finding_review(report, params, cache)
+        except (OSError, RuntimeError, ValueError, TypeError, KeyError, KjException):
+          result['finding_review'] = {'status': 'unavailable'}
   except (OSError, ValueError, TypeError, KeyError) as error:
     result['storage'] = {'status': 'unavailable', 'reason': _reason(error)}
   result['storage']['scope'] = 'Parked route analysis in the current settings store only'

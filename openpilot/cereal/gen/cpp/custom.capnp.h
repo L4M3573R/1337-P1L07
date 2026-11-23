@@ -3640,6 +3640,8 @@ public:
   inline bool hasSteeringLimitInfo() const;
   inline  ::cereal::StarPilotCarControl::SteeringLimitInfo::Reader getSteeringLimitInfo() const;
 
+  inline bool getGmRegenGear() const;
+
 private:
   ::capnp::_::StructReader _reader;
   template <typename, ::capnp::Kind>
@@ -3815,6 +3817,9 @@ public:
   inline  ::cereal::StarPilotCarControl::SteeringLimitInfo::Builder initSteeringLimitInfo();
   inline void adoptSteeringLimitInfo(::capnp::Orphan< ::cereal::StarPilotCarControl::SteeringLimitInfo>&& value);
   inline ::capnp::Orphan< ::cereal::StarPilotCarControl::SteeringLimitInfo> disownSteeringLimitInfo();
+
+  inline bool getGmRegenGear();
+  inline void setGmRegenGear(bool value);
 
 private:
   ::capnp::_::StructBuilder _builder;
@@ -18409,6 +18414,20 @@ inline void StarPilotCarState::Builder::adoptSteeringLimitInfo(
 inline ::capnp::Orphan< ::cereal::StarPilotCarControl::SteeringLimitInfo> StarPilotCarState::Builder::disownSteeringLimitInfo() {
   return ::capnp::_::PointerHelpers< ::cereal::StarPilotCarControl::SteeringLimitInfo>::disown(_builder.getPointerField(
       ::capnp::bounded<6>() * ::capnp::POINTERS));
+}
+
+inline bool StarPilotCarState::Reader::getGmRegenGear() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<70>() * ::capnp::ELEMENTS);
+}
+
+inline bool StarPilotCarState::Builder::getGmRegenGear() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<70>() * ::capnp::ELEMENTS);
+}
+inline void StarPilotCarState::Builder::setGmRegenGear(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<70>() * ::capnp::ELEMENTS, value);
 }
 
 inline  ::uint16_t StarPilotCarState::ToyotaCruise::Reader::getVersion() const {

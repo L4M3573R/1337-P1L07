@@ -419,10 +419,12 @@ class CarState(CarStateBase):
     ret.standstill = abs(pt_cp.vl["EBCMWheelSpdRear"]["RLWheelSpd"]) <= STANDSTILL_THRESHOLD and \
                      abs(pt_cp.vl["EBCMWheelSpdRear"]["RRWheelSpd"]) <= STANDSTILL_THRESHOLD
 
-    if pt_cp.vl["ECMPRDNL2"]["ManualMode"] == 1:
+    gear = pt_cp.vl["ECMPRDNL2"]
+    self.gm_regen_gear = self.bolt_cc_profile and self.CP.carFingerprint in NO_ACC_BOLT_CAR and gear["PRNDL2"] in (5, 7)
+    if gear["ManualMode"] == 1:
       ret.gearShifter = self.parse_gear_shifter("T")
     else:
-      ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(pt_cp.vl["ECMPRDNL2"]["PRNDL2"], None))
+      ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(gear["PRNDL2"], None))
 
     source_be_brake = (gm_control_word(self.CP) &
                        (GMSafetyFlags.ASCM_INTERCEPT | GMSafetyFlags.SDGM).value and
@@ -493,7 +495,10 @@ class CarState(CarStateBase):
       if new_sample:
         self.pedal_sensor_ts_nanos = sensor_ts
         self.pedal_sensor_counter = counter
-        self.pedal_sensor_healthy = bool(counter_changed and sensor["STATE"] == 0 and tracks_valid and checksum_valid)
+        state = sensor["STATE"]
+        state_ok = state == 0 or (state == 8 and bolt_pedal_profile and not removed_pedal and
+                                  self.CP.carFingerprint == CAR.CHEVROLET_BOLT_CC_2022_2023)
+        self.pedal_sensor_healthy = bool(counter_changed and state_ok and tracks_valid and checksum_valid)
       elif sensor_ts < self.pedal_sensor_ts_nanos:
         self.pedal_sensor_healthy = False
         self.pedal_sensor_ts_nanos = 0

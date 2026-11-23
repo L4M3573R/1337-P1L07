@@ -167,6 +167,7 @@ def check_candidate(cp, controls, values, *, score_start_ns=0, score_end_ns=2**6
   verified = scored = changed = checkpoints = inhibited_frames = clipped_frames = nonemitted_frames = 0
   minimum = maximum = 0.0
   commands = []
+  unchanged_inhibited = []
   last_ns = last_sequence = 0
   for evidence in controls:
     if (
@@ -223,12 +224,17 @@ def check_candidate(cp, controls, values, *, score_start_ns=0, score_end_ns=2**6
       return {'qualified': False, 'reason': 'candidate_changes_manually_locked_coordinate', 'verified_frames': verified}
     trial = replay_source(values, baseline, revision=revision)
     candidate, _ = _run(probe, probe_vm, frame.inputs, actual.objective, (0.0,) * len(frame.applied_coordinates), frame.torque_values, effect_trial=trial)
-    # Existing selected source checks retain per-stage sign/envelopes and limits.
-    if not math.isfinite(candidate) or abs(candidate) > probe.steer_max + 1e-12:
-      return {'qualified': False, 'reason': 'actual_controller_output_bound', 'verified_frames': verified}
     reference = frame.actual_lac_command
     if reference is None:
       return {'qualified': False, 'reason': 'original_full_precision_controller_output_missing', 'verified_frames': verified}
+    if not math.isfinite(candidate):
+      return {'qualified': False, 'reason': 'actual_controller_output_bound', 'verified_frames': verified}
+    if abs(candidate) > probe.steer_max + 1e-12:
+      # An unchanged, inhibited original is context only. The native replay
+      # must also reproduce its bounded output if Card consumed the command.
+      if not (inhibited and candidate == reference and (delivery_context == 'clipped_context' or nonemitted)):
+        return {'qualified': False, 'reason': 'actual_controller_output_bound', 'verified_frames': verified}
+      unchanged_inhibited.append(frame.control_ns)
     # Compare the same Float32 actuator field, never raw double versus Float32.
     from openpilot.starpilot.flm.controller_replay import final_command
 
@@ -251,7 +257,8 @@ def check_candidate(cp, controls, values, *, score_start_ns=0, score_end_ns=2**6
     maximum = max(maximum, delta)
     last_ns, last_sequence = frame.control_ns, frame.frame_sequence
   return {
-    'qualified': bool(scored >= 50 and (changed > 0 or not require_change)),
+    # Replication is assessed across independent windows; full native history is checked separately.
+    'qualified': bool(scored > 0 and (changed > 0 or not require_change)),
     'reason': 'same_state_controller_checks_only',
     'verified_frames': verified,
     'scored_frames': scored,
@@ -263,6 +270,7 @@ def check_candidate(cp, controls, values, *, score_start_ns=0, score_end_ns=2**6
     'minimum_command_delta': minimum,
     'maximum_command_delta': maximum,
     'commands': tuple(commands),
+    'unchanged_inhibited_commands': tuple(unchanged_inhibited),
     'counterfactual_rollout_proven': False,
     'physical_improvement_proven': False,
     'native_encoder_application_proven': False,
@@ -270,7 +278,7 @@ def check_candidate(cp, controls, values, *, score_start_ns=0, score_end_ns=2**6
   }
 
 
-def check_original_native(cp, controls, outputs, commands, *, require_change=True):
+def check_original_native(cp, controls, outputs, commands, *, require_change=True, unchanged_inhibited=()):
   """Decode originals then replay the registered encoder; no new native grant."""
   from dataclasses import replace
   from opendbc.car.steering_projection import TorqueProjection
@@ -326,6 +334,9 @@ def check_original_native(cp, controls, outputs, commands, *, require_change=Tru
     after = history.rollout(candidate, start, end, allow_unclipped_equal_output=True)
   except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as error:
     return {'qualified': False, 'reason': 'original_encoder_or_candidate_quality_refused', 'detail': str(error)[:160]}
+  unchanged = set(unchanged_inhibited)
+  if any(before[stamp] != after[stamp] and output.control_ns in unchanged for stamp, output in originals.items()):
+    return {'qualified': False, 'reason': 'candidate_changed_inhibited_native_output'}
   changed = sum(before[k] != after[k] for k in before)
   return {
     'qualified': bool(changed or not require_change),

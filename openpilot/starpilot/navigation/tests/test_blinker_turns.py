@@ -22,6 +22,7 @@ def turn_case(tmp_path):
   cp = structs.CarParams.new_message(carFingerprint='real', brand='hyundai', steerControlType='torque')
   cp.safetyConfigs = [structs.CarParams.SafetyConfig.new_message(safetyModel='hyundai')]
   params.put(KEY, to_value(replace(LaneChangePolicy(), turn_signal_guidance=True)), block=True)
+  params.put_bool('AutomaticTurnInitiation', True)   # upstream 2026-11-20: automatic turns are their own opt-in
   class SM(dict):
     valid = dict.fromkeys(('carState', 'carControl', 'deviceState', 'longitudinalPlan'), True)
     alive = dict(valid)
@@ -351,3 +352,17 @@ def test_turning_without_the_comma_takes_no_turn_on_the_same_blinker():
   turn.update(0.5, 'left', V, -75.0, lookup(0.5, 5.0), nudged=False)    # the driver turned by hand
   d = turn.update(1.0, 'left', V, -75.0, lookup(1.0, 5.0), nudged=True)
   assert not d.turning and d.reason.endswith('one turn per blinker')
+
+
+def test_automatic_turns_off_steers_no_turn_but_the_shadow_log_still_runs(monkeypatch, turn_case):
+  from openpilot.cereal import log
+  from openpilot.starpilot.diagnostics.features import turn_decision
+  from openpilot.starpilot.navigation.intent import TurnIntent
+  from openpilot.starpilot.navigation.tests.test_signal_guidance import select
+  params, cp, sm = turn_case
+  params.put_bool('AutomaticTurnInitiation', False)   # upstream's opt-in (2026-11-20), default off
+  monkeypatch.setattr(bt, 'mode', lambda path=None: 'shadow')
+  sm['carState'].steeringPressed, sm['carState'].steeringTorque = False, 0.0
+  owner = TurnIntent(params, cp)
+  assert select(owner, sm) == log.Desire.none and owner.blocked_by == 'automatic turns off'
+  assert turn_decision(owner, log.Desire.none)['timed'] == 'map: looking up the road, waiting for a nudge'

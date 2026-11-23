@@ -3,7 +3,9 @@ import hashlib
 from openpilot.starpilot.aol.vehicle import policy_for
 from openpilot.starpilot.conditional_mode.manual import ioniq6_media_eligible
 from openpilot.starpilot.feature_capabilities import lateral_supported
-from openpilot.starpilot.controllers.wheel_actions import ACTIONS, DEFAULTS, KEYS, PADDLE_KEY, button_reported, eligible, paddle_bookmark_available
+from openpilot.starpilot.controllers.wheel_actions import (
+  ACTIONS, ACTION_VALUES, DEFAULTS, KEYS, PADDLE_KEY, SCREEN_OFF_ACTION, button_reported, eligible, paddle_bookmark_available,
+)
 from openpilot.starpilot.saved_document import commit_exact
 from openpilot.starpilot.saved_source import read_saved
 from openpilot.starpilot.ui.feature_settings_state import FeatureRow
@@ -79,7 +81,7 @@ class WheelFeature:
         return ()
     if key in KEYS[8:] and not media:
       return ()
-    codes = {0, 8, 11, 12, 13}
+    codes = {0, 8, 11, 12, 13, SCREEN_OFF_ACTION}
     if self.owner.longitudinal_available():
       codes.update((1, 2, 5, 10, 14))
       codes.add(6)
@@ -115,7 +117,7 @@ class WheelFeature:
       if not choices:
         continue
       raw, readable = read_saved(self.owner.params, key, 8)
-      number = DEFAULTS.get(key, 0) if raw is None else int(raw) if raw in tuple(str(i).encode() for i in range(15)) else -1
+      number = DEFAULTS.get(key, 0) if raw is None else int(raw) if raw in ACTION_VALUES else -1
       selected = next((name for name, code in ACTIONS.items() if code == number), None)
       implicit_toggle = False
       if cp.brand == 'hyundai' and policy.explicit_latch and key in KEYS[:2]:
@@ -125,12 +127,13 @@ class WheelFeature:
         implicit_toggle = independent_cruise_buttons_supported(cp) and all(ok and value in ordinary_actions
                                                                           for value, ok in sources)
       ford_role = cp.brand == 'ford' and policy.explicit_latch and policy.runtime_supported and key == KEYS[0]
-      if (implicit_toggle or ford_role) and selected == "Off":
+      if (ford_role or (implicit_toggle and raw is None)) and selected == "Off":
         selected = "Toggle AOL"
       rows.append(FeatureRow(PREFIX + key, label, selected or "Invalid saved action", raw, choices,
                              available=readable and self.owner.authority("preferences"),
                              reason=("LKAS also toggles AOL independently of its saved extra action." if ford_role else
-                                     "With neither button assigned Toggle AOL, LKAS retains its default AOL toggle." if implicit_toggle else
+                                     ("When AOL is enabled, this button can still toggle it by default. Using only the other button " +
+                                      "requires assigning Toggle AOL to it and restarting.") if implicit_toggle and raw == b"0" else
                                      "Bookmark on release. Available while Left Paddle Longitudinal Pause is Off." if key == PADDLE_KEY else
                                      "Off adds no action to the vehicle's existing button behavior. " +
                                      "Axis pause and AOL assignments apply after restarting. Other actions can apply this drive. " +

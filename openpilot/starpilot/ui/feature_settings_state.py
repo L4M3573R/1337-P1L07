@@ -61,6 +61,7 @@ class FeaturePage(StrEnum):
   CURVE = "curve"
   TORQUE = "torque"
   DEVELOPER_LATERAL = "torque/developer"
+  DEVELOPER_LONGITUDINAL = "profiles/developer"
   TUNING = "tuning"
   BLUEPILOT = "torque/bluepilot"
   AOL = "aol"
@@ -117,6 +118,8 @@ class FeatureRow:
   collapsed: bool = False  # a heading whose rows are hidden until it is opened
   learned_value: str = field(default='', compare=False, repr=False)
   accepted_finding_value: float | None = None
+  coordinate_locked: bool | None = None
+  learning_eligible: bool | None = None
 
 
 @dataclass(frozen=True)

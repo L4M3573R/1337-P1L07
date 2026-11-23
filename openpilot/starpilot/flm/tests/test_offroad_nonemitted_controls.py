@@ -146,7 +146,9 @@ def test_native_history_counts_real_emissions_and_preserves_each_hold(native_his
 
 @pytest.mark.parametrize('reason,scored,attempts', (
   ('original_hint_requires_exact_unclipped_native_pair', None, 1),
-  ('same_state_controller_checks_only', 49, 1),
+  ('same_state_controller_checks_only', 0, 1),
+  ('same_state_controller_checks_only', 1, len(TRAINING_FRACTIONS)),
+  ('same_state_controller_checks_only', 49, len(TRAINING_FRACTIONS)),
   ('same_state_controller_checks_only', 50, len(TRAINING_FRACTIONS)),
   ('candidate_dependent_quality_refusal', None, len(TRAINING_FRACTIONS)),
 ))
@@ -161,3 +163,35 @@ def test_only_original_source_refusal_ends_redundant_strength_search(reason, sco
   assert fitted is None and proof['selected_fraction'] is None
   assert len(proof['attempts']) == checker.call_count == attempts
   assert proof['heldout_windows_not_evaluated'] == ('d', 'e', 'f')
+
+
+def test_sparse_numerical_credit_never_replaces_real_native_emissions(native_history):
+  cp, controls, chain, commands = native_history
+  retained = set(sorted({output.apply_ns for output in chain})[:24])
+  fewer = tuple(output for output in chain if output.apply_ns in retained)
+  result = check_original_native(cp, controls, fewer, commands, require_change=False)
+  assert not result['qualified'] and result['reason'] == 'insufficient_original_native_delivery'
+  unchanged = check_original_native(cp, controls, chain, commands, require_change=True)
+  assert not unchanged['qualified'], 'A complete unchanged history cannot earn a changed tune'
+
+
+def test_native_replay_preserves_a_required_inhibited_emission(native_history):
+  cp, controls, chain, commands = native_history
+  stamp = chain[0].control_ns
+  altered = tuple((ns, before, after + .004 if ns == stamp else after) for ns, before, after in commands)
+  changed = check_original_native(cp, controls, chain, altered)
+  assert changed['qualified'] and changed['candidate_changed_emissions'] > 0
+  refused = check_original_native(cp, controls, chain, altered, unchanged_inhibited=(stamp,))
+  assert not refused['qualified'] and refused['reason'] == 'candidate_changed_inhibited_native_output'
+  unchanged = check_original_native(cp, controls, chain, commands, require_change=False, unchanged_inhibited=(stamp,))
+  assert unchanged['qualified'] and unchanged['candidate_changed_emissions'] == 0
+
+
+def test_replicated_curve_quieting_precedes_generic_gain_with_more_windows():
+  from openpilot.starpilot.flm.offroad_worker import _candidate_order
+
+  group = {'original_context_sha256': 'a' * 64}
+  gain = group, {'whole_windows': 41, 'cohort': '2:right:steady'}, {}
+  quieting = group, {'whole_windows': 15, 'cohort': '2:right:steady'}, {'notchy_curve_quieting': True}
+  assert _candidate_order(quieting) < _candidate_order(gain)
+  assert _candidate_order((*quieting[:2], {'notchy_curve_quieting': False})) > _candidate_order(gain)

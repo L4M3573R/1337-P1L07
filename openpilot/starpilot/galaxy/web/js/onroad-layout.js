@@ -14,7 +14,7 @@ import { GalaxySettingRow, switchRow } from "./galaxy-setting-row.js"
 import { showDraftChange } from "./save-feedback.js"
 import { snapTargets, snapMove, snapResize, snapThreshold } from "./layout-snap.js"
 
-import { PROFILES, ROAD_COLORS, PATH_MODES, HEX, PROJECTION_DISPLAY_SWITCHES, layoutDocument, previewDocument, withDisplay, orderedWidgetIds, widgetPalette, withAlpha, widgetSize, placementLimits, clampBox, clampPlacement, overlapsReserved, previewPoint, validDocument, validSnapshot } from "./onroad-layout-document.js"
+import { PROFILES, ROAD_COLORS, PATH_MODES, HEX, PROJECTION_DISPLAY_SWITCHES, layoutDocument, previewDocument, withDisplay, orderedWidgetIds, widgetPalette, withAlpha, widgetSize, placementLimits, clampBox, clampPlacement, overlapsReserved, previewPoint, validDocument, validSnapshot, wheelRotationAvailable } from "./onroad-layout-document.js"
 export { layoutDocument, previewDocument, withDisplay, orderedWidgetIds, widgetPalette, withAlpha, widgetSize, placementLimits, clampBox, clampPlacement, overlapsReserved, previewPoint, validDocument, validSnapshot } from "./onroad-layout-document.js"
 
 const previewVisibilityKey = projection => "gx-layout-preview-visibility-v2:" + (projection ? "starport" : "comma")
@@ -166,12 +166,13 @@ export async function loadNavLook(fetcher = (...args) => fetch(...args)) {
 }
 
 export const LayoutWidgetPreview = {
-  props: ["widget", "palette", "profile", "scene", "clock24Hour", "native", "art"],
+  props: ["widget", "palette", "profile", "scene", "clock24Hour", "art", "native"],
   computed: {
     nav() { return navLook },
     googleMap() { return navLook.map === "google" },
     googleRoutes() { return navLook.routes === "google" },
     roadNameSize() { return Math.max(18, Math.min(this.widget.width, this.widget.height) * .075) },
+    sprite() { return this.art?.url && this.art.sprites?.sprites?.[this.widget.id] },
   },
   methods: {
     withAlpha,
@@ -184,20 +185,14 @@ export const LayoutWidgetPreview = {
   },
   template: `
     <g aria-hidden="true" class="gx-layout-widget-art" :fill="palette.text || '#ffffff'">
-      <template v-if="native || art?.url && art.sprites?.sprites?.[widget.id]">
-        <svg v-if="art?.url && art.sprites?.sprites?.[widget.id]"
-          :x="art.sprites.sprites[widget.id].offsetX || 0" :y="art.sprites.sprites[widget.id].offsetY || 0"
-          :width="widget.aspectRatio ? widget.width : art.sprites.sprites[widget.id].width" :height="widget.aspectRatio ? widget.height : art.sprites.sprites[widget.id].height"
-          :viewBox="[art.sprites.sprites[widget.id].x, art.sprites.sprites[widget.id].y, art.sprites.sprites[widget.id].width, art.sprites.sprites[widget.id].height].join(' ')"
-          preserveAspectRatio="xMinYMin meet" data-preview-source="runtime">
-          <image :href="art.url" :width="art.sprites.width" :height="art.sprites.height" />
-        </svg>
-        <g v-else data-preview-source="placeholder">
-          <rect x="1" y="1" :width="widget.width - 2" :height="widget.height - 2" fill="#0c182044" stroke="#a6dfbe66" stroke-dasharray="5 5" />
-          <text :x="widget.width / 2" :y="widget.height / 2" text-anchor="middle" :font-size="Math.min(24, widget.width / 10)">{{ widget.label }}</text>
-        </g>
-      </template>
-      <template v-else>
+      <svg v-if="sprite"
+        :x="sprite.offsetX || 0" :y="sprite.offsetY || 0"
+        :width="widget.aspectRatio ? widget.width : sprite.width" :height="widget.aspectRatio ? widget.height : sprite.height"
+        :viewBox="[sprite.x, sprite.y, sprite.width, sprite.height].join(' ')"
+        preserveAspectRatio="xMinYMin meet" data-preview-source="runtime">
+        <image :href="art.url" :width="art.sprites.width" :height="art.sprites.height" />
+      </svg>
+      <g v-else-if="!native" data-preview-source="sketch">
       <template v-if="widget.kind === 'driving_mode_descriptions'">
         <text :x="widget.width / 2" :y="widget.height / 2" text-anchor="middle" dominant-baseline="middle"
           :font-size="profile === 'large' ? 48 : 21" font-weight="600" style="filter: drop-shadow(2px 2px 1px #000000aa)">
@@ -365,16 +360,6 @@ export const LayoutWidgetPreview = {
         <path v-if="pending(scene)" d="M90 12 V-8 M84 -2 L90 -8 L96 -2" fill="none" :stroke="palette.text || '#ffffff'" stroke-width="2" />
         <text x="0" y="66" font-size="58" font-weight="700">45<tspan dx="10" font-size="36" font-weight="500">+5</tspan></text>
       </template>
-      <template v-else-if="widget.kind === 'speed_limit_actions'">
-        <template v-if="pending(scene)">
-          <line :x1="widget.width / 2" :x2="widget.width / 2" :y1="profile === 'large' ? 46 : 6" :y2="profile === 'large' ? 98 : 42" stroke="#9bb2adaa" />
-          <text v-for="(label, index) in ['Accept', 'Decline']" :key="label" :x="widget.width * (index ? .75 : .25)"
-            :y="profile === 'large' ? 72 : 24" text-anchor="middle" dominant-baseline="middle"
-            :font-size="profile === 'large' ? 64 : 50" font-weight="500">{{ label }}</text>
-        </template>
-        <text v-else :x="widget.width / 2" :y="profile === 'large' ? 72 : 24" text-anchor="middle"
-          dominant-baseline="middle" :font-size="profile === 'large' ? 48 : 28">Toyota guidance</text>
-      </template>
       <g v-else-if="widget.kind === 'torque_bar'" fill="none" stroke="white" stroke-linecap="round">
         <path :d="'M 12 ' + widget.height * .8 + ' Q ' + widget.width / 2 + ' ' + widget.height * .55 + ' ' + (widget.width - 12) + ' ' + widget.height * .8" :stroke-width="widget.height * .18" opacity=".3" />
         <path :d="'M ' + widget.width / 2 + ' ' + widget.height * .68 + ' Q ' + widget.width * .65 + ' ' + widget.height * .68 + ' ' + widget.width * .8 + ' ' + widget.height * .74" :stroke-width="widget.height * .18" opacity=".9" />
@@ -474,7 +459,7 @@ export const LayoutWidgetPreview = {
         <rect :width="widget.width" :height="widget.height" :fill="palette.cardFill" :stroke="palette.cardBorder" />
         <text :x="widget.width / 2" :y="widget.height / 2" text-anchor="middle" :font-size="Math.min(32, widget.width / 10)">{{ widget.label }}</text>
       </template>
-      </template>
+      </g>
     </g>`,
 }
 
@@ -636,8 +621,24 @@ export const OnroadLayoutPage = {
         return [id, narrow]
       })) }
     },
+    artLoading() {
+      return this.mode === 'local' && !!this.state.data?.editable && !this.layers.art.url &&
+        ['idle', 'updating'].includes(this.state.art.status)
+    },
+    // Widget art and the backdrop always come from the same scene, so a half-switched pair never overlaps.
+    layers() {
+      const { art, backdrop } = this.state, profile = this.projection ? "projection" : this.state.profile
+      if (!art.url || !backdrop.url || art.profile !== profile || backdrop.profile !== profile || art.scene === backdrop.scene) return { art, backdrop }
+      const cached = (feed, scene) => feed.artCache.get(profile + "\n" + scene)
+      const sheet = cached(this.artFeed, backdrop.scene)
+      if (sheet) return { art: { ...art, url: sheet.url, sprites: sheet.sprites, scene: sheet.scene }, backdrop }
+      const screen = cached(this.backdropFeed, art.scene)
+      if (screen) return { art, backdrop: { ...backdrop, url: screen.url, scene: screen.scene } }
+      return { art: { ...art, url: null, sprites: null }, backdrop }
+    },
+    previewDenied() { return [this.state.art, this.state.backdrop].some(feed => feed.status === 'unavailable' && feed.denied) },
     // The last screen for this profile stays up while the next scene renders, instead of flashing the sketch.
-    nativeBackdropReady() { return !!this.state.backdrop.url && this.state.backdrop.profile === (this.projection ? "projection" : this.state.profile) },
+    nativeBackdropReady() { return !!this.layers.backdrop.url && this.layers.backdrop.profile === (this.projection ? "projection" : this.state.profile) },
     layout() { return this.state.draft?.layouts[this.state.profile] },
     projectionHasPipWidget() {
       return ["pip_left", "pip_right"].some(id => this.state.draft?.layouts?.large?.[id]?.enabled === true)
@@ -665,8 +666,7 @@ export const OnroadLayoutPage = {
       const widget = this.renderWidgets.find(widget => widget.id === this.state.selected)
       if (!widget) return null
       return {
-        x: this.previewX(this.state.selected), y: this.selectedPosition.y - widget.visualInsetTop,
-        width: widget.width, height: widget.height + widget.visualInsetTop + widget.visualInsetBottom
+        ...widget.outline, x: this.previewX(this.state.selected) + widget.outline.x, y: this.selectedPosition.y + widget.outline.y
       }
     },
     // On touch, a magnified copy of the area around the dragged widget sits clear of the finger.
@@ -706,8 +706,14 @@ export const OnroadLayoutPage = {
           visualInsetBottom: below ? item.visualInsetTop : 0, visualHeaderY: below ? item.height + 8 : -(item.visualInsetTop || 0)
         }
         const [width, height] = widgetSize(widget, this.layout[widget.id])
+        const sprite = this.layers?.art?.sprites?.sprites?.[item.id]
+        const ink = sprite?.ink
+        const outline = Array.isArray(ink) && ink.length === 4 && ink.every(Number.isInteger) &&
+          ink[0] >= 0 && ink[1] >= 0 && ink[2] > 0 && ink[3] > 0 && ink[0] + ink[2] <= sprite.width && ink[1] + ink[3] <= sprite.height
+          ? { x: (sprite.offsetX || 0) + ink[0] - 2, y: (sprite.offsetY || 0) + ink[1] - 2, width: ink[2] + 4, height: ink[3] + 4 }
+          : { x: 0, y: -widget.visualInsetTop, width, height: height + widget.visualInsetTop + widget.visualInsetBottom }
         return {
-          ...widget, width, height, ...(widget.iconSize ? { display: this.layout[widget.id].display } : {}),
+          ...widget, width, height, outline, ...(widget.iconSize ? { display: this.layout[widget.id].display } : {}),
           ...(widget.opacity ? { opacity: this.layout[widget.id].opacity } : {}),
           ...(widget.backgroundToggle ? { background: this.layout[widget.id].background } : {}),
           ...(widget.collapseToggle ? { collapse: this.layout[widget.id].collapse } : {}),
@@ -722,6 +728,10 @@ export const OnroadLayoutPage = {
       (!this.layout[id].enabled || (this.state.drag?.fromTray && this.state.drag.id === id))) },
     availableProfiles() { return this.state.data?.supportedProfiles || (this.state.data?.activeProfile ? [this.state.data.activeProfile] : []) },
     selectedWidget() { return this.profile?.widgets[this.state.selected] },
+    canRotateWheel() {
+      return wheelRotationAvailable(this.selectedWidget, this.state.profile,
+        this.projection || this.state.data?.metadata?.projection === true)
+    },
     sizeChoice() {
       const signal = this.selectedWidget?.kind === 'network_signal'
       return { label: signal ? 'Style' : 'Size', options: signal ? Object.keys(this.selectedWidget.sizes) : ['big', 'small'] }
@@ -813,7 +823,6 @@ export const OnroadLayoutPage = {
         .map(target => ({ ...target, value: target.value - (target.axis === "x" ? shift : 0) }))
     },
     switchRow,
-    runtimeWidget(id) { return this.profile?.runtimePreviewWidgets?.includes(id) === true },
     toggleSnap() {
       if (this.state.drag || this.state.layerDrag) return
       this.state.snapEnabled = !this.state.snapEnabled
@@ -861,8 +870,9 @@ export const OnroadLayoutPage = {
       this.state.selected = null
       this.state.touchArmed = null
     },
-    previewClick(event) {
-      if (!event.target?.closest?.(".gx-layout__widget")) this.deselectWidget()
+    previewPointerDown(event) {
+      // Pointer capture retargets the subsequent click to the canvas.
+      if (event.button === 0 && !event.target?.closest?.(".gx-layout__widget")) this.deselectWidget()
     },
     openEditPanel() {
       if (this.state.selected == null) this.state.selected = this.activeWidgets?.[0]?.id || this.widgets?.[0]?.id || null
@@ -1167,7 +1177,7 @@ export const OnroadLayoutPage = {
         Object.assign(this.layout[id], position)
         if (before) this.recordChange(before)
         this.state.placementError = ""
-      } else this.state.placementError = "Keep widgets within the screen and clear of Speed limit actions. The last valid position is kept."
+      } else this.state.placementError = "Speed-limit confirmation overlaps set speed, torque, or screen bounds"
       this.state.notice = ""
     },
     add(id) {
@@ -1243,24 +1253,11 @@ export const OnroadLayoutPage = {
     setSpeedSources(key, value) {
       if (!this.editable || this.state.drag || this.state.layerDrag || this.selectedWidget?.kind !== "cruise_limits" ||
         !["speedSources", "speedSourcesCard"].includes(key)) return
-      const before = clone(this.state.draft), oldHeight = this.profile.widgets.cruise_limits.height
-      const widgets = this.state.data.metadata.profiles[this.state.profile].widgets
-      const dx = widgets.speed_limit_actions.default.x - widgets.cruise_limits.default.x
-      const gap = widgets.speed_limit_actions.default.y - widgets.cruise_limits.default.y - widgets.cruise_limits.height
-      const sourceGap = widgets.cruise_limits.sourcesExtent?.actionGap ?? gap
-      const oldGap = this.state.draft.speedSources === true ? sourceGap : gap
+      const before = clone(this.state.draft)
       this.state.draft[key] = value === true
-      const card = this.layout.cruise_limits, actions = this.layout.speed_limit_actions, height = this.profile.widgets.cruise_limits.height
-      // Actions that sat right under the card follow its new bottom; both stay on screen.
-      if (actions && actions.x === card.x + dx && actions.y === card.y + oldHeight + oldGap) {
-        const nextGap = this.state.draft.speedSources === true ? sourceGap : gap
-        card.y = Math.min(card.y, placementLimits(this.limitProfile, "speed_limit_actions", this.layout).maxY - height - nextGap)
-        actions.y = card.y + height + nextGap
-      }
-      for (const id of ["cruise_limits", "speed_limit_actions"].filter(id => this.layout[id])) {
-        const limits = placementLimits(this.limitProfile, id, this.layout)
-        this.layout[id].y = Math.max(limits.minY, Math.min(this.layout[id].y, limits.maxY))
-      }
+      // The card grows with its sources; keep it on screen.
+      const card = this.layout.cruise_limits, limits = placementLimits(this.limitProfile, "cruise_limits", this.layout)
+      card.y = Math.max(limits.minY, Math.min(card.y, limits.maxY))
       this.recordChange(before)
       this.state.notice = ""
     },
@@ -1330,7 +1327,7 @@ export const OnroadLayoutPage = {
         this.state.placementError = ""
       } else {
         Object.assign(position, before.layouts[this.state.profile][this.state.selected])
-        this.state.placementError = "That size would cover Speed limit actions. The last valid size is kept."
+        this.state.placementError = "Invalid widget size"
       }
       event.target.value = position.size
     },
@@ -1420,7 +1417,7 @@ export const OnroadLayoutPage = {
       } else {
         position.size = previous
         event.target.value = previous
-        this.state.placementError = "That size would cover Speed limit actions. The last valid size is kept."
+        this.state.placementError = "Invalid widget size"
       }
     },
     boxInput(axis, event) {
@@ -1446,6 +1443,17 @@ export const OnroadLayoutPage = {
       const before = clone(this.state.draft)
       this.selectedPosition.opacity = value
       this.recordChange(before, this.state.profile + ":" + this.state.selected + ":opacity")
+    },
+    setWheelRotation(value) {
+      if (!this.editable || this.state.drag || this.state.layerDrag || !this.canRotateWheel ||
+        !this.selectedPosition?.enabled || !["On", "Off"].includes(value)) return
+      const rotate = value === "On"
+      if ((this.selectedPosition.rotate === true) === rotate) return
+      this.finishColorEdit()
+      const before = clone(this.state.draft)
+      this.selectedPosition.rotate = rotate
+      this.recordChange(before)
+      this.state.notice = ""
     },
     setWidgetBackground(value) {
       if (!this.editable || this.state.drag || this.state.layerDrag || !this.selectedWidget?.backgroundToggle) return

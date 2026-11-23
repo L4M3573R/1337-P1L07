@@ -39,8 +39,8 @@ from openpilot.starpilot.ui.sentry_owner import RESET as SENTRY_RESET, SentryOwn
 from openpilot.starpilot.ui.vasm_owner import ANNOTATION as VASM_ANNOTATION, RESET as VASM_RESET, VASMOwner, validated_annotation
 
 
-PAGES = frozenset(("hub", "developer", "localization", "starport_options", "resets", "vehicle",
-                   "slc", "lane", "lane_change", "profiles", "personalities",
+PAGES = frozenset(("hub", "developer", "localization", "starport_options", "vehicle",
+                   "slc", "lane", "lane_change", "profiles", "profiles/developer", "personalities",
                    "traffic", "aggressive", "standard", "relaxed",
                    "curve", "torque", "torque/developer", "tuning", "torque/bluepilot", "aol", "wheel", "appearance", "display",
                    "data", "power", "sounds", "pip", "sentry", "vasm",
@@ -99,7 +99,7 @@ class ContextSource(Protocol):
   def sample(self) -> AuthorityContext: ...
 
 
-def _qualified(ctx: AuthorityContext, group: str) -> bool:
+def _qualified(ctx: AuthorityContext, group: str, *, params=None) -> bool:
   cp = ctx.cp
   if group == "preferences":
     return True
@@ -126,7 +126,8 @@ def _qualified(ctx: AuthorityContext, group: str) -> bool:
     if group in ("conditional", "conditional_wheel", "long_output"):
       return bool((cp.openpilotLongitudinalControl or ctx.configuration_longitudinal) and not cp.notCar and not cp.dashcamOnly and not cp.passive)
     if group == "slc":
-      return bool((cp.openpilotLongitudinalControl or ctx.configuration_longitudinal) and
+      from openpilot.starpilot.car.hyundai.software_cruise_settings import slc_configurable
+      return bool((cp.openpilotLongitudinalControl or ctx.configuration_longitudinal or slc_configurable(cp, params)) and
                   not cp.notCar and not cp.dashcamOnly and not cp.passive)
     if group == "long":
       return bool((cp.openpilotLongitudinalControl or ctx.configuration_longitudinal) and
@@ -147,8 +148,8 @@ def _onroad_preference(page: str, key: str) -> bool:
   # Regular saved choices are consumed by their runtime owners. Only explicit
   # multi-key reset/repair operations need the offroad transaction boundary;
   # their owners independently recheck that requirement at commit time.
-  return bool(page not in ("starport_options", "resets", "power") and key and key != SETUP_ACTION and key not in (
-    VOACC_KEY, HOLD_KEY, "IsRhdDetected", "AlphaLongitudinalEnabled", "reset_profiles", "curve_reset", "slc_reset",
+  return bool(page not in ("starport_options", "power") and key and key != SETUP_ACTION and key not in (
+    VOACC_KEY, HOLD_KEY, DRIVER_MONITORING_RESET, CALIBRATION_RESET, "IsRhdDetected", "AlphaLongitudinalEnabled", "reset_profiles", "curve_reset", "slc_reset",
     "conditional:reset", "conditional:manual_reset",
   ) and not is_long_confirm_action(key) and not key.startswith("torque_repair:"))
 
@@ -418,6 +419,8 @@ def _projection(row: FeatureRow) -> dict:
                            "selected-profile" if row.key in ("profile:global_acceleration", "profile:global_braking") else None),
           **({"coordinate": row.key.removeprefix("torque:surface:")} if row.key.startswith("torque:surface:") and row.key != "torque:surface:reset" else {}),
           **({"acceptedFindingValue": row.accepted_finding_value} if row.accepted_finding_value is not None else {}),
+          **({"coordinateLocked": row.coordinate_locked} if row.coordinate_locked is not None else {}),
+          **({"learningEligible": row.learning_eligible} if row.learning_eligible is not None else {}),
           "heading": is_heading(row.key), "collapsed": bool(row.collapsed),
           **({"previewSound": row.key} if row.key in SOUND_SPECS else {})}
 
@@ -555,7 +558,7 @@ class SettingsGateway:
       if not session_valid():
         return False
       fresh = self.context.sample() if live else ctx
-      return fresh.cp_raw == ctx.cp_raw and _qualified(fresh, group)
+      return fresh.cp_raw == ctx.cp_raw and _qualified(fresh, group, params=self.params)
     return FeatureSettingsOwner(self.params, authorized,
                                 learning_messages=lambda: self.context._messages() if isinstance(self.context, LiveContextSource) else None,
                                 vehicle_fingerprint=lambda: getattr(current().cp, "carFingerprint", None),
@@ -649,11 +652,11 @@ class SettingsGateway:
   def _state(self, page: str, ctx: AuthorityContext):
     if page == "localization":
       return self._localization_owner(ctx).snapshot()
-    if page in ("starport_options", "resets"):
+    if page == "starport_options":
       return self._device_settings_owner(ctx).snapshot(page)
     if page == "developer":
       state = self._appearance_owner(ctx).developer_snapshot()
-      driving = self._device_settings_owner(ctx).snapshot("driving_options")
+      driving = self._device_settings_owner(ctx).snapshot("developer")
       return replace(state, subtitle="Advanced driving and display settings.", rows=driving.rows + state.rows)
     if page == "appearance":
       return self._appearance_owner(ctx).snapshot(Profile.COMPACT, include_large=True)
@@ -888,7 +891,7 @@ class SettingsGateway:
         raise SettingsChanged("Default or saved settings changed")
     if intent.page == "pip":
       return self._pip_owner(ctx, live=True, session_valid=session_valid).apply(intent.request)
-    if intent.page == "developer" and intent.request.key in (VOACC_KEY, HOLD_KEY):
+    if intent.page == "developer" and intent.request.key in (VOACC_KEY, HOLD_KEY, DRIVER_MONITORING_RESET, CALIBRATION_RESET):
       return self._device_settings_owner(ctx, live=True, session_valid=session_valid).apply(intent.request)
     if intent.page in ("appearance", "developer"):
       return self._appearance_owner(ctx, live=True, session_valid=session_valid).apply(intent.request)
@@ -904,7 +907,7 @@ class SettingsGateway:
       return self._vasm_owner(ctx, live=True, session_valid=session_valid).apply(intent.request)
     if intent.page == "localization":
       return self._localization_owner(ctx, live=True, session_valid=session_valid).apply(intent.request)
-    if intent.page in ("starport_options", "resets"):
+    if intent.page == "starport_options":
       return self._device_settings_owner(ctx, live=True, session_valid=session_valid).apply(intent.request)
     owner = self._owner(ctx, live=True, session_valid=session_valid)
     return owner.apply(intent.request, reset_default=True) if intent.recovery_default else owner.apply(intent.request)

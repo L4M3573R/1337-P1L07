@@ -13,6 +13,57 @@ from openpilot.starpilot.vehicle_preferences import VehicleStartupPreferences
 
 
 class TestVehicleStartupPreferences(unittest.TestCase):
+  def test_toyota_camera_stock_acc_uses_saved_preference(self):
+    from opendbc.car.toyota.interface import CAMERA_TORQUE_CARS, camera_stock_acc_supported
+    from openpilot.starpilot.galaxy.settings import _projection
+    from openpilot.starpilot.car.toyota.aol import qualified
+    from openpilot.starpilot.ui.feature_settings_owner import FeatureSettingsOwner
+    from openpilot.starpilot.vehicle_preferences import toyota_disable_long_supported
+
+    for candidate in sorted(CAMERA_TORQUE_CARS):
+      for hybrid in (False, True):
+        fw = [structs.CarParams.CarFw(ecu=structs.CarParams.Ecu.hybrid)] if hybrid else []
+        for raw, stock in ((None, False), (b"0", False), (b"1", True)):
+          with self.subTest(candidate=candidate, hybrid=hybrid, stock=stock):
+            self.raw("DisableOpenpilotLongitudinal", raw)
+            prefs = VehicleStartupPreferences.read(self.params, enabled=True)
+            cp = car_helpers.interfaces[candidate].get_params(candidate, gen_empty_fingerprint(), fw, False, False, False)
+            self.assertTrue(camera_stock_acc_supported(cp))
+            cp = prefs.prepare(cp)
+            prefs.finalize(cp)
+            self.assertEqual(cp.openpilotLongitudinalControl, not stock)
+            self.assertEqual(cp.safetyConfigs[0].safetyParam, 585 if stock else 73)
+            self.assertEqual(cp.autoResumeSng, not stock)
+            self.assertTrue(cp.pcmCruise)
+            self.assertTrue(qualified(cp))
+            owner = FeatureSettingsOwner(self.params, lambda _: True, vehicle_fingerprint=lambda cp=cp: cp.carFingerprint,
+                                         vehicle_params=lambda cp=cp: cp)
+            rows = owner.snapshot("vehicle", parked=True, system_long=not stock, lateral_context=True, metric=False).rows
+            row = next(row for row in rows if row.key == "DisableOpenpilotLongitudinal")
+            self.assertTrue(row.available)
+            self.assertEqual(row.value, "On" if stock else "Off")
+            self.assertEqual(row.label, "Use Factory ACC")
+            self.assertEqual(row.reason, "Turn this on to use your car's factory adaptive cruise instead of StarPilot's")
+            projected = _projection(row)
+            self.assertEqual((projected["label"], projected["reason"]), (row.label, row.reason))
+    for candidate in (CAR.TOYOTA_HIGHLANDER, CAR.TOYOTA_RAV4_TSS2_2023, CAR.TOYOTA_RAV4_PRIME):
+      cp = car_helpers.interfaces[candidate].get_params(candidate, gen_empty_fingerprint(), [], False, False, False)
+      self.assertFalse(toyota_disable_long_supported(cp))
+
+  def test_toyota_existing_sdsu_stock_fallback_keeps_vehicle_setting(self):
+    from opendbc.car.toyota.tests.test_rav4h_filter import factory
+    from openpilot.starpilot.vehicle_preferences import toyota_disable_long_supported
+
+    self.raw("DisableOpenpilotLongitudinal", b"1")
+    prefs = VehicleStartupPreferences.read(self.params, enabled=True)
+    for size in (4, 8):
+      cp = factory(fp={0: {0x2FF: size}, 1: {}, 2: {}}, car=CAR.TOYOTA_HIGHLANDER)
+      self.assertTrue(toyota_disable_long_supported(cp))
+      cp = prefs.prepare(cp)
+      prefs.finalize(cp)
+      self.assertFalse(cp.openpilotLongitudinalControl)
+      self.assertTrue(toyota_disable_long_supported(cp))
+
   def test_gm_tune_startup_requires_exact_saved_selection(self):
     for raw, expected in ((None, 0), (b"0", 0), (b"1", 1), (b"2", 0),
                           (b"3", 0), (b"1\n", 0), (b"true", 0)):
@@ -137,7 +188,7 @@ class TestVehicleStartupPreferences(unittest.TestCase):
             observed[2].update({0x320: 6, 0x180: 4, 0x370: 6})
           else:
             observed[0][0x1E1] = 7
-          active = state in ('absent', 'off', 'master_off')
+          active = state in ('absent', 'off')
           word = (0xC170 if active else 0xC171) if camera else (0xC173 if active else 0xC172)
           host, constructed, published = self.start(
             GM_CAR.CHEVROLET_SILVERADO, observed=observed, key='LongPitch', requested=False,
@@ -146,6 +197,8 @@ class TestVehicleStartupPreferences(unittest.TestCase):
           if state == 'master_off':
             self.assertEqual(published.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
             self.assertFalse(disable_long_supported(published))
+            self.assertFalse(published.openpilotLongitudinalControl)
+            self.assertTrue(self.params.get_bool('AlphaLongitudinalEnabled'))
             continue
           self.assertEqual(published.safetyConfigs[0].safetyParam, word)
           self.assertEqual(published.openpilotLongitudinalControl, active)
@@ -612,7 +665,7 @@ class TestVehicleStartupPreferences(unittest.TestCase):
     self.assertEqual(cp.alternativeExperience, 0)
 
   def test_unrelated_vehicle_flags_are_untouched(self):
-    cp = SimpleNamespace(brand="other", flags=4096, alternativeExperience=256)
+    cp = structs.CarParams(brand="other", flags=4096, alternativeExperience=256)
     preferences = VehicleStartupPreferences(True)
     self.assertIs(preferences.prepare(cp), cp)
     preferences.finalize(cp)

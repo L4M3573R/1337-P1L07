@@ -60,6 +60,8 @@ UNAVAILABLE_AFTER = 1.0      # focused but no fresh UI frame for this long -> "u
 SDP_SETTLE = (1.5, 2.2, 3.0)
 TCP_ATTEMPTS = 6
 PATIENT_TCP_SECONDS = 60.0  # owner toggle: keep retrying a refused projection connection this long
+STANDARD_AA_PORT = 5288
+VERSION_WAIT_SECONDS = 90.0
 MAX_LOG_FILES = 20
 LOG_QUEUE_MAX = 1000          # session log records waiting for the writer; past this they are dropped and counted
 ENCODER_RECOVERIES = 3       # hardware encoder reopens allowed per window before the session is torn down
@@ -72,6 +74,8 @@ HFP_FRESH = 3.0              # a hands-free link from the car this recent still 
 COMMA_PAGE_WINDOW = 6.0         # a hands-free link this soon after we paged the car is ours; later is the car's
 RFCOMM_BUSY_WAITS = (1.0, 2.0)   # the kernel can still hold the last session's channel for a moment
 CAR_FIRST_WAIT = 8.0         # at ignition, give the car this long to open hands-free before the comma pages it
+WIRED_HFP_WAIT = 8.0         # wired hands-free: longest wait for the car to take the hands-free link
+WIRED_HFP_SETTLE = 1.0       # the car finishes its hands-free setup before it is asked for the screen
 NO_STARPORT_WAIT = 8.0    # a paired device must offer wireless projection within this long
 USB_HANDSHAKE_WAIT = 10.0    # the car connected but sent no AOA START this long -> present as an accessory directly
 USB_CONFIGURE_WAIT = 15.0    # slower receivers need time to enumerate after the AOA switch
@@ -82,7 +86,22 @@ STALL_CAPTURE_S = 20.0       # device logs kept from before a shared-radio stall
 REPORTED_SETTINGS = ("connection", "usb_mode", "view", "encoder", "fps", "bitrate_kbps", "rate_control", "gpu_nv12",
                      "async_readback", "wifi_interface", "dedicated_wifi_interface", "verify_head_unit", "version_status",
                      "rfcomm_channel", "phone_class", "auto_connect", "allow_hevc", "keyframe_test", "tall_hevc",
-                     "unacked_video", "patient_tcp", "head_unit_experiments", "head_unit_experiment_rules")
+                     "unacked_video", "patient_tcp", "wired_handsfree", "head_unit_experiments", "head_unit_experiment_rules")
+
+
+def _open_projection(ip: str, ports: list[int], advertised: int, local_ip: str, log) -> socket.socket:
+  error: OSError | None = None
+  for port in ports:
+    try:
+      sock = socket.create_connection((ip, port), timeout=5.0, source_address=(local_ip, 0) if local_ip else None)
+    except OSError as failure:
+      error = error or failure  # the first port's failure decides how patiently to retry
+      continue
+    if port != advertised:
+      log("tcp_port_fallback", advertised=advertised, port=port)
+    return sock
+  assert error is not None
+  raise error
 
 
 def _tcp_failure_kind(error: OSError) -> str:
@@ -377,6 +396,7 @@ class Supervisor:
   _pairing_note = ""      # why a paired car was not chosen, kept after the pairing window closes
   _reset_note: dict | None = None   # a handshake reset waiting for a session log to be written to
   _no_starport_since = 0.0
+  _wired_car = ""         # the car's Bluetooth address while a wired session holds hands-free
   def __init__(self, bluez_factory=None, lease_factory=None, bluetooth_client=None, frame_path: str | None = None,
                synthetic: bool = False, car_frame_path: str = CAR_FRAME_PATH, touch_path: str = DEFAULT_TOUCH_SOCKET,
                control_path: str = DEFAULT_CONTROL_SOCKET, renderer_command: list[str] | None = None, onroad=_is_onroad,
@@ -473,6 +493,7 @@ class Supervisor:
     status["tall_hevc"] = bool(self.config["tall_hevc"])
     status["unacked_video"] = bool(self.config["unacked_video"])
     status["patient_tcp"] = bool(self.config["patient_tcp"])
+    status["wired_handsfree"] = bool(self.config["wired_handsfree"])
     status["head_unit_experiments"] = bool(self.config["head_unit_experiments"])
     status["head_unit_experiment_rules"] = list(self.config["head_unit_experiment_rules"])
     status["experimental_fixes"] = head_unit_fixes.experimental_entries()
@@ -541,6 +562,13 @@ class Supervisor:
       self.config["patient_tcp"] = bool(enabled)
       identity_store.save_config(self.config)
     self.log("patient_tcp_selected", enabled=bool(enabled))
+
+  def set_wired_handsfree(self, enabled: bool) -> None:
+    """Wired sessions connect hands-free to the car and send the pairing request before asking for the screen; from the next session."""
+    with self._lock:
+      self.config["wired_handsfree"] = bool(enabled)
+      identity_store.save_config(self.config)
+    self.log("wired_handsfree_selected", enabled=bool(enabled))
 
   def set_head_unit_experiments(self, enabled: bool) -> None:
     """The master switch for car and dongle fixes; off gives the standard connection to every car from the next session."""
@@ -1154,7 +1182,7 @@ class Supervisor:
           from openpilot.starpilot.system.starport.bluetooth_bridge import LeaseAwarePhone
           bluez = LeaseAwarePhone(self._shared_bluetooth_owner, self._source_session, self.log,
                                  enabled=self._projection_enabled,
-                                 selected_receiver=lambda: self.config['receiver_address'])
+                                 selected_receiver=self._selected_receiver)
         else:
           raise RuntimeError('Shared StarPilot Bluetooth owner is required for wireless Android Auto')
         bluez.accepts = self._hfp_accepts
@@ -1169,8 +1197,11 @@ class Supervisor:
     thread = self._thread
     return thread is not None and thread.is_alive()
 
+  def _selected_receiver(self) -> str:
+    return self._wired_car or self.config["receiver_address"]
+
   def _hfp_accepts(self, address: str) -> bool:
-    receiver = self.config["receiver_address"]
+    receiver = self._selected_receiver()
     if self._pairing_active() and self._source_session is not None and self._shared_bluetooth_owner is not None:
       lease = self._shared_bluetooth_owner.phone_lease
       return bool(lease is not None and not lease.released and
@@ -1286,7 +1317,7 @@ class Supervisor:
     raise error
 
   def _hfp_connected(self, address: str) -> None:
-    if address.upper() in (self.config["receiver_address"].upper(), self.config.get("companion_address", "").upper()):
+    if address.upper() in (self._selected_receiver().upper(), self.config.get("companion_address", "").upper()):
       now = time.monotonic()
       since_page = now - self._paged_at
       self.log("hfp_initiator", initiator="comma" if since_page < COMMA_PAGE_WINDOW else "car", since_page_s=round(since_page, 1))
@@ -1475,7 +1506,7 @@ class Supervisor:
     software = device_metadata()
     profile, profile_source = car_profiles.resolve(self.config)
     self.log("session_start", receiver=receiver, generation=generation, trigger=trigger,
-             software={key: software.get(key, "unknown") for key in ("commit", "branch")},
+             software={key: software.get(key, "unknown") for key in ("repo", "commit", "branch")},
              settings={key: self.config.get(key) for key in REPORTED_SETTINGS},
              # What the owner chose, so a report can tell a built-in unit from a dongle and say which profile applied.
              setup={"type": {"wired": "usb", "headunitpad": "app", "openheadunit": "app"}.get(connection) or self.car_type(),
@@ -1629,7 +1660,7 @@ class Supervisor:
     # only when a car that answered the handshake keeps refusing it before any video.
     with self._lock:
       base_modern = self._modern_reply.get(address, config.get("modern_reply_cache", {}).get(address, False))
-      strategy = self._strategy = self._ladder.strategy(address, base_modern)
+      strategy = self._strategy = self._ladder.strategy(address, base_modern, unofficial)
       learned = self._ladder.snapshot(address, adapter, unofficial)["learned"]
       tries = self._ladder.tried(address, strategy.rung)
     self.log("ladder_strategy", rung=strategy.rung, label=strategy.label, learned=learned, modern_reply=strategy.modern_reply,
@@ -1669,7 +1700,7 @@ class Supervisor:
                                       video_seen=self._video_seen, version_major=boot.version_major if boot is not None else 0,
                                       adapter=adapter, unofficial=unofficial)
         if outcome:
-          self.log("ladder_failed", outcome=outcome, rung=strategy.rung, next=self._ladder.strategy(address, base_modern).rung,
+          self.log("ladder_failed", outcome=outcome, rung=strategy.rung, next=self._ladder.strategy(address, base_modern, unofficial).rung,
                    version_major=boot.version_major, reason="rejected_reply" if rejected else "timeout", why=reason)
         elif boot is not None and isinstance(error, BootstrapTimeout) and error.stage == "wifi_start" and boot.only_not_ready():
           self.log("ladder_not_ready", rung=strategy.rung, refusals=len(boot.refusals))
@@ -1768,7 +1799,53 @@ class Supervisor:
       failed = True
       raise
     finally:
-      self._release_usb(gadget, bridge, listener, failed)
+      try:
+        self._release_usb(gadget, bridge, listener, failed)
+      finally:
+        self._end_wired_handsfree()
+
+  def _end_wired_handsfree(self) -> None:
+    if not self._wired_car:
+      return
+    self._wired_car = ""
+    try:
+      self._release_phone()
+    except Exception as error:
+      self.log("wired_handsfree_release_failed", kind=type(error).__name__, error=str(error)[:120])
+
+  def _wired_handsfree(self, car_address: str) -> str:
+    """Some cars give the screen only to a phone on hands-free. Returns this comma's address once linked, else ""."""
+    address = car_address.upper()
+    started = time.monotonic()
+    try:
+      bluez = self._phone()
+      ready, device = bluez.snapshot(address)
+      if not (ready and device and device["paired"]):
+        # last octet only: shows whether the car's Android Auto address differs from the one it paired with
+        paired = [item["address"][-2:] for item in bluez.devices() if item.get("paired")] if ready else []
+        self.log("wired_handsfree", outcome="not_paired" if ready else "bluetooth_off", car_tail=address[-2:], paired_tails=paired)
+        return ""
+      self._wired_car = address
+      self._hfp_link.clear()
+      bluez.acquire()
+      try:
+        bluez.connect_handsfree(address)
+      except RuntimeError as error:
+        self.log("wired_handsfree_connect_warning", error=str(error)[:120])
+      linked = self._hfp_link.wait(WIRED_HFP_WAIT)
+      if linked:
+        time.sleep(WIRED_HFP_SETTLE)
+      connected = bool((bluez.snapshot(address)[1] or {}).get("connected"))
+      self.log("wired_handsfree", outcome="linked" if linked else "no_link", waited_s=round(time.monotonic() - started, 1),
+               car_connected=connected)
+      phone = self._adapter_address() if linked else ""
+      if not phone:
+        self._end_wired_handsfree()
+      return phone
+    except Exception as error:
+      self.log("wired_handsfree", outcome="failed", kind=type(error).__name__, error=str(error)[:120])
+      self._end_wired_handsfree()
+      return ""
 
   def _attempt_headunitpad(self) -> None:
     """HeadunitPad or Open Headunit: the tablet, on the Galaxy hotspot or the same LAN, finds this port and connects like a head unit."""
@@ -1963,11 +2040,13 @@ class Supervisor:
     last_error: Exception | None = None
     patient_until = time.monotonic() + PATIENT_TCP_SECONDS if self.config["patient_tcp"] else 0.0
     attempt = 0
+    advertised = result.endpoint.port
+    # Some dongles advertise one port but listen on the standard one
+    ports = list(dict.fromkeys((advertised, STANDARD_AA_PORT)))
     while True:
       self._check_cancel()
       try:
-        sock = socket.create_connection((result.endpoint.ip, result.endpoint.port), timeout=5.0,
-                                        source_address=(lease.local_ip, 0) if lease.local_ip else None)
+        sock = _open_projection(result.endpoint.ip, ports, advertised, lease.local_ip, self.log)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return self._track(sock)
       except OSError as error:
@@ -2010,7 +2089,8 @@ class Supervisor:
     config = self.config
     sock = connect() if connect is not None else self._connect_tcp(result, lease)
     ca = ident.root if config.get("verify_head_unit", False) else None
-    session = ProjectionSession(sock, ident.cert, ident.key, self.log, ca)
+    version_wait = VERSION_WAIT_SECONDS if self.car_type() == "adapter" else None
+    session = ProjectionSession(sock, ident.cert, ident.key, self.log, ca, version_wait=version_wait)
     session.fragment_acks = fragment_acks
     tuning = car_profiles.tuning(config)
     session.max_window = tuning["max_window"]
@@ -2027,6 +2107,8 @@ class Supervisor:
     self._stage("negotiating")
     self._fix_context = None
     session.on_discovered = self._choose_fixes
+    if config["connection"] == "wired" and config["wired_handsfree"]:
+      session.connect_handsfree = self._wired_handsfree
     session.touch_units = dict(config.get("touch_units_cache", {}))
     session.on_touch_units = self._remember_touch_units
     mode = session.start(config["device_name"], "comma.ai")

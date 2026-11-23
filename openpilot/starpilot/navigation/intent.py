@@ -6,6 +6,7 @@ from openpilot.cereal import log
 from openpilot.common.constants import CV
 
 from openpilot.starpilot.navigation.wire import navigation_state
+from openpilot.starpilot.navigation.slowdown import DEFAULT_SLOWDOWN_PERCENT, valid_slowdown_percent
 from openpilot.starpilot.lateral.signal_turn import SignalTurnEvidence
 
 SERVICE = 'starpilotNavigation'
@@ -65,7 +66,7 @@ def turn_desire(sm, now_ns: int, current_desire, *, supported: bool):
   return current_desire
 
 
-def turn_speed(maneuver, min_steer_speed: float) -> float | None:
+def turn_speed(maneuver, min_steer_speed: float, slowdown_percent: int = DEFAULT_SLOWDOWN_PERCENT) -> float | None:
   kind, modifier = maneuver.maneuverType, maneuver.maneuverModifier
   target = TARGET_MPH.get(modifier) if kind == 'turn' else None
   if modifier == 'uturn' or 'uturn' in kind or 'u-turn' in kind:
@@ -77,10 +78,15 @@ def turn_speed(maneuver, min_steer_speed: float) -> float | None:
   target = max(target * CV.MPH_TO_MS, min_steer_speed)
   ordinary = kind == 'turn' and modifier in ('left', 'right')
   approach_decel, settling_distance = (.75, 20.) if ordinary else (.45, 8.)
+  if valid_slowdown_percent(slowdown_percent) and slowdown_percent != DEFAULT_SLOWDOWN_PERCENT:
+    # Distance scale is .25 at 0%, 1 at 50%, and 2 at 100%. Keep the
+    # existing braking envelope and preserve the turn-speed settling buffer.
+    scale = 1.0 + (slowdown_percent - DEFAULT_SLOWDOWN_PERCENT) * (.015 if slowdown_percent < DEFAULT_SLOWDOWN_PERCENT else .02)
+    approach_decel = min(approach_decel / scale, NAVIGATION_BRAKE_MAGNITUDE)
   return math.sqrt(target * target + 2 * approach_decel * max(0., maneuver.distanceMeters - settling_distance))
 
 
-def cruise_ceiling(sm, CP, now_ns: int, cruise_mps: float) -> float | None:
+def cruise_ceiling(sm, CP, now_ns: int, cruise_mps: float, *, slowdown_percent: int = DEFAULT_SLOWDOWN_PERCENT) -> float | None:
   nav = current_instruction(sm, now_ns)
   if nav is None:
     return None
@@ -92,7 +98,7 @@ def cruise_ceiling(sm, CP, now_ns: int, cruise_mps: float) -> float | None:
   if not math.isfinite(minimum):
     return None
   for instruction in (nav.instruction, nav.nextManeuver):
-    target = turn_speed(instruction, max(minimum, 0.))
+    target = turn_speed(instruction, max(minimum, 0.), slowdown_percent)
     if target is not None and target + .25 < cruise_mps:
       return target
   return None
@@ -116,10 +122,11 @@ APPROACH_MAX_MPH = 45.0  # signalled above this, nothing is planned for a turn y
 class TurnIntent:
   def __init__(self, params=None, cp=None):
     from openpilot.starpilot.lateral.auto_lane_change import steering_capable
-    from openpilot.starpilot.lateral.lane_change_preferences import LiveLaneChangePolicy
-    self.guidance = LiveLaneChangePolicy(params) if params is not None else None
+    from openpilot.starpilot.lateral.turn_initiation_preferences import TurnInitiationPreference
+    self.guidance = TurnInitiationPreference(params) if params is not None else None
     self.steering_capable = steering_capable(cp)
     self.signal_model = SignalTurnEvidence()
+    self.automatic_turn_enabled = False
     self.signal_stop_hold = False
     self.signal_stop_completed = False
     self.no_lane_side = 0  # -1 left / 1 right: modeld's lane_clearly_absent for the blinker side, last frame
@@ -227,7 +234,21 @@ class TurnIntent:
 
   def select(self, sm, now_ns: int, current_desire, *, supported: bool, model_stop: bool):
     self.source, self.blocked_by = '', ''
-    nav = current_instruction(sm, now_ns) if supported else None
+    try:
+      cs = sm['carState']
+      signaling = bool(cs.leftBlinker or cs.rightBlinker)
+      preferred = self.guidance.sample(now_ns, signaling=signaling,
+                                       maneuver_active=current_desire != log.Desire.none) if self.guidance is not None else False
+    except (AttributeError, KeyError, TypeError):
+      preferred = False
+    # upstream (testing 2026-11-20): automatic turns (navigation and blinker) are their own opt-in, AutomaticTurnInitiation
+    self.automatic_turn_enabled = bool(preferred and supported and self.steering_capable)
+    if not self.automatic_turn_enabled:
+      self.key = None
+      self.stop_hold = self.signal_stop_hold = self.signal_stop_completed = False
+      # the turn-speed approach and the shadow log still run there; its first gate keeps any turn desire out
+      return self.signal_desire(sm, now_ns, current_desire, supported=supported, model_stop=model_stop)
+    nav = current_instruction(sm, now_ns)
     key = (nav.sessionId, nav.startedMonoTime) if nav is not None else None
     if key != self.key:
       self.key, self.stop_hold = key, False
@@ -261,8 +282,6 @@ class TurnIntent:
     try:
       cs, cc, device, plan = (sm[name] for name in ('carState', 'carControl', 'deviceState', 'longitudinalPlan'))
       signaling = bool(cs.leftBlinker or cs.rightBlinker)
-      policy = self.guidance.sample(now_ns, signaling=signaling,
-                                    maneuver_active=current_desire != log.Desire.none)
       # StarPilot turn desires: once a stop is predicted short of the turn, hold the turn until that stop is completed
       # (upstream: released once the stop request clears after a standstill) or the blinker turns off.
       stop_predicted = bool(model_stop or plan.shouldStop)
@@ -291,7 +310,7 @@ class TurnIntent:
       # The first gate that fails is logged (blockedBy) when exactly one blinker is on. Standstill, the stop hold and
       # the low speed bound come after the freshness checks, so only fresh, valid messages can complete a stop.
       gates = (('unsupported model', not supported), ('car cannot steer', not self.steering_capable),
-               ('guidance off', not policy.turn_signal_guidance),
+               ('automatic turns off', not self.automatic_turn_enabled),
                # Below the cutoff the turn wins over a queued or running lane change toward the blinker (as in
                # sunnypilot); any other maneuver already under way is kept as it is.
                ('other maneuver', current_desire not in (log.Desire.none, log.Desire.laneChangeLeft if cs.leftBlinker else

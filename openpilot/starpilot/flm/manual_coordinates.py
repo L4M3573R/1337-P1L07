@@ -27,6 +27,8 @@ def baseline_settings(cp, params):
   raw, readable = read_saved(params, DOCUMENT_KEY, MAX_DOCUMENT_BYTES)
   if not readable:
     raise ValueError('Readable selected baseline settings required')
+  if cp.lateralTuning.which() != 'torque':
+    raise ValueError('Selected steering tune does not contain torque settings')
   tune = cp.lateralTuning.torque
   basis = (float(tune.latAccelFactor), float(tune.latAccelOffset), float(tune.friction))
   fingerprint = str(cp.carFingerprint)
@@ -54,6 +56,11 @@ class ManualCoordinates:
   @property
   def starting_values(self):
     return {name: value for name, value in self.values if value != 0}
+
+  def matches_context(self, current):
+    # Local profiles are already keyed by vehicle fingerprint. Explicitly
+    # recovered backups retain their full compatibility binding.
+    return self.context == current if self.compatibility else self.context[1:] == current[1:]
 
   def validate(self):
     from openpilot.starpilot.flm.offroad_surface import ROUTE_NAMES, route_bounds, RouteSurfaceEffects
@@ -179,7 +186,7 @@ def load(cp, controller, params=None):
       return None, 'not_configured'
     tune = cp.lateralTuning.torque
     if (profile.basis != (float(tune.latAccelFactor), float(tune.latAccelOffset), float(tune.friction))
-        or profile.flm is not None or manual.context != context(cp, controller, recovered=manual.route_format)):
+        or profile.active_legacy_flm or not manual.matches_context(context(cp, controller, recovered=manual.route_format))):
       return None, 'context_changed'
     return ManualEffects(manual), 'configured'
   except (AttributeError, KeyError, TypeError, ValueError, OverflowError, UnicodeError):

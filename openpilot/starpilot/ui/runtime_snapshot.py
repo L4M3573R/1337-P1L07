@@ -32,12 +32,14 @@ from openpilot.starpilot.ui.traffic_status import TrafficDisplayProjector
 from openpilot.starpilot.ui.drive_mode_notice import DriveModeNotice
 from openpilot.starpilot.controllers.mode_actions import SwitchbackStatusOwner
 from openpilot.starpilot.ui.wheel_feedback import observe_wheel_acceleration
+from openpilot.starpilot.ui.wheel_rotation import observe_wheel_rotation, read_rotation
 from openpilot.starpilot.ui.torque_feedback import observe_torque_feedback
 from openpilot.starpilot.ui.live_developer_sidebar import DeveloperMetrics
 
 from openpilot.cereal import log
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.tools.replay.display_clock import BOOT_TIME_SERVICES
+from opendbc.car.gm.values import bolt_pedal_in_drive_requires_low
 from opendbc.car.structs import car as car_schema
 from openpilot.starpilot.ui.device_state import DeviceRequest, DeviceState
 from openpilot.starpilot.ui.home_state import DriveStatsData, HomeMode, HomeState
@@ -61,6 +63,7 @@ from openpilot.starpilot.speed_limits import offset_document
 
 
 SLC_SIGN_HOLD_NS = 150_000_000
+SLC_PENDING_HOLD_NS = 3_000_000_000  # map limits drop out for a second or two while a new limit waits for the driver
 EVENTS_DISPLAY_MAX_AGE_NS = 1_500_000_000  # selfdrived sends onroadEvents on every change and at least once a second
 _UNSET = object()
 
@@ -384,6 +387,7 @@ class RuntimeSnapshotAdapter:
     self._reverse_driver_camera = ReverseDriverCamera()
     self._vision_stop = StopConfirmation(display_only=True)
     self._slc_sign_cache: tuple[int, tuple[int, int], str, SpeedLimitObservation] | None = None
+    self._slc_pending_live: tuple[int, tuple, SpeedLimitObservation] | None = None
     self._mono_clock, self._boot_clock = mono_clock, boot_clock
     # CarParams is one object per drive, so these capability checks only rerun when it changes (see _LastInput).
     # Messages are not cached this way: every one the snapshot reads arrives at 20 Hz or faster, so it is new each frame.
@@ -469,6 +473,10 @@ class RuntimeSnapshotAdapter:
     if (self._appearance_read_ns is None or now_ns < self._appearance_read_ns or
         now_ns - self._appearance_read_ns >= 1_000_000_000):
       self._customization_value = read_customization(self.ui_state.params)
+      rotation_raw, rotation_readable = read_rotation(self.ui_state.params)
+      self._customization_value['layouts']['large']['steering_wheel'].pop('rotate', None)
+      if rotation_readable and rotation_raw == b'1':
+        self._customization_value['layouts']['large']['steering_wheel']['rotate'] = True
       self._appearance_value = onroad_appearance(self.ui_state.params)
       self._navigation_enabled = _flag(self.ui_state.params, "NavigationEnabled")
       self._show_curve_status = _flag(self.ui_state.params, "ShowCSCStatus")
@@ -637,14 +645,6 @@ class RuntimeSnapshotAdapter:
       system_long=bool(cp is not None and getattr(cp, 'openpilotLongitudinalControl', False) and
                        not getattr(cp, 'passive', False)),
     )
-    perception = self._conditional_perception.project(
-      curve_envelope, now_ns=now_ns, event_ns=int(sm.logMonoTime['slcState']) if curve_envelope is not None else 0,
-      drive_id=drive_id, choice=self._conditional_choice,
-      lateral_active=bool(display_control is not None and display_control.latActive),
-      selfdrive_enabled=bool(display_selfdrive is not None and getattr(display_selfdrive, 'enabled', False)),
-      car_valid=display_car_valid,
-      system_long=bool(cp is not None and getattr(cp, "openpilotLongitudinalControl", False) and not getattr(cp, "passive", False)),
-    )
     if not display_car_valid:
       curve = None
     cluster_cruise = _finite(display_car.vCruiseCluster) if display_car_valid else None
@@ -660,6 +660,20 @@ class RuntimeSnapshotAdapter:
     observation = speed_limit_from_message(slc) if show_slc else SpeedLimitObservation()
     if slc is None and started:
       observation = SpeedLimitObservation(kind=ObservationKind.STALE)
+    # A source gap during the same pending decision keeps its live reading, so the prompt does not flash.
+    pending_key = ((drive_key, str(slc.sessionId), int(slc.decisionId))
+                   if show_slc and drive_key is not None and slc.hasPending and getattr(slc, 'decisionId', 0) > 0 else None)
+    if pending_key is None:
+      self._slc_pending_live = None
+    elif observation.kind == ObservationKind.VALID:
+      self._slc_pending_live = (int(sm.logMonoTime['slcState']), pending_key, observation)
+    elif self._slc_pending_live is not None:
+      stamp, key, live = self._slc_pending_live
+      if key == pending_key and 0 <= now_ns - stamp <= SLC_PENDING_HOLD_NS:
+        observation = replace(observation, kind=ObservationKind.VALID, source=live.source,
+                              speed_limit_mps=live.speed_limit_mps, status=live.status)
+      else:
+        self._slc_pending_live = None
     if mode != ShellMode.ONROAD or drive_key is None or not show_slc:
       self._slc_sign_cache = None
     elif retaining_limit(observation):
@@ -712,9 +726,14 @@ class RuntimeSnapshotAdapter:
       display_message(sm, "carOutput", now_ns, after_frame=after) if started else None,
       display_message(sm, "vehicleParameters", now_ns, after_frame=after) if started else None, cp,
     )
-    display_lat_active = bool(display_control.latActive) if display_control is not None else False
-    display_long_active = bool(display_control.longActive) if display_control is not None else False
-    long_engaged = bool(display_selfdrive is not None and getattr(display_selfdrive, 'enabled', False))
+    legacy_2025_lateral_off = bool(
+      cp is not None and getattr(cp, 'carFingerprint', '') == 'SUBARU_LEGACY_2025' and
+      display_control is not None and not getattr(getattr(display_control, 'hudControl', None), 'lanesVisible', True)
+    )
+    display_lat_active = bool(display_control.latActive) if (display_control is not None and not legacy_2025_lateral_off) else False
+    bolt_needs_low = display_car_valid and bolt_pedal_in_drive_requires_low(cp, getattr(display_car, 'gearShifter', None))
+    display_long_active = bool(display_control is not None and display_control.longActive and not bolt_needs_low)
+    long_engaged = bool(display_selfdrive is not None and getattr(display_selfdrive, 'enabled', False) and not bolt_needs_low)
     if getattr(ui, 'aol_runtime', False):
       # Display only: the control-side 30 ms proof window would blink the override edge whenever a frame runs late.
       axis = display_message(sm, 'aolAxisState', now_ns, after_frame=after) if started else None
@@ -724,13 +743,17 @@ class RuntimeSnapshotAdapter:
       display_car_valid and getattr(display_car, 'gasPressed', False) and long_engaged and
       str(getattr(display_selfdrive, 'state', '')) == 'overriding' and
       cp is not None and cp.openpilotLongitudinalControl)
-    cruise_state = getattr(car, 'cruiseState', None)
+    # Display hint only: 100 Hz messages miss the 20 ms action gate on ~10% of frames, which blinked the cue.
+    display_system_long = bool(display_long_active and display_controls is not None and
+                               str(display_controls.longControlState) != "off" and
+                               display_selfdrive is not None and display_selfdrive.enabled and display_car_valid and
+                               ui.CP is not None and ui.CP.openpilotLongitudinalControl)
+    cruise_state = getattr(display_car, 'cruiseState', None)
     wheel_confirmation = bool(
-      system_long and control is not None and getattr(control, 'enabled', False) and
-      not (cp is not None and cp.brand == 'ford' and cp.pcmCruise) and
+      display_system_long and display_control is not None and getattr(display_control, 'enabled', False) and
       cruise_state is not None and getattr(cruise_state, 'available', False) and
       not (cp is not None and getattr(cp, 'brand', '') == 'toyota' and
-           (car.standstill or cruise_state.standstill or not cruise_state.enabled)))
+           (display_car.standstill or cruise_state.standstill or not cruise_state.enabled)))
     developer_metrics = ()
     if not (onroad_view_only and stopped_timer_profile == "compact"):
       delay_key = ((after, str(cp.carFingerprint), str(cp.steerControlType), str(cp.lateralTuning.which()), float(cp.steerActuatorDelay))
@@ -763,10 +786,36 @@ class RuntimeSnapshotAdapter:
           weather_location = (fix[1].latitude, fix[1].longitude)
           break
     aol_latched = (display_aol_latch(sm, now_ns, after_frame=after)
-                   if started and getattr(ui, "aol_runtime", False) else None)
-    armed_at_stop = bool(aol_latched and cp is not None and getattr(cp, 'brand', '') == 'subaru' and display_car_valid and
-                         display_car.standstill and str(display_car.gearShifter) == 'drive' and
-                         not display_car.steerFaultTemporary and not display_car.steerFaultPermanent and not display_car.accFaulted)
+                   if started and getattr(ui, "aol_runtime", False) and not legacy_2025_lateral_off else None)
+    perception = self._conditional_perception.project(
+      curve_envelope, now_ns=now_ns, event_ns=int(sm.logMonoTime['slcState']) if curve_envelope is not None else 0,
+      drive_id=drive_id, choice=self._conditional_choice,
+      lateral_active=bool(display_control is not None and display_control.latActive),
+      aol_armed_at_standstill=bool(aol_latched and display_car_valid and display_car.standstill and
+        str(display_car.gearShifter) in ('drive', 'sport', 'low', 'brake', 'eco', 'manumatic') and
+        not display_car.steerFaultTemporary and not display_car.steerFaultPermanent),
+      selfdrive_enabled=bool(display_selfdrive is not None and getattr(display_selfdrive, 'enabled', False)),
+      car_valid=display_car_valid,
+      system_long=bool(cp is not None and getattr(cp, "openpilotLongitudinalControl", False) and not getattr(cp, "passive", False)),
+    )
+    if cp is not None and getattr(cp, 'carFingerprint', '') == 'SUBARU_LEGACY_2025':
+      armed_at_stop = False
+      if (aol_latched and display_car_valid and
+          str(getattr(display_car, 'gearShifter', '')) in ('drive', 'manumatic') and
+          not getattr(display_car, 'steerFaultTemporary', False) and
+          not getattr(display_car, 'steerFaultPermanent', False) and
+          not getattr(display_car, 'accFaulted', False)):
+        min_steer_speed = max(float(getattr(cp, 'minSteerSpeed', 0.0) or 0.0), 0.3)
+        raw_v = getattr(display_car, 'vEgo', None)
+        car_speed = _finite(abs(float(raw_v))) if raw_v is not None else None
+        armed_at_stop = bool(
+          getattr(display_car, 'standstill', False) or
+          (car_speed is not None and car_speed <= min_steer_speed)
+        )
+    else:
+      armed_at_stop = bool(aol_latched and cp is not None and getattr(cp, 'brand', '') == 'subaru' and display_car_valid and
+                           display_car.standstill and str(display_car.gearShifter) == 'drive' and
+                           not display_car.steerFaultTemporary and not display_car.steerFaultPermanent and not display_car.accFaulted)
     drive_mode_source = display_message(sm, 'starpilotCarState', now_ns, after_frame=after) if started else None
     alert = self._drive_mode_notice.update(
       drive_mode_source, display_car, cp=cp, drive_frame=after,
@@ -797,6 +846,7 @@ class RuntimeSnapshotAdapter:
                          torque_is_demand=torque.source == "lateral_acceleration_demand",
                          torque_drive_frame=after if started else None, drive_frame=after if started else None, observed_ns=now_ns,
                          wheel_acceleration=observe_wheel_acceleration(display_car),
+                         wheel_rotation=observe_wheel_rotation(display_car),
                          aol_latched=aol_latched, aol_armed_at_stop=armed_at_stop,
                          lateral_active=display_lat_active, longitudinal_active=display_long_active,
                          longitudinal_overridden=longitudinal_overridden,
@@ -932,7 +982,7 @@ class RuntimeSnapshotAdapter:
         software_actions.discard(SoftwareRequest.DOWNLOAD_UPDATE)
       if not _flag(params, "IsTestedBranch") and _text(params, "UpdaterAvailableBranches"):
         software_actions.add(SoftwareRequest.OPEN_BRANCH_CHOOSER)
-    software = SoftwareState(current_version=_text(params, "UpdaterCurrentDescription"),
+    software = SoftwareState(current_version=home_description(_text(params, "UpdaterCurrentDescription")),
                              automatic_updates=(None if _text(params, "DisableUpdates") == "" else
                                                 not _flag(params, "DisableUpdates")),
                              download_status=status,

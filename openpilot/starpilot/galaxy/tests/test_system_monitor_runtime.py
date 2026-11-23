@@ -70,6 +70,36 @@ class SystemMonitorRuntimeTest(unittest.TestCase):
     self.write_snapshot(300, 200, 50)
     self.assertIsNone(self.monitor.sample()['cpuPercent'])
 
+  def test_tici_recording_storage_falls_back_to_media_mount(self):
+    internal = Path('/data')
+    media = internal / 'media'
+    routes = media / '0' / 'realdata'
+    devices = {internal: 1, media: 2}
+    capacities = {internal: 30, media: 256, routes: 128}
+    reads = []
+
+    def stat(path):
+      if path not in devices:
+        raise FileNotFoundError(path)
+      return SimpleNamespace(st_dev=devices[path])
+
+    def disk_usage(path):
+      reads.append(path)
+      return SimpleNamespace(used=2 ** 30, total=capacities[path] * 2 ** 30, free=(capacities[path] - 1) * 2 ** 30)
+
+    monitor = SystemMonitor(self.root, storage=internal, recording_storage=routes, device_type='tici', stat=stat, disk_usage=disk_usage)
+    sample = monitor.sample()
+    self.assertEqual(sample['storage']['totalGiB'], 30)
+    self.assertEqual(sample['recordingStorage']['totalGiB'], 256)
+    self.assertEqual(reads, [internal, media])
+    devices[routes] = 3
+    self.assertEqual(monitor.sample()['recordingStorage']['totalGiB'], 128)
+    devices[media] = devices[routes] = devices[internal]
+    self.assertIsNone(monitor.sample()['recordingStorage'])
+    devices[media] = 2
+    monitor.device_type = 'mici'
+    self.assertIsNone(monitor.sample()['recordingStorage'])
+
   def test_real_http_source_origin_static_paths_and_read_only_boundary(self):
     owner = GalaxyAccessOwner(self.root / 'access')
     self.assertTrue(owner.configure('test-password', lambda: True))
@@ -149,3 +179,33 @@ class BatteryVoltageTest(unittest.TestCase):
     source.snapshot=lambda:None
     self.assertIsNone(monitor._battery_voltage())
     self.assertIsNone(SystemMonitor()._battery_voltage())
+
+
+class ThermalVitalsTest(unittest.TestCase):
+  def test_hottest_real_sensor_and_only_fresh_attached_gpu(self):
+    class Snapshot(SimpleNamespace):
+      def __getitem__(self, key):
+        return self.data[key]
+
+    device = SimpleNamespace(cpuTempC=[0., 43.5, 42.8, float('nan')], gpuTempC=[41.5, 42.2], chestnutPresent=True)
+    names = ('deviceState', 'chestnutGpuState')
+    sm = Snapshot(data={'deviceState': device, 'chestnutGpuState': SimpleNamespace(tempC=72)},
+                  seen=dict.fromkeys(names, True), alive=dict.fromkeys(names, True), valid=dict.fromkeys(names, True),
+                  logMonoTime=dict.fromkeys(names, 9_000_000_000), recv_time=dict.fromkeys(names, 9.),
+                  after_mono_ns=8_000_000_000)
+    monitor = SystemMonitor(messages=SimpleNamespace(snapshot=lambda: sm), clock=lambda: 10.)
+    self.assertEqual(monitor._thermal_vitals(), {'cpuTempC': 43.5, 'gpuTempC': 42.2, 'onboardMaxAgeMs': 4000,
+                                                'hotspotTempC': 72, 'maxAgeMs': 4000})
+    device.chestnutPresent = False
+    self.assertNotIn('hotspotTempC', monitor._thermal_vitals())
+    device.chestnutPresent = True
+    sm.valid['chestnutGpuState'] = False
+    self.assertNotIn('hotspotTempC', monitor._thermal_vitals())
+    sm.valid['chestnutGpuState'] = True
+    sm.logMonoTime['chestnutGpuState'] = 10_000_000_001
+    self.assertNotIn('hotspotTempC', monitor._thermal_vitals())
+    sm.recv_time['deviceState'] = 5.
+    self.assertEqual(monitor._thermal_vitals(), {})
+    sm.recv_time['deviceState'] = 9.
+    sm.after_mono_ns = 9_000_000_000
+    self.assertEqual(monitor._thermal_vitals(), {})

@@ -24,6 +24,9 @@ on:
       - '.github/workflows/flm-offroad.yaml'
       - 'pyproject.toml'
       - 'uv.lock'
+  pull_request:
+    branches: [stable]
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
     inputs:
       source_sha:
@@ -88,6 +91,8 @@ jobs:
             --json-output ci-results/flm-offroad.json
           .venv/bin/python -m pytest -q --import-mode=importlib \
             openpilot/starpilot/flm/tests/test_steering_compatibility.py \
+            openpilot/starpilot/flm/tests/test_offroad_nonemitted_controls.py \
+            openpilot/starpilot/flm/tests/test_pending_review.py \
             openpilot/starpilot/flm/tests/test_observed_maneuvers.py \
             openpilot/starpilot/flm/tests/test_upstream_producer_transport.py \
             openpilot/starpilot/flm/tests/test_clock_resolution_budget.py \

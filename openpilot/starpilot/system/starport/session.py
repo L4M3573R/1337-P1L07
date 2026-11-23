@@ -305,12 +305,15 @@ class Session:
   DISCOVERY_TIMEOUT = 60.0
 
   def __init__(self, peer, cert: str, key: str, log: Callable[..., None] | None = None, ca: str | None = None, *,
-               receive_timeout: float = 3.0, send_timeout: float = 3.0, handshake_timeout: float = 15.0):
+               receive_timeout: float = 3.0, send_timeout: float = 3.0, handshake_timeout: float = 15.0,
+               version_wait: float | None = None):
     self.peer = peer
     self._log = log
     self.receive_timeout = self._timeout(receive_timeout)
     self.send_timeout = self._timeout(send_timeout)
     self.handshake_timeout = self._timeout(handshake_timeout)
+    # Relaying adapters ping until the car starts its own session
+    self.version_wait = max(self.handshake_timeout, self._timeout(version_wait)) if version_wait is not None else self.handshake_timeout
     self.authenticated = False
     self.head_unit_subject: str = ""
     self.incoming = ssl.MemoryBIO()
@@ -473,14 +476,15 @@ class Session:
   def authenticate(self) -> None:
     # Some wireless adapters send a control keepalive before their version request.
     # A pong keeps the transport alive; version, TLS and certificate checks remain mandatory.
-    deadline = time.monotonic() + self.handshake_timeout
+    started = time.monotonic()
+    deadline = started + self.version_wait
     pings = 0
     while True:
       channel, kind, data = self.receive(deadline=deadline)
       if channel != 0 or kind != MSG_PING_REQUEST:
         break
       pings += 1
-      if pings > 8 or len(data) > 64:
+      if pings > 8 + 3 * (time.monotonic() - started) or len(data) > 64:
         raise ValueError('Excessive pre-version Android Auto keepalive')
       fields = parse_fields(data)
       timestamps = fields.get(1, [])
@@ -744,6 +748,8 @@ class ProjectionSession(Session):
     self.head_unit_info: dict = {}
     self.on_discovered: Callable[[dict], tuple[str, ...]] | None = None  # set by the supervisor: the car-specific actions to run
     self.fix_actions: tuple[str, ...] = ()
+    # set by the supervisor with the wired hands-free toggle: connects to the car's address, returns this comma's address or ""
+    self.connect_handsfree: Callable[[str], str] | None = None
     self.focus_requested_at: float | None = None
     self.focus_granted_at: float | None = None
     self.nav = None  # NavStatus, attached by the supervisor when the head unit offers turn-by-turn
@@ -772,7 +778,10 @@ class ProjectionSession(Session):
         self.event("fix_selection_failed", error=str(error)[:120])
     self.open_video()
     self.open_input()
-    if self.phone_services:
+    if self.connect_handsfree is not None:
+      self._open_sensors()
+      self.link_handsfree()
+    elif self.phone_services:
       self.open_phone_services()
     if self.fix_actions:
       self.run_fix_actions()
@@ -908,6 +917,20 @@ class ProjectionSession(Session):
           self._send_pairing_request((bluetooth.get("bluetooth") or {}).get("pairing_methods") or [])
           done = True
       self.event("fix_action", action=action, done=done)
+
+  def link_handsfree(self) -> bool:
+    """Connect hands-free to the address the car reports, then send the pairing request, as a wired phone does."""
+    if self.connect_handsfree is None or not (self.bluetooth_channel is not None or self._open_bluetooth(pair=False)):
+      return False
+    car_bt = next((ch for ch in self.channels if ch.get("id") == self.bluetooth_channel), {}).get("bluetooth") or {}
+    car_address = car_bt.get("car_address", "")
+    linked = self.connect_handsfree(car_address) if car_address else ""
+    sent = bool(linked)
+    if sent:
+      self.phone_address = linked
+      self._send_pairing_request(car_bt.get("pairing_methods") or [])
+    self.event("handsfree_link", has_car_address=bool(car_address), pairing_request_sent=sent)
+    return sent
 
   def request_projection(self) -> None:
     """Ask for display focus; the Mazda donor needed this, DHU grants it unsolicited."""

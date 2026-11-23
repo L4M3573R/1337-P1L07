@@ -5,7 +5,7 @@ from opendbc.car.disable_ecu import disable_ecu
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.subaru.carcontroller import CarController
 from opendbc.car.subaru.carstate import CarState
-from opendbc.car.subaru.values import CAR, GLOBAL_ES_ADDR, CanBus, SubaruFlags, SubaruSafetyFlags
+from opendbc.car.subaru.values import CAR, EARLY_GLOBAL_TORQUE_CARS, GLOBAL_ES_ADDR, CanBus, SubaruFlags, SubaruSafetyFlags
 
 GEN2_ANGLE_PORTS = frozenset((CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_IMPREZA_2025, CAR.SUBARU_LEGACY_2025,
                                CAR.SUBARU_ASCENT_2023, CAR.SUBARU_FORESTER_2022, CAR.SUBARU_OUTBACK_2023))
@@ -14,6 +14,7 @@ GEN2_ANGLE_PORTS = frozenset((CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_IMPREZA_2025
 class CarInterface(CarInterfaceBase):
   CarState = CarState
   CarController = CarController
+  DRIVABLE_GEARS = (structs.CarState.GearShifter.manumatic,)
 
   def update(self, can_packets):
     source = self.CS.startup_sources
@@ -58,7 +59,7 @@ class CarInterface(CarInterfaceBase):
     if not (ret.flags & SubaruFlags.PREGLOBAL) and 0x323 in fingerprint[2]:
       ret.flags |= SubaruFlags.SEND_INFOTAINMENT.value
 
-    if candidate == CAR.SUBARU_ASCENT_2023 and fingerprint[CanBus.camera].get(0x3C4) == 8:
+    if candidate in (CAR.SUBARU_ASCENT_2023, CAR.SUBARU_LEGACY_2025) and fingerprint[CanBus.camera].get(0x3C4) == 8:
       ret.flags |= SubaruFlags.ASCENT_LKAS_ALERT.value
 
     if ret.flags & SubaruFlags.PREGLOBAL:
@@ -98,7 +99,8 @@ class CarInterface(CarInterfaceBase):
       ret.lateralTuning.pid.kiBP, ret.lateralTuning.pid.kpBP = [[0., 20.], [0., 20.]]
       ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.0025, 0.1], [0.00025, 0.01]]
 
-    elif candidate == CAR.SUBARU_IMPREZA:
+    elif candidate in EARLY_GLOBAL_TORQUE_CARS:
+      ret.safetyConfigs[0].safetyParam = SubaruSafetyFlags.EARLY_GLOBAL_TORQUE.value
       ret.steerActuatorDelay = 0.4  # end-to-end angle controller
       ret.lateralTuning.init('pid')
       ret.lateralTuning.pid.kf = 0.00005
@@ -131,7 +133,8 @@ class CarInterface(CarInterfaceBase):
       ret.steerActuatorDelay = 0.15
 
     elif candidate == CAR.SUBARU_OUTBACK_PREGLOBAL:
-      pass
+      ret.dashcamOnly = False
+      ret.safetyConfigs[0].safetyParam = SubaruSafetyFlags.PREGLOBAL_OUTBACK_STOCK_ACC.value
     else:
       raise ValueError(f"unknown car: {candidate}")
 

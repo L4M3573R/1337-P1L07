@@ -10,12 +10,14 @@ from openpilot.starpilot.saved_source import read_saved
 from openpilot.starpilot.conditional_mode.ui_action import fresh_service
 
 
+SCREEN_OFF_ACTION = 15
 ACTIONS = {
   "Off": 0, "Cycle personality": 1, "Force coast": 2, "Pause steering": 3, "Pause longitudinal": 4,
   "Experimental override": 5, "Traffic mode": 6, "Switchback Mode": 7, "Bookmark": 8,
   "Toggle AOL": 9, "Adopt speed limit": 10, "Quick Select 1": 11, "Quick Select 2": 12,
-  "Quick Select 3": 13, "Pulse and glide": 14,
+  "Quick Select 3": 13, "Pulse and glide": 14, "Toggle Screen Off": SCREEN_OFF_ACTION,
 }
+ACTION_VALUES = frozenset(str(value).encode() for value in ACTIONS.values())
 KEYS = ("LKASButtonControl", "MainCruiseButtonControl", "DistanceButtonControl", "LongDistanceButtonControl",
         "VeryLongDistanceButtonControl", "CancelButtonControl", "LongCancelButtonControl", "VeryLongCancelButtonControl",
         "ModeButtonControl", "LongModeButtonControl", "VeryLongModeButtonControl", "StarButtonControl",
@@ -23,7 +25,7 @@ KEYS = ("LKASButtonControl", "MainCruiseButtonControl", "DistanceButtonControl",
 PADDLE_KEY = "LeftPaddleButtonControl"
 LIFETIME_NS = 250_000_000
 SESSION = re.compile(r"[0-9a-f]{32}\Z")
-DELIVERED_ACTIONS = frozenset((1, 2, 5, 6, 7, 8, 10, 11, 12, 13, 14))
+DELIVERED_ACTIONS = frozenset((1, 2, 5, 6, 7, 8, 10, 11, 12, 13, 14, SCREEN_OFF_ACTION))
 DEFAULTS = {"DistanceButtonControl": 1, "LongDistanceButtonControl": 5, "VeryLongDistanceButtonControl": 6}
 BUTTON_KEYS = {
   Button.LKAS: (KEYS[0],), Button.DISTANCE: KEYS[2:5], Button.MODE: KEYS[8:11], Button.CUSTOM: KEYS[11:14],
@@ -72,13 +74,15 @@ def button_reported(cp, key):
     if brand == 'gm':
       from opendbc.car.gm.values import is_volt_flashed_profile
       return is_volt_flashed_profile(cp)
-    if brand in ('chrysler', 'mazda', 'nissan', 'volkswagen', 'volvo'):
+    if brand == 'volvo':
+      return cp.carFingerprint == 'VOLVO_V60'
+    if brand in ('chrysler', 'mazda', 'nissan', 'volkswagen'):
       return False
     if brand == 'hyundai':
       from opendbc.car.hyundai.values import CAR, HyundaiFlags, is_blended
       return bool(cp.flags & (HyundaiFlags.CANFD | HyundaiFlags.HAS_LDA_BUTTON) or
                   cp.carFingerprint == CAR.HYUNDAI_ELANTRA_HEV_2024 or is_blended(cp))
-  if key == 'MainCruiseButtonControl' and brand in ('chrysler', 'ford', 'mazda', 'nissan', 'volkswagen'):
+  if key == 'MainCruiseButtonControl' and (brand in ('chrysler', 'ford', 'mazda', 'nissan', 'volkswagen') or cp.carFingerprint == 'VOLVO_V60'):
     return False
   if key in KEYS[5:8]:
     if brand in ('chrysler', 'nissan'):
@@ -117,7 +121,7 @@ def capture(params):
   result = {}
   for key in KEYS:
     raw, readable = read_saved(params, key, 8)
-    if not readable or raw is not None and raw not in tuple(str(value).encode() for value in range(15)):
+    if not readable or raw is not None and raw not in ACTION_VALUES:
       return None
     result[key] = int(raw) if raw is not None else DEFAULTS.get(key, 0)
   return result
@@ -297,7 +301,7 @@ class WheelConsumer:
     self.sequence = 0
     self.last_heartbeat = 0
 
-  def accept(self, event, params, cp, sm, *, now_ns):
+  def accept(self, event, params, cp, sm, *, now_ns, consume=True):
     try:
       if not event.valid or str(event.slcCruiseEvent.kind) != "wheelAction" or not eligible(cp):
         return None
@@ -336,16 +340,17 @@ class WheelConsumer:
         mapping = capture(params)
         if mapping is None or mapping[key] != action:
           return None
-      if session != self.session:
-        if self.session is not None:
-          if len(self.retired) >= 8:
-            return None
-          self.retired.add(self.session)
-        self.session, self.sequence = session, 0
-      if wire.sequence <= self.sequence:
+      if session != self.session and self.session is not None and len(self.retired) >= 8:
         return None
-      self.sequence = int(wire.sequence)
-      self.last_heartbeat = observed
-      return WheelCommand(session, self.sequence, observed, drive, source, key, action)
+      if wire.sequence <= (self.sequence if session == self.session else 0):
+        return None
+      if consume:
+        if session != self.session:
+          if self.session is not None:
+            self.retired.add(self.session)
+          self.session = session
+        self.sequence = int(wire.sequence)
+        self.last_heartbeat = observed
+      return WheelCommand(session, int(wire.sequence), observed, drive, source, key, action)
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
       return None

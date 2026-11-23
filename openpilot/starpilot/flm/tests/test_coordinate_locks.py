@@ -95,8 +95,12 @@ def test_editing_an_accepted_finding_locks_only_that_value_and_default_releases_
     return replace(next(r for r in editor.manual_rows(capability, True) if r.key.endswith(':' + name)), vehicle_fingerprint=str(cp.carFingerprint))
   assert all(purpose(r) for r in editor.manual_rows(capability, True))
   assert _projection(row('ff_gain_left'))['acceptedFindingValue'] == .005
+  assert _projection(row('ff_gain_left'))['coordinateLocked'] is False
+  assert _projection(row('ff_gain_left'))['learningEligible'] is True
   assert editor.apply(request(row('ff_gain_left'), .5))
   assert 'acceptedFindingValue' not in _projection(row('ff_gain_left'))
+  assert _projection(row('ff_gain_left'))['coordinateLocked'] is True
+  assert _projection(row('ff_gain_left'))['learningEligible'] is False
   restored = selected_manual(cp, params)
   assert restored.locked == ('ff_gain_left', 'center_taper_max')
   assert restored.automatic == ('friction_threshold_mid',)
@@ -105,8 +109,41 @@ def test_editing_an_accepted_finding_locks_only_that_value_and_default_releases_
   assert restored.locked == ('center_taper_max',)
   assert restored.automatic == ('friction_threshold_mid',)
   assert dict(restored.values)['friction_threshold_mid'] == .003
+  assert _projection(row('ff_gain_left'))['coordinateLocked'] is False
+  assert _projection(row('ff_gain_left'))['learningEligible'] is True
   assert _projection(row('friction_threshold_mid'))['acceptedFindingValue'] == .003
   assert ManualCoordinates.from_document(restored.document()) == restored
+
+
+@pytest.mark.parametrize('parked', (False, True))
+def test_readonly_coordinate_ownership_distinguishes_acceptance_lock_and_context(tmp_path, cp, parked):
+  from openpilot.starpilot.flm.manual_coordinates import context
+  from openpilot.starpilot.galaxy.settings import _projection
+
+  params = PrivateParams(tmp_path)
+  values = dict.fromkeys(ROUTE_NAMES, 0.) | {'unwind_taper_left': .005, 'unwind_taper_right': .01, 'friction_threshold_mid': .003}
+  saved = ManualCoordinates(context(cp, 'starpilot', recovered=True), tuple(values.items()),
+                            automatic=('unwind_taper_left', 'friction_threshold_mid')).validate()
+  original = save(params, cp, saved)
+  editor, capability = feature(cp, params, {'parked': parked})
+  rows = {r.key.removeprefix('torque:surface:'): _projection(r) for r in editor.manual_rows(capability, parked)}
+  for name, value in (('unwind_taper_left', .005), ('friction_threshold_mid', .003)):
+    assert rows[name]['acceptedFindingValue'] == value
+    assert rows[name]['coordinateLocked'] is False and rows[name]['learningEligible'] is True
+    assert 'Change confirmed' in rows[name]['reason']
+  assert rows['unwind_taper_left']['available'] is parked
+  assert rows['unwind_taper_right']['coordinateLocked'] is True and rows['unwind_taper_right']['learningEligible'] is False
+  assert 'acceptedFindingValue' not in rows['unwind_taper_right']
+  assert rows['turn_in_boost_left']['coordinateLocked'] is False and rows['turn_in_boost_left']['learningEligible'] is True
+  cp.mass += 1
+  rows = {r.key.removeprefix('torque:surface:'): _projection(r) for r in editor.manual_rows(capability, parked)}
+  assert rows['unwind_taper_left']['learningEligible'] is True
+  cp.lateralTuning.torque.friction += .01
+  editor, capability = feature(cp, params, {'parked': parked})
+  rows = {r.key.removeprefix('torque:surface:'): _projection(r) for r in editor.manual_rows(capability, parked)}
+  assert rows['unwind_taper_left']['learningEligible'] is False
+  assert 'Eligible for Auto Learn' not in rows['unwind_taper_left']['reason']
+  assert read_saved(params, DOCUMENT_KEY, 16384) == (original, True)
 
 
 @pytest.mark.parametrize('name', NAMES)
@@ -226,3 +263,30 @@ def test_actual_runtime_applies_an_unlocked_adjustment_and_quality_rollback_keep
         drive.frame()
     assert controls.global_learning.eligible and owner.frame_allowed
     assert owner.source.values['center_taper_max'] == .01
+
+
+def test_first_automatic_trial_uses_the_confirmed_settings_as_its_exact_rollback(tmp_path, cp):
+  from openpilot.starpilot.flm.manual_coordinates import context
+  from openpilot.starpilot.flm.offroad_store import KEY, MAX_BYTES, RouteScope, RouteStorage, startup_row
+  from openpilot.starpilot.flm.offroad_worker import _save_route_trial
+
+  params = PrivateParams(tmp_path)
+  prior = dict.fromkeys(ROUTE_NAMES, 0.) | {'ff_gain_left': .005, 'center_taper_max': .01}
+  selected = ManualCoordinates(context(cp, 'starpilot', recovered=True), tuple(prior.items()), automatic=('ff_gain_left',)).validate()
+  original = save(params, cp, selected)
+  scope = RouteScope(selected.context[0], 'selected-controller', 'a' * 64, 'b' * 64, '0', 'starpilot', 'torque')
+  row = {'scope': scope.document(), 'previous': prior, 'values': dict(prior, friction_threshold_highway=.005),
+         'route_sha256s': ['c' * 64], 'source_start_ns': 1, 'source_end_ns': 2, 'completed_wall_ns': 3,
+         'analysis_sha256': 'd' * 64, 'sequence': 1, 'state': 'ready_for_next_drive'}
+  altered = dict(row, previous=dict(prior, ff_gain_left=.004))
+  locked = dict(row, values=dict(row['values'], center_taper_max=.011))
+  assert not _save_route_trial(params, cp, altered, expected=None, authorized=lambda: True)
+  assert not _save_route_trial(params, cp, locked, expected=None, authorized=lambda: True)
+  assert not _save_route_trial(params, cp, row, expected=None, authorized=lambda: False)
+  assert read_saved(params, KEY, MAX_BYTES) == (None, True)
+  assert _save_route_trial(params, cp, row, expected=None, authorized=lambda: True)
+  assert startup_row(params, scope)[0] == row
+  stored, readable = read_saved(params, KEY, MAX_BYTES)
+  assert readable and RouteStorage(params).rollback(scope=scope, expected=stored, authorized=lambda: True)
+  assert startup_row(params, scope)[0]['values'] == prior
+  assert read_saved(params, DOCUMENT_KEY, 16384) == (original, True)

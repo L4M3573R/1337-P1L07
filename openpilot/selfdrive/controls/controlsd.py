@@ -29,7 +29,14 @@ from openpilot.starpilot.car.hyundai.lateral_fault import LateralFaultLatch
 from openpilot.starpilot.feature_runtime import enabled as feature_enabled
 from openpilot.starpilot.vehicle_preferences import VehicleStartupPreferences
 from openpilot.starpilot.lateral.pause import LateralPause, read_settings as read_lateral_pause
-from openpilot.starpilot.lateral.model_turn_assist import ModelTurnAssist, update_twitch_guard
+from openpilot.starpilot.lateral.model_turn_assist import (
+  CURVATURE_HOLD_CONFIRM_MIN,
+  ModelTurnAssist,
+  limit_curvature_to_plan,
+  update_twitch_guard,
+)
+from openpilot.starpilot.lateral.turn_unlock import TurnUnlock
+from openpilot.starpilot.lateral.turn_initiation_preferences import TurnInitiationPreference
 from openpilot.starpilot.aol.runtime import (
   current_axis,
   current_native,
@@ -70,6 +77,26 @@ ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 NNLC_RELOG_S = 55.0  # just under a log segment
 
 
+def _update_subaru_line_visibility(prev_vis: bool | None, timer: float, prob: float | bool, dt: float) -> tuple[bool, float]:
+  """Apply confidence hysteresis and asymmetric debounce to Subaru dash lane line visibility."""
+  val = (1.0 if prob else 0.0) if isinstance(prob, bool) else float(prob)
+  if prev_vis is None:
+    return val >= 0.55, 0.0
+  if prev_vis:
+    if val < 0.40:
+      timer += max(0.0, dt)
+      if timer >= 0.25 - 1e-6:
+        return False, 0.0
+      return True, timer
+    return True, 0.0
+  if val >= 0.55:
+    timer += max(0.0, dt)
+    if timer >= 1.0 - 1e-6:
+      return True, 0.0
+    return False, timer
+  return False, 0.0
+
+
 class Controls:
   def __init__(self, *, predict_lane_clearance: bool = False) -> None:
     if type(predict_lane_clearance) is not bool:
@@ -95,6 +122,8 @@ class Controls:
     self.aol_transition_diagnostic = TransitionDiagnostic() if self.aol_replay and self.CP.brand == 'gm' else None
     self.ordinary_axis_ack_required = axis_policy_for(self.CP).ordinary_axis_ack_required
     self.longitudinal_inputs = LongitudinalInputs(self.CP, self.params, lambda: self.sm)
+    from opendbc.car.hyundai.software_cruise import selected as software_cruise_selected
+    self.hyundai_software_cruise = software_cruise_selected(self.CP)
 
     services = [
       'lateralDelay',
@@ -128,6 +157,21 @@ class Controls:
     self.curvature = 0.0
     self.desired_curvature = 0.0
     self.model_turn_assist = ModelTurnAssist()
+    self.turn_unlock = TurnUnlock()
+    self.turn_initiation_preferences = TurnInitiationPreference(self.params)
+    self.subaru_twitch_guard_armed = False
+    self.aol_enabled_setting = True
+    self.lateral_off = False
+    self._aol_left_line_vis: bool | None = None
+    self._aol_left_line_timer: float = 0.0
+    self._aol_right_line_vis: bool | None = None
+    self._aol_right_line_timer: float = 0.0
+    self._subaru_aol_last_read_ns = 0
+    self._prev_cruise_available = False
+    self._prev_aol_enabled: bool | None = None
+    self._prev_lkas_button_pressed = False
+    if self.CP.carFingerprint == "SUBARU_LEGACY_2025":
+      self._refresh_subaru_aol_setting(0, force=True)
     self.lane_centering_controller = (
       LaneCenteringController(body=interface_dimensions(self.CI, self.CP), body_required=True) if predict_lane_clearance else LaneCenteringController()
     )
@@ -160,20 +204,21 @@ class Controls:
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
 
-    self.lateral_gain_owner = None
-    self.LoC = LongControl(self.CP, startup_preferences=self.vehicle_startup_preferences)
+    from openpilot.starpilot.longitudinal.developer_tuning import read_tuning
+    self.LoC = LongControl(self.CP, startup_preferences=self.vehicle_startup_preferences,
+                           developer_tuning=read_tuning(self.params, self.CP))
     self.VM = VehicleModel(self.CP)
     self.LaC: LatControl
     self.LaC = create_lateral_controller(
       self.CP, self.CI, DT_CTRL, mode=self.lateral_controller_selection.mode, turn_assist=self.vehicle_startup_preferences.turn_assist
     )
+    self.lateral_gain_owner = create_gain_owner(self.params, self.CP, self.LaC)
     if isinstance(self.LaC, LatControlTorque):
       # Only the actual startup owner reads configuration; replay clones stay pure.
       if manual_effects is not None and (manual_effects.profile.context[1] != str(self.LaC.controller_mode) or
                                          not manual_effects.compatible(self.CP, self.CI, self.LaC, self.params)):
         manual_effects, manual_status = None, 'context_changed'
       self.LaC.manual_flm_effects, self.LaC.manual_flm_status = manual_effects, manual_status
-      self.lateral_gain_owner = create_gain_owner(self.params, self.CP, self.LaC)
       cloudlog.info(
         {
           "event": "torque controller selected",
@@ -199,7 +244,7 @@ class Controls:
     from openpilot.starpilot.lateral.learning_preferences import read_preference
 
     preference = read_preference(self.params, self.CP)
-    route_effects, self.route_flm_status = self._configure_route_tune(manual_status)
+    _, self.route_flm_status = self._configure_route_tune(manual_status)
     # Steering learning pauses on NNLC drives so it never learns from the network's behavior.
     self.global_learning = (
       GlobalRuntime(self.CP, self.CI, self.LaC, confirmed_live_history=load_confirmed_history(self.params))
@@ -338,6 +383,12 @@ class Controls:
       cloudlog.exception('nnlc selection failed; standard drive')
       self.LaC.nnlc = None
     return False
+
+  def _refresh_subaru_aol_setting(self, now_ns: int, *, force: bool = False) -> None:
+    if not force and (now_ns - self._subaru_aol_last_read_ns) < 500_000_000:
+      return
+    self._subaru_aol_last_read_ns = now_ns
+    self.aol_enabled_setting = self.params.get_bool("AlwaysOnLateral")
 
   def _configure_route_tune(self, manual_status):
     from openpilot.starpilot.flm.offroad_runtime import configure
@@ -592,6 +643,32 @@ class Controls:
 
     if cycle_timing is not None:
       cycle_timing.mark()
+    legacy_2025 = self.CP.carFingerprint == "SUBARU_LEGACY_2025"
+    if legacy_2025:
+      mode_now_ns = int(self.sm.logMonoTime['carState']) if os.getenv('REPLAY') == '1' else time.monotonic_ns()
+      self._refresh_subaru_aol_setting(mode_now_ns)
+      aol = bool(self.aol_enabled_setting)
+      raw_lkas_pressed = any(be.type == car.CarState.ButtonEvent.Type.lkas and be.pressed for be in CS.buttonEvents)
+      if not CS.cruiseState.available:
+        self._prev_lkas_button_pressed = False
+      lkas_pressed = raw_lkas_pressed and not self._prev_lkas_button_pressed
+      self._prev_lkas_button_pressed = raw_lkas_pressed
+      if not CS.cruiseState.available:
+        self.lateral_off = not aol
+      else:
+        entered_mode = (not self._prev_cruise_available) or (aol != self._prev_aol_enabled)
+        if entered_mode:
+          self.lateral_off = not aol
+        elif lkas_pressed and aol:
+          self.lateral_off = not self.lateral_off
+      self._prev_cruise_available = bool(CS.cruiseState.available)
+      self._prev_aol_enabled = aol
+    else:
+      self.lateral_off = False
+
+    if legacy_2025 and ((self.aol_enabled_setting and self.lateral_off) or (not self.aol_enabled_setting and not CC.enabled)):
+      CC.latActive = False
+
     actuators = CC.actuators
     actuators.longControlState = self.LoC.long_control_state
 
@@ -602,7 +679,15 @@ class Controls:
 
     if not CC.latActive:
       self.LaC.reset()
-    if not CC.longActive:
+    software_cruise_active = False
+    if getattr(self, "hyundai_software_cruise", False):
+      from openpilot.starpilot.car.hyundai.redneck_cruise import current, ready
+      now_ns = int(self.sm.logMonoTime["carState"]) if os.getenv("REPLAY") == "1" else time.monotonic_ns()
+      software_cruise_active = (ready(CS, CC) and self.sm["selfdriveState"].active and
+                                current(self.sm, "longitudinalPlan", now_ns) and
+                                math.isfinite(long_plan.aTarget) and
+                                not any(e.overrideLongitudinal for e in self.sm["onroadEvents"]))
+    if not (CC.longActive or software_cruise_active):
       self.LoC.reset()
 
     # accel PID loop
@@ -614,7 +699,7 @@ class Controls:
 
     pid_accel_limits = preap_pedal_limits(self.CP, CS.vEgo, getattr(self.sm['selfdriveState'].personality, 'raw', 1), pid_accel_limits)
     longitudinal_output = self.LoC.update(
-      CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits, context=longitudinal_context
+      CC.longActive or software_cruise_active, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits, context=longitudinal_context
     )
     actuators.accel = final_output(longitudinal_output)
     if self.longitudinal_inputs.publish_state or publish_takeoff_state:
@@ -630,6 +715,26 @@ class Controls:
     else:
       new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
     assist = self.turn_assist_enabled()
+    lane_policy_now_ns = int(self.sm.logMonoTime['carState']) if os.getenv('REPLAY') == '1' else time.monotonic_ns()
+    self.refresh_lane_change_policy(CS, model_v2, lane_policy_now_ns)
+    direction = int(CS.rightBlinker) - int(CS.leftBlinker)
+    turn_valid = bool(CS.canValid and not CS.canTimeout and self.sm.all_checks(['carState']) and
+                      not CS.steerFaultTemporary and not CS.steerFaultPermanent and
+                      CS.gearShifter in (car.CarState.GearShifter.drive, car.CarState.GearShifter.low))
+    if not turn_valid:
+      self.turn_unlock.reset()
+    if direction != self.turn_unlock.direction:
+      self.model_turn_assist.reset_turn()
+    unlocked = self.turn_unlock.sample(CS, valid=turn_valid,
+      driver_confirmed=bool(direction and not CS.standstill and CS.steeringPressed and
+                            CS.steeringTorque * direction < 0 and self.curvature * direction > CURVATURE_HOLD_CONFIRM_MIN),
+      lateral_active=CC.latActive, curvature=self.curvature)
+    automatic_turn = self.turn_initiation_preferences.sample(lane_policy_now_ns,
+      signaling=bool(CS.leftBlinker or CS.rightBlinker), maneuver_active=model_v2.meta.laneChangeState != LaneChangeState.off)
+    turn_admitted = self.turn_unlock.permits(unlocked=unlocked, automatic=automatic_turn,
+      lateral_ready=CC.latActive and not CS.steeringPressed and self.sm.all_checks(['modelV2', 'longitudinalPlan']),
+      stopping=model_v2.action.shouldStop or long_plan.shouldStop, driver_braking=CS.brakePressed,
+      blindspot=CS.leftBlindspot if direction < 0 else CS.rightBlindspot)
     rolling = math.isfinite(CS.vEgo) and CS.vEgo > max(0.1 * CV.MPH_TO_MS, self.CP.minSteerSpeed)
     assist_ready = (
       assist
@@ -642,7 +747,8 @@ class Controls:
     if assist_ready and rolling and not CS.standstill:
       self.model_turn_assist.curvature = self.curvature
       self.model_turn_assist.twitch_guard_armed = update_twitch_guard(self.model_turn_assist.twitch_guard_armed, CS.vEgo, CS.standstill)
-      new_desired_curvature = self.model_turn_assist.update(CS, model_v2, CC, new_desired_curvature)
+      new_desired_curvature = self.model_turn_assist.update(CS, model_v2, CC, new_desired_curvature,
+                                                           turn_admitted=turn_admitted, anticipate=automatic_turn)
     elif assist_ready:
       self.model_turn_assist.curvature = self.curvature
       new_desired_curvature = self.model_turn_assist.update_stopped(CS, new_desired_curvature)
@@ -650,6 +756,14 @@ class Controls:
     elif getattr(self, 'model_turn_assist', None) is not None:
       self.model_turn_assist.reset()
       self.model_turn_assist.twitch_guard_armed = update_twitch_guard(False, CS.vEgo, CS.standstill)
+    if not assist_ready and self.CP.carFingerprint == "SUBARU_LEGACY_2025":
+      subaru_gear_ok = CS.gearShifter in (car.CarState.GearShifter.drive, car.CarState.GearShifter.low, car.CarState.GearShifter.manumatic)
+      if self.sm.all_checks(['modelV2']) and not CS.steerFaultTemporary and not CS.steerFaultPermanent and subaru_gear_ok:
+        self.subaru_twitch_guard_armed = update_twitch_guard(self.subaru_twitch_guard_armed, CS.vEgo, CS.standstill)
+        if CC.latActive and not CS.leftBlinker and not CS.rightBlinker and self.subaru_twitch_guard_armed:
+          new_desired_curvature = limit_curvature_to_plan(model_v2, new_desired_curvature, CS.vEgo, min_reach=4.0)
+      else:
+        self.subaru_twitch_guard_armed = update_twitch_guard(False, CS.vEgo, CS.standstill)
     if self.highway_smoothing_supported:
       preferences = getattr(self, "live_steering_preferences", None)
       if preferences is not None:
@@ -726,12 +840,10 @@ class Controls:
       if result.candidate_curvature is not None:
         new_desired_curvature = result.candidate_curvature
     previous_curvature = self.desired_curvature
-    lane_policy_now_ns = int(self.sm.logMonoTime['carState']) if os.getenv('REPLAY') == '1' else time.monotonic_ns()
-    self.refresh_lane_change_policy(CS, model_v2, lane_policy_now_ns)
     turn_now_ns, turn_boot_ns, turn_skew_ns = paired_clocks_ns()
     intersection_turn = self.lane_change_smoother.turn_evidence.observe(
       self.sm, model_v2, model_ns=int(self.sm.logMonoTime["modelV2"]), now_ns=turn_now_ns, now_boot_ns=turn_boot_ns,
-      valid=bool(self.sm.all_checks(["modelV2"])), enabled=assist_ready, clock_skew_ns=turn_skew_ns)
+      valid=bool(self.sm.all_checks(["modelV2"])), enabled=assist_ready and turn_admitted, clock_skew_ns=turn_skew_ns)
     factor = self.lane_change_smoother.factor(
       active=bool(CC.latActive and CS.canValid and not CS.canTimeout and self.sm.all_checks(['modelV2']) and self.lane_change_policy.enabled),
       lane_change_state=model_v2.meta.laneChangeState,
@@ -804,6 +916,7 @@ class Controls:
     nnlc = getattr(self.LaC, 'nnlc', None)
     if nnlc is not None:
       nnlc.set_plan(model_v2)
+    self.LaC.turn_assist_maneuver = turn_admitted and direction * self.desired_curvature > 0.0
     steer, lateral_output, lac_log = self.LaC.update(
       CC.latActive, CS, self.VM, lp, self.steer_limited_by_safety, self.desired_curvature,
       curvature_limited, lat_delay
@@ -918,11 +1031,49 @@ class Controls:
     hudControl.leadDistanceBars = self.sm['selfdriveState'].personality.raw + 1
     hudControl.visualAlert = self.sm['selfdriveState'].alertHudVisual
 
-    hudControl.rightLaneVisible = True
-    hudControl.leftLaneVisible = True
-    if self.sm.valid['driverAssistance']:
-      hudControl.leftLaneDepart = self.sm['driverAssistance'].leftLaneDeparture
-      hudControl.rightLaneDepart = self.sm['driverAssistance'].rightLaneDeparture
+    if self.CP.carFingerprint == "SUBARU_LEGACY_2025":
+      lines_allowed = bool(
+        CS.cruiseState.available and (
+          (self.aol_enabled_setting and not self.lateral_off) or
+          (not self.aol_enabled_setting and CC.enabled)
+        )
+      )
+      if not lines_allowed:
+        self._aol_left_line_vis = None
+        self._aol_left_line_timer = 0.0
+        self._aol_right_line_vis = None
+        self._aol_right_line_timer = 0.0
+        hudControl.lanesVisible = False
+        hudControl.leftLaneVisible = False
+        hudControl.rightLaneVisible = False
+        hudControl.leftLaneDepart = False
+        hudControl.rightLaneDepart = False
+      else:
+        hudControl.lanesVisible = True
+        lane_probs = self.sm['modelV2'].laneLineProbs if self.sm.valid['modelV2'] and len(self.sm['modelV2'].laneLineProbs) >= 3 else None
+        if lane_probs is not None:
+          left_prob = float(lane_probs[1])
+          right_prob = float(lane_probs[2])
+          self._aol_left_line_vis, self._aol_left_line_timer = _update_subaru_line_visibility(
+            self._aol_left_line_vis, self._aol_left_line_timer, left_prob, DT_CTRL
+          )
+          self._aol_right_line_vis, self._aol_right_line_timer = _update_subaru_line_visibility(
+            self._aol_right_line_vis, self._aol_right_line_timer, right_prob, DT_CTRL
+          )
+          hudControl.leftLaneVisible = bool(self._aol_left_line_vis)
+          hudControl.rightLaneVisible = bool(self._aol_right_line_vis)
+        else:
+          hudControl.leftLaneVisible = True
+          hudControl.rightLaneVisible = True
+        if self.sm.valid['driverAssistance']:
+          hudControl.leftLaneDepart = self.sm['driverAssistance'].leftLaneDeparture
+          hudControl.rightLaneDepart = self.sm['driverAssistance'].rightLaneDeparture
+    else:
+      hudControl.rightLaneVisible = True
+      hudControl.leftLaneVisible = True
+      if self.sm.valid['driverAssistance']:
+        hudControl.leftLaneDepart = self.sm['driverAssistance'].leftLaneDeparture
+        hudControl.rightLaneDepart = self.sm['driverAssistance'].rightLaneDeparture
 
     feedback_input_limited = self.steer_limited_by_safety
     if CC.latActive:

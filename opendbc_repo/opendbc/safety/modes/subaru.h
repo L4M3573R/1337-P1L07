@@ -177,8 +177,11 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
   subaru_avh_rx(msg);
 }
 
+static bool subaru_early_global_torque = false;
+
 static bool subaru_tx_hook(const CANPacket_t *msg) {
   const TorqueSteeringLimits SUBARU_STEERING_LIMITS      = SUBARU_STEERING_LIMITS_GENERATOR(2047, 50, 70);
+  const TorqueSteeringLimits SUBARU_EARLY_GLOBAL_STEERING_LIMITS = SUBARU_STEERING_LIMITS_GENERATOR(3071, 50, 70);
   const TorqueSteeringLimits SUBARU_GEN2_STEERING_LIMITS = SUBARU_STEERING_LIMITS_GENERATOR(1000, 40, 40);
   const AngleSteeringLimits SUBARU_ANGLE_STEERING_LIMITS = {
     .max_angle = (subaru_forester_angle ? 650 : SUBARU_JACOBW_MAX_ANGLE) * 100,
@@ -236,7 +239,8 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
 
       bool steer_req = (msg->data[3] >> 5) & 1U;
 
-      const TorqueSteeringLimits limits = subaru_gen2 ? SUBARU_GEN2_STEERING_LIMITS : SUBARU_STEERING_LIMITS;
+      const TorqueSteeringLimits limits = subaru_early_global_torque ? SUBARU_EARLY_GLOBAL_STEERING_LIMITS :
+        (subaru_gen2 ? SUBARU_GEN2_STEERING_LIMITS : SUBARU_STEERING_LIMITS);
       violation |= steer_torque_cmd_checks(desired_torque, steer_req, limits);
     }
     if (msg->addr == MSG_SUBARU_ES_LKAS_ANGLE) {
@@ -287,7 +291,10 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
 }
 
 static safety_config subaru_init(uint16_t raw_param) {
-  uint16_t param = raw_param;
+  const bool early_global_bit = GET_FLAG(raw_param, 8192U);
+  subaru_early_global_torque = ((raw_param == 8192U) || (raw_param == 8200U)) &&
+    (((unsigned int)alternative_experience == 0U) || ((unsigned int)alternative_experience == 32U));
+  uint16_t param = subaru_early_global_torque ? (raw_param & ~8192U) : raw_param;
   const bool impreza_main = (param == 4096U) || (param == 4104U) || (param == 4608U) || (param == 4616U);
   if (impreza_main) {
     param &= ~4096U;
@@ -343,17 +350,25 @@ static safety_config subaru_init(uint16_t raw_param) {
     {MSG_SUBARU_ES_LKAS_Alert, SUBARU_MAIN_BUS, 8, .check_relay = true},
   };
 
+  static const CanMsg SUBARU_LEGACY_ANGLE_TX_MSGS[] = {
+    SUBARU_GEN2_ANGLE_TX_MSGS(SUBARU_MAIN_BUS)
+    {MSG_SUBARU_ES_LKAS_Alert, SUBARU_MAIN_BUS, 8, .check_relay = true},
+  };
+
   static const CanMsg SUBARU_STOP_START_TX_MSGS[] = {
     SUBARU_GEN2_ANGLE_TX_MSGS(SUBARU_MAIN_BUS)
+    {MSG_SUBARU_ES_LKAS_Alert, SUBARU_MAIN_BUS, 8, .check_relay = true},
     {0x390U, SUBARU_ALT_BUS, 8, .check_relay = false},
   };
 
   static const CanMsg SUBARU_AVH_TX_MSGS[] = {
     SUBARU_GEN2_ANGLE_TX_MSGS(SUBARU_MAIN_BUS)
+    {MSG_SUBARU_ES_LKAS_Alert, SUBARU_MAIN_BUS, 8, .check_relay = true},
     {0x6BBU, SUBARU_ALT_BUS, 8, .check_relay = false},
   };
   static const CanMsg SUBARU_AVH_STOP_START_TX_MSGS[] = {
     SUBARU_GEN2_ANGLE_TX_MSGS(SUBARU_MAIN_BUS)
+    {MSG_SUBARU_ES_LKAS_Alert, SUBARU_MAIN_BUS, 8, .check_relay = true},
     {0x6BBU, SUBARU_ALT_BUS, 8, .check_relay = false},
     {0x390U, SUBARU_ALT_BUS, 8, .check_relay = false},
   };
@@ -400,10 +415,12 @@ static safety_config subaru_init(uint16_t raw_param) {
     ((unsigned int)alternative_experience == 32U)));
   subaru_aol_reset();
   subaru_aol_gear_bus = (uint8_t)(subaru_d_platform ? SUBARU_ALT_BUS : SUBARU_MAIN_BUS);
+  const bool legacy_2025 = (base_param == 145U);
+  subaru_aol_legacy_2025 = legacy_2025;
   subaru_aol_enabled = ((unsigned int)alternative_experience == 32U) &&
     ((param == 209U) || (param == 465U) || (param == 16U) || (param == 0U) || (param == 1U) || (param == 17U) || (param == 145U) ||
      avh || (param == 177U) || (param == 401U) || (param == 8U) || (param == 520U) || (param == 512U) || (param == 2225U));
-  subaru_aol_main_arm = subaru_aol_enabled && ((param == 17U) || impreza_main || subaru_d_platform);
+  subaru_aol_main_arm = subaru_aol_enabled && ((param == 17U) || impreza_main || subaru_d_platform || legacy_2025 || subaru_early_global_torque);
   if (subaru_aol_enabled) {
     static const AolSafetyPolicy policy = {
       .reset = subaru_aol_reset,
@@ -441,6 +458,7 @@ static safety_config subaru_init(uint16_t raw_param) {
                               BUILD_SAFETY_CFG(subaru_rx_workspace, SUBARU_AVH_TX_MSGS)) :
           stop_start ? BUILD_SAFETY_CFG(subaru_rx_workspace, SUBARU_STOP_START_TX_MSGS) :
           ascent_alert ? BUILD_SAFETY_CFG(subaru_rx_workspace, SUBARU_ASCENT_ALERT_TX_MSGS) :
+          legacy_2025 ? BUILD_SAFETY_CFG(subaru_rx_workspace, SUBARU_LEGACY_ANGLE_TX_MSGS) :
           subaru_angle_main_bus ? BUILD_SAFETY_CFG(subaru_rx_workspace, SUBARU_ASCENT_ANGLE_TX_MSGS_LIST) :
                                   BUILD_SAFETY_CFG(subaru_rx_workspace, SUBARU_GEN2_ANGLE_TX_MSGS_LIST);
     // Keep the original seven checks on other profiles; only MAIN arming needs ACC health.
@@ -475,7 +493,7 @@ static safety_config subaru_init(uint16_t raw_param) {
   }
   ret.rx_checks_len = rx_count;
   if ((((unsigned int)alternative_experience == 32U) && !subaru_aol_enabled) ||
-      (impreza_main && ((unsigned int)alternative_experience != 32U))) {
+      (impreza_main && ((unsigned int)alternative_experience != 32U)) || (early_global_bit && !subaru_early_global_torque)) {
     ret.tx_msgs = NULL;
     ret.tx_msgs_len = 0;
   }

@@ -25,6 +25,7 @@ from openpilot.starpilot.car.subaru.tests.native_fixture import subaru_native_pa
                                        CAR.SUBARU_FORESTER, CAR.SUBARU_OUTBACK])
 def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, subaru_native_pair, tmp_path, aol=True, manual=False, stop_resume=False,
                                                                       hard_stop_native_first=False, main_only=False, preferences=None, firmware=None,
+                                                                      manual_ratio=None,
                                                                       deadline_gap=False, fixed_angle_handoff=False, host_first_stop=False,
                                                                       source_outage=False, vm_angle_handoff=0, crawl=False, eps_brake_join=False,
                                                                       high_angle_guard=False, main_on_brake=False, guard_brake_release=False,
@@ -78,7 +79,8 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
       ticks = (list(range(30)) + list(range(30, 50)) * 16 + list(range(50, 460))
                if main_during_eps else list(range(125)) + list(range(125, 135)) * 30 + list(range(135, 460))
                if hard_stop_native_first or stop_creep_eps else list(range(70)) + list(range(70, 90)) * 16 + list(range(90, 460))
-               if angle_continuation else range(460))
+               if angle_continuation else list(range(150)) + list(range(150, 185)) * 16 + list(range(185, 460))
+               if manual_ratio == 137 else range(460))
       gap_tick = 75 if main_only else 210
       last_card_published = {}
       pending_host_can = []
@@ -99,9 +101,12 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
         if eps_clear_join and 90 <= tick < 145:
           brake = eps_clear_join in (5, 6) and 95 <= tick < 102
         reverse = 150 <= tick < 185
+        gear = manual_ratio if reverse and manual_ratio is not None else 3 if reverse else 121
         temporary = not guard_brake_release and 225 <= tick < 260
         main = not 310 <= tick < 350 and (tick >= 30 or not main_only)
         stopped = stop_resume and (125 <= tick < 135 if hard_stop_native_first or host_first_stop or stop_creep_eps else 185 <= tick < 195)
+        if stopped_source_gap == 2 and stopped:
+          brake = elapsed < 130
         if stop_creep_eps:
           stopped = tick < 135 and (cold_stop or tick >= 125)
           brake = bool(stopped and tick < 129)
@@ -129,7 +134,7 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
           'CruiseControl': {'Cruise_On': int(main), 'Cruise_Activated': int(cruise)},
           'ES_Status': {'Cruise_Activated': int(cruise)},
           'ES_DashStatus': {'Cruise_On': int(main), 'Cruise_Set_Speed': 100},
-          'Transmission': {'Gear': 3 if reverse else 121},
+          'Transmission': {'Gear': gear},
         }
         if rearm_on_brake in (1, 2):
           values['Dashlights'] = {'LEFT_BLINKER': int(rearm_on_brake == 1 and 340 <= tick < 355),
@@ -271,7 +276,9 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
         if tick % 10 == 0:
           published['pandaStates'] = panda.as_reader()
         cs = published['carState'].carState
-        assert cs.brakePressed == brake and cs.gearShifter == (structs.CarState.GearShifter.reverse if reverse else structs.CarState.GearShifter.drive)
+        expected_gear = {3: structs.CarState.GearShifter.reverse, 121: structs.CarState.GearShifter.drive}.get(
+          gear, structs.CarState.GearShifter.manumatic)
+        assert cs.brakePressed == brake and cs.gearShifter == expected_gear
         if tick >= 10:
           assert cs.canValid and safety.safety_config_valid()
         if hard_stop_receipt and not host_first_stop:
@@ -285,7 +292,8 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
             expired, _ = controls.state_control()
           assert not expired.latActive and not expired.longActive
         driven_new = selfdrive_step(sd, published, new_native, previous_controls, cp, safety, now, calibration='calibrated',
-                                   source_timeout=source_missing or stopped_source_gap and 130 <= elapsed <= 133)
+                                   source_timeout=source_missing or stopped_source_gap and
+                                     (166 <= elapsed <= 169 if stopped_source_gap == 2 else 130 <= elapsed <= 133))
         if deadline_gap and elapsed == gap_tick:
           current = driven_new['aolAxisState'].aolAxisState
           assert current.lateralActive and not sd.aol_authority_lost, 'SUBARU_FRESH_SUCCESSOR_LOST_LATERAL'
@@ -331,8 +339,18 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
         if any(address == 0x322 for address, _, _ in outgoing):
           dash = dash_decoder.vl['ES_LKAS_State']
           expected = ci.CC.angle_was_active if steering_name == 'ES_LKAS_ANGLE' else card.sm['carControl'].latActive
-          assert bool(dash['LKAS_ACTIVE']) == expected, (candidate, tick, expected, dash)
-          assert dash['LKAS_Dash_State'] == (2 if expected else 0), (candidate, tick, expected, dash)
+          if candidate == 'SUBARU_LEGACY_2025':
+            assert bool(dash['LKAS_ACTIVE']), (candidate, tick, expected, dash)
+            if not cs.cruiseState.available or cs.steerFaultTemporary or cs.steerFaultPermanent:
+              assert not ci.CC.aol_dash_green_last, (candidate, tick, dash)
+            if expected:
+              assert ci.CC.aol_dash_green_last, (candidate, tick, dash)
+            ready_wheel = cs.cruiseState.available and bool(getattr(ci.CS, 'aol_enabled', True))
+            expected_dash = 2 if ci.CC.aol_dash_green_last else (1 if ready_wheel else 0)
+            assert dash['LKAS_Dash_State'] == expected_dash, (candidate, tick, expected, expected_dash, dash)
+          else:
+            assert bool(dash['LKAS_ACTIVE']) == expected, (candidate, tick, expected, dash)
+            assert dash['LKAS_Dash_State'] == (2 if expected else 0), (candidate, tick, expected, dash)
           assert all(accepted for address, _, _, accepted in tx if address == 0x322)
           dash_emissions += 1
         decoded_steering = []
@@ -437,12 +455,16 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
           assert command.latActive and bool(intent and intent.allowedLatch) == aol and row['permission'] == int(aol), row
         if not stopped and (first_resume or 205 <= tick < 220 or 280 <= tick < 300):
           assert command.latActive == aol and bool(intent and intent.allowedLatch) == aol and row['permission'] == int(aol) and not row['controls'], row
+        if manual_ratio is not None and 150 <= tick < 185:
+          assert not command.latActive and row['permission'] == 0 and row['cardLatch'] and row['armed'], row
+          assert all(not steering['request'] for steering in row['steering']), row
         if 165 <= tick < 180:
           assert (not command.latActive and not bool(intent and intent.allowedLatch) and
                 bool(intent and intent.lateralArmed) == aol and row['cardLatch'] == aol and row['permission'] == 0), row
         if 240 <= tick < 255:
           assert not command.latActive and bool(intent and intent.lateralArmed) == aol and row['cardLatch'] == aol and row['permission'] == 0, row
-        main_rearm = aol and candidate in (CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_IMPREZA_2025, CAR.SUBARU_IMPREZA_2020, CAR.SUBARU_OUTBACK_2023)
+        main_rearm = aol and candidate in (CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_IMPREZA_2025, CAR.SUBARU_IMPREZA_2020,
+                                         CAR.SUBARU_LEGACY_2025, CAR.SUBARU_OUTBACK_2023, CAR.SUBARU_CROSSTREK_2018, CAR.SUBARU_IMPREZA)
         if 330 <= tick < (350 if main_rearm else 400):
           assert not command.latActive and not bool(intent and intent.allowedLatch), row
         if rearm_on_brake and 355 <= tick < 365:
@@ -460,6 +482,28 @@ def test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(candidate, 
     finally:
       pandad.close()
       (tmp_path / (str(candidate) + '-' + str(aol) + '-actual.json')).write_text(json.dumps(rows, indent=2) + '\n')
+
+
+@pytest.mark.parametrize('vin, expected', [
+  ('JF2GTAAC0JH000001', CAR.SUBARU_CROSSTREK_2018),
+  ('JF2GTAAC0KH000001', CAR.SUBARU_CROSSTREK_2018),
+  ('4S3GTAA60K3000001', CAR.SUBARU_IMPREZA),
+  ('JF2GTAAC0LH000001', CAR.SUBARU_IMPREZA),
+  ('0' * 17, CAR.SUBARU_IMPREZA),
+])
+def test_actual_early_subaru_automatic_startup(vin, expected):
+  firmware = firmware_records(CAR.SUBARU_IMPREZA, FW_VERSIONS, 'subaru')
+  with actual_factory(expected, gen_empty_fingerprint(), firmware, vin, manual=False,
+                      firmware_candidate=CAR.SUBARU_IMPREZA) as (card, _, _):
+    assert card.CP.safetyConfigs[0].safetyParam == 8192
+    assert card.CP.pcmCruise and not card.CP.openpilotLongitudinalControl
+
+
+@pytest.mark.parametrize("candidate", [CAR.SUBARU_IMPREZA, CAR.SUBARU_CROSSTREK_2018])
+def test_actual_early_subaru_main_only(candidate, subaru_native_pair, tmp_path):
+  firmware = firmware_records(CAR.SUBARU_IMPREZA, FW_VERSIONS, 'subaru')
+  test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(
+    candidate, subaru_native_pair, tmp_path, manual=True, main_only=True, firmware=firmware)
 
 
 @pytest.mark.parametrize('candidate', [CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_IMPREZA_2025, CAR.SUBARU_LEGACY_2025, CAR.SUBARU_FORESTER, CAR.SUBARU_OUTBACK])
@@ -695,7 +739,7 @@ def test_actual_subaru_eps_clear_during_blinker_pause_keeps_armed_intent(
     subaru_native_pair, tmp_path, recovery, axis_first, candidate=CAR.SUBARU_IMPREZA_2020):
   test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(
     candidate, subaru_native_pair, tmp_path, main_only=candidate in (
-      CAR.SUBARU_IMPREZA_2020, CAR.SUBARU_IMPREZA_2025, CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_OUTBACK_2023),
+      CAR.SUBARU_IMPREZA_2020, CAR.SUBARU_IMPREZA_2025, CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_LEGACY_2025, CAR.SUBARU_OUTBACK_2023),
     eps_clear_join=recovery, eps_clear_axis_first=axis_first,
     preferences={'PauseLateralOnSignal': True, 'PauseLateralSpeed': 100., 'LateralResumeDelay': 0.})
 
@@ -721,7 +765,7 @@ def test_actual_subaru_stop_creep_restriction_preserves_armed_intent(
     subaru_native_pair, tmp_path, restriction, cold_stop, candidate=CAR.SUBARU_IMPREZA_2020):
   test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(
     candidate, subaru_native_pair, tmp_path, main_only=candidate in (
-      CAR.SUBARU_IMPREZA_2020, CAR.SUBARU_IMPREZA_2025, CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_OUTBACK_2023),
+      CAR.SUBARU_IMPREZA_2020, CAR.SUBARU_IMPREZA_2025, CAR.SUBARU_CROSSTREK_2025, CAR.SUBARU_LEGACY_2025, CAR.SUBARU_OUTBACK_2023),
     stop_resume=True, hard_stop_native_first=not cold_stop, stop_creep_eps=restriction, cold_stop=cold_stop)
   rows = json.loads((tmp_path / (str(candidate) + '-True-actual.json')).read_text())
   assert any(row['cardLatch'] and row['armed'] and not row['lat'] and row['permission'] == 0 for row in rows if 135 <= row['tick'] < 137)
@@ -732,3 +776,20 @@ def test_actual_subaru_stop_creep_restriction_preserves_armed_intent(
   CAR.SUBARU_IMPREZA_2025, CAR.SUBARU_FORESTER, CAR.SUBARU_OUTBACK, CAR.SUBARU_OUTBACK_2023))
 def test_actual_subaru_family_stop_creep_restriction(candidate, subaru_native_pair, tmp_path):
   test_actual_subaru_stop_creep_restriction_preserves_armed_intent(subaru_native_pair, tmp_path, 2, False, candidate=candidate)
+
+
+def test_actual_stopped_brake_release_source_gap_keeps_armed_intent(subaru_native_pair, tmp_path):
+  test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(
+    CAR.SUBARU_IMPREZA_2020, subaru_native_pair, tmp_path, main_only=True,
+    stop_resume=True, hard_stop_native_first=True, stopped_source_gap=2)
+  rows = json.loads((tmp_path / (str(CAR.SUBARU_IMPREZA_2020) + '-True-actual.json')).read_text())
+  paused = [row for row in rows if 166 <= row['elapsed'] <= 170]
+  assert any(row['fault'] == 'availabilityPause' for row in paused)
+  assert all(row['cardLatch'] and row['armed'] and not row['lat'] and not row['long'] and row['permission'] == 0 for row in paused)
+  assert all('controlsMismatch' not in row['events'] for row in rows)
+
+
+@pytest.mark.parametrize("ratio", [137, 145, 153, 161, 169, 177])
+def test_actual_crosstrek_manual_ratio_pauses_and_recovers(subaru_native_pair, tmp_path, ratio):
+  test_actual_full_engage_brake_reverse_temporary_recovery_mainoff(
+    CAR.SUBARU_IMPREZA_2020, subaru_native_pair, tmp_path, main_only=True, manual_ratio=ratio)
