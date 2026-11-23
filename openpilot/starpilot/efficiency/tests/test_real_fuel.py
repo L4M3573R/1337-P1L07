@@ -1,4 +1,5 @@
 """Real fuel from the dash average, hybrid power flow, and Pulse and Glide in the energy ledger."""
+import json
 from types import SimpleNamespace as NS
 
 import pytest
@@ -33,19 +34,59 @@ def test_scan_takes_the_latest_bus0_readings_only():
   assert flow.flow == 'regen' and cl == Cluster(pytest.approx(50.0), 410)
 
 
-def test_tank_detects_a_fill_up_from_the_range_jump_and_counts_miles_across_drives(tmp_path):
+def gauge(state, level, n=tank.LEVEL_WINDOW):
+  filled = False
+  for _ in range(n):
+    filled = state.observe_level(level) or filled
+  return filled
+
+
+def test_tank_detects_a_fill_up_from_the_gauge_and_counts_miles_across_drives(tmp_path):
   state = tank.TankState()
   assert state.gallons_used(50.0) is None  # unknown until a fill-up is seen or seeded
-  state.observe_range(80)
+  assert not gauge(state, 6.0)             # the first smoothed reading only sets the level
   state.drive(10.0)
   assert state.gallons_used(50.0) is None
-  assert state.observe_range(491)  # filled
+  assert not state.observe_range(80) and state.observe_range(491)   # the range jump alone is only recorded
+  assert state.miles_since_fill is None and state.fills_seen == 0
+  tank.save(state, tmp_path / 't.json')
+  state = tank.load(tmp_path / 't.json')   # car off at the pump: a new drive, a new window
+  assert state.last_level == 6.0
+  assert gauge(state, 93.0)                # filled
   state.drive(25.0)
   assert state.gallons_used(50.0) == pytest.approx(0.5)
-  assert not state.observe_range(485)  # range only falls (or rises a little) while driving
   tank.save(state, tmp_path / 't.json')
   again = tank.load(tmp_path / 't.json')
-  assert again.miles_since_fill == pytest.approx(25.0) and again.fills_seen == 1 and again.last_range_mi == 485
+  assert again.miles_since_fill == pytest.approx(25.0) and again.fills_seen == 1 and again.last_level == 93.0
+  assert '_levels' not in json.loads((tmp_path / 't.json').read_text())
+
+
+def next_drive(state):
+  return tank.TankState(miles_since_fill=state.miles_since_fill, fills_seen=state.fills_seen, last_level=state.last_level)
+
+
+def test_gauge_slosh_and_the_range_estimate_are_not_fill_ups():
+  state = tank.TankState(miles_since_fill=40.0, last_range_mi=250)
+  gauge(state, 70.0)
+  assert not gauge(state, 55.3, 60) and not gauge(state, 79.6, 61)   # 11-18: hills swing the gauge 55 <-> 80 mid-drive
+  assert state.observe_range(320) and state.fills_seen == 0          # hybrid range re-estimate: recorded, never a fill
+  state = next_drive(state)
+  assert not gauge(state, 72.0)
+  state = next_drive(state)
+  assert not gauge(state, 30.0) and state.fills_seen == 0 and state.miles_since_fill == 40.0   # draining is not a fill
+  state = next_drive(state)
+  assert not gauge(state, 52.0)                 # +22: under the jump (a splash top-off is not tracked)
+  state = next_drive(state)
+  assert gauge(state, 95.0) and state.fills_seen == 1 and state.miles_since_fill == 0.0
+
+
+def test_pump_log_attaches_receipt_gallons_to_the_fill(tmp_path):
+  e = tank.record_pump(tmp_path, 8.757, '20261123-123558-8252', '20261116-123954-1907', now=0)
+  assert e['pump_gal'] == 8.757 and tank.load_pump_log(tmp_path)[-1]['since_drive'] == '20261116-123954-1907'
+  tank.record_pump(tmp_path, 8.8, '20261123-123558-8252', '20261116-123954-1907', now=0)   # a correction replaces it
+  assert [x['pump_gal'] for x in tank.load_pump_log(tmp_path)] == [8.8]
+  with pytest.raises(ValueError):
+    tank.record_pump(tmp_path, 87.57, 'x', None)
 
 
 def test_corrupt_tank_file_starts_unknown(tmp_path):
@@ -123,12 +164,23 @@ def test_recorder_counts_real_fuel_from_the_dash_and_carries_miles(tmp_path):
   assert store.load_flow(tmp_path)  # the power-flow records were saved with the drive
 
 
+def bd(level, connected=True):
+  return {'connected': connected, 'fuel_level': level, 'fuel_g': 0.0, 'drive': 'x'}
+
+
 def test_fill_up_resets_the_counter_without_bridging_fuel_across_it(tmp_path):
+  tank.save(tank.TankState(last_level=6.0, last_range_mi=60), tmp_path / 'tank.json')
   rec = Recorder(1450.0, 'drive', tmp_path)
   rec.observe_can(None, Cluster(45.0, 60))
   assert rec.fuel_gal is None  # miles since fill-up still unknown
-  rec.observe_can(None, Cluster(49.8, 491))  # range jumped: filled
-  assert rec.tank.miles_since_fill == 0.0 and rec.fuel_gal == pytest.approx(0.0)
+  rec.observe_can(None, Cluster(49.8, 491))  # range jumped: not a fill by itself
+  assert rec.tank.miles_since_fill is None
+  for _ in range(tank.LEVEL_WINDOW):
+    rec.observe_obd(bd(93.0, connected=False))   # a stale live file from before the BlueDriver links: ignored
+  assert rec.tank.fills_seen == 0
+  for _ in range(tank.LEVEL_WINDOW):
+    rec.observe_obd(bd(93.0))
+  assert rec.tank.miles_since_fill == 0.0 and rec.fuel_gal == pytest.approx(0.0) and rec.tank.fills_seen == 1
 
 
 def test_pulse_glide_phase_only_when_enabled():

@@ -126,7 +126,11 @@ def test_the_recorder_starts_the_new_tank_at_the_drive_the_fill_up_was_seen_in(t
   _drive(tmp_path, '20261110-080000-1', 'chill', 10, 0.20)
   save(_tank(10.0, fill_drive='20261110-080000-1'), tmp_path / 'tank.json')
   rec = Recorder(1500.0, None, tmp_path)
-  rec.observe_can(None, Cluster(avg_mpg=50.0, range_mi=520))   # range jumped from 380: a fill-up
+  rec.observe_can(None, Cluster(avg_mpg=50.0, range_mi=520))   # range jumped from 380: recorded, not a fill
+  assert rec.tank.fills_seen == 1
+  rec.tank.last_level = 8.0
+  for _ in range(15):
+    rec.observe_obd({'connected': True, 'fuel_level': 94.0, 'fuel_g': 0.0, 'drive': 'x'})   # the gauge jumped: a fill-up
   assert rec.tank.fills_seen == 2 and rec._fill_pending and rec.tank.fill_drive is None
   rec.save()
   assert rec.tank.fill_drive == rec.drive_id and load(tmp_path / 'tank.json').fill_drive == rec.drive_id

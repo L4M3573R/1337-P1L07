@@ -31,7 +31,8 @@ def pull(hosts: list[str], local: Path, key: str) -> str | None:
       for remote, name in (('/data/starpilot/bluedriver/health.json', 'health.json'),
                            ('/data/starpilot/efficiency/learner_ledger.json', 'learner_ledger.json'),
                            ('/data/starpilot/efficiency/tank_history.json', 'tank_history.json'),
-                           ('/data/starpilot/efficiency/experiment.json', 'experiment.json')):
+                           ('/data/starpilot/efficiency/experiment.json', 'experiment.json'),
+                           ('/data/starpilot/efficiency/pump_fills.json', 'pump_fills.json')):
         subprocess.run(['rsync', '-a', '--timeout=20', '-e', f'ssh -i {key} -o BatchMode=yes -o ConnectTimeout=6',
                         f'comma@{host}:{remote}', f'{local}/{name}'], capture_output=True, check=False)
       return host
@@ -95,6 +96,45 @@ def learner_ledger(local: Path, points: list) -> dict | None:
           'vs_you': {'matched_miles': round(c.matched_miles, 2), 'ready': c.ready, 'comma_saving': c.comma_saving}}
 
 
+def pump_tanks(local: Path) -> list[dict]:
+  """Real tank MPG from the receipt gallons (tank.py --pump-gal): every mile the comma logged from the fill that began
+  the tank up to the fill that ended it, over the pump gallons; who drove it; and how far the BlueDriver's own count
+  of the tank's fuel is from the pump (scaled to all the tank's miles; it reads low)."""
+  from openpilot.starpilot.efficiency.store import rescale
+  from openpilot.starpilot.efficiency.tank import load_pump_log
+  docs = []
+  for path in sorted((local / 'drives').glob('*.json')):
+    try:
+      docs.append((path.stem, rescale(json.loads(path.read_text()))))
+    except (OSError, ValueError, TypeError):
+      continue
+  out = []
+  for entry in load_pump_log(local):
+    since, filled, pump = entry.get('since_drive'), entry.get('filled_drive'), entry.get('pump_gal')
+    if not since or not filled or not isinstance(pump, (int, float)) or pump <= 0:
+      continue
+    meters = obd_gal = obd_m = comma_m = driver_m = 0.0
+    for name, doc in docs:
+      if since <= name < filled:
+        total = doc.get('total') or {}
+        meters += float(total.get('distance') or 0.0)
+        obd_gal += float(total.get('obd_fuel_gal') or 0.0)
+        obd_m += float(total.get('obd_distance') or 0.0)
+        for st in doc.get('stretches') or []:
+          if st.get('mode') == 'driver':
+            driver_m += float(st.get('m') or 0.0)
+          else:
+            comma_m += float(st.get('m') or 0.0)
+    miles = meters / 1609.344
+    bd_gal = obd_gal * meters / obd_m if obd_m > 0 else None
+    out.append({'since': since, 'filled': filled, 'pump_gal': pump, 'miles': round(miles, 1),
+                'mpg': round(miles / pump, 1) if miles > 0 else None,
+                'comma_share': round(comma_m / (comma_m + driver_m), 3) if comma_m + driver_m > 0 else None,
+                'bluedriver_gal': round(bd_gal, 2) if bd_gal else None,
+                'bluedriver_reads_low': round(1.0 - bd_gal / pump, 3) if bd_gal else None})
+  return out
+
+
 def summarize(local: Path, host: str | None, gas_price: float | None = None, tank_gal: float = trips.TANK_GAL) -> dict:
   points = trend.load_points(local)
   you, comma = [p.you_mpg for p in points], [p.comma_mpg for p in points]
@@ -127,6 +167,7 @@ def summarize(local: Path, host: str | None, gas_price: float | None = None, tan
                           for m in sorted({st.get('drive_mode') for d in all_drives for st in d if isinstance(st.get('drive_mode'), str)} - {'unknown'})}
   out['learner'] = learner.learn_stored(local)
   out['learner_ledger'] = learner_ledger(local, points)
+  out['pump_tanks'] = pump_tanks(local)
   try:
     out['health'] = json.loads((local / 'health.json').read_text())
   except (OSError, ValueError):
@@ -149,6 +190,9 @@ def main():
   n = len(out['drives'])
   print(f"pulled from {host or 'nowhere (using the last copy)'}: {n} drives with measured fuel")
   print('comparison:', out['comparison']['all'])
+  for tk in out['pump_tanks']:
+    print(f"tank {tk['since']} .. {tk['filled']}: {tk['miles']} mi / {tk['pump_gal']} gal = {tk['mpg']} mpg real, comma drove " +
+          f"{tk['comma_share']}, BlueDriver counted {tk['bluedriver_gal']} gal (reads low {tk['bluedriver_reads_low']})")
   print('current averages: you', out['you_avg'][-1] if n else None, '| comma', out['comma_avg'][-1] if n else None)
   print('\n'.join(learner.report_lines(out['learner'])))
   print('\n'.join(speed_curve.report_lines(out['speed_curve'])))

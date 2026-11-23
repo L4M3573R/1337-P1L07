@@ -71,6 +71,12 @@ class Recorder:
     self.obd_engine = None if not doc or not doc.get('connected') or rpm is None else rpm >= ENGINE_ON_RPM
     self.ambient_c = number('ambient', -40.0, 60.0)
     self.fuel_level = number('fuel_level', 0.0, 100.0)
+    if self.fuel_level is not None and doc.get('connected'):
+      before = replace(self.tank)
+      if self.tank.observe_level(self.fuel_level):
+        self.last_avg_mpg = None  # a fill-up: the dash average starts over
+        self.fuel_gal = 0.0 if self.tank.miles_since_fill is not None else None
+        self._filled(before)
     grams = doc.get('fuel_g') if doc else None
     if not doc or not doc.get('connected') or not isinstance(grams, (int, float)) or grams < 0:
       self.obd_fuel_gal, self._obd_prev = None, None
@@ -85,10 +91,7 @@ class Recorder:
     if flow is not None:
       self.flow = flow
     if cluster is not None:
-      before = replace(self.tank)
-      if self.tank.observe_range(cluster.range_mi):
-        self.last_avg_mpg = None  # a fill-up: the dash average starts over
-        self._filled(before)
+      self.tank.observe_range(cluster.range_mi)   # recorded only: the range jumps 50+ mi on its own (fills: tank.py)
       # Gallons so far = miles since the fill-up / dash average. The dash refreshes its average about
       # every 10 s; between refreshes this advances at the current average, and each refresh corrects it.
       self.last_avg_mpg = cluster.avg_mpg

@@ -70,7 +70,8 @@ def samples(files: list[Path], seed_miles: float | None = None):
           elif c.address == CLUSTER_ADDR:
             cluster = decode_cluster(bytes(c.dat))
             if cluster is not None:
-              tank.observe_range(cluster.range_mi)
+              if tank.observe_range(cluster.range_mi):   # logs carry no fuel gauge: the range jump is all there is
+                tank.fill()
               fuel = tank.gallons_used(cluster.avg_mpg)
       elif w == 'carState':
         cs = e.carState
