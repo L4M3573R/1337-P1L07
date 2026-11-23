@@ -1289,6 +1289,13 @@ class SelfdriveD:
       # Saturation is already ignored during override; retire its held presentation too.
       alerts = [alert for alert in alerts if alert.alert_type != 'steerSaturated/warning']
       self.AM.alerts.pop('steerSaturated/warning', None)
+    from openpilot.starpilot.audio.driver_steer_warning import ALERT_TYPE as STEER_TEMP_ALERT, DriverSteerWarning
+    if not hasattr(self, 'driver_steer_warning'):
+      self.driver_steer_warning = DriverSteerWarning()
+    if self.driver_steer_warning.hide(bool(getattr(CS, 'steeringPressed', False)), now_ns):
+      # The driver is steering (e.g. full lock in a lot): keep the fault event, drop its banner and chime.
+      alerts = [alert for alert in alerts if alert.alert_type != STEER_TEMP_ALERT]
+      self.AM.alerts.pop(STEER_TEMP_ALERT, None)
     from openpilot.starpilot.audio.departure_alert import protect_safety_alerts
     retained = ()
     if departure:

@@ -396,7 +396,9 @@ def test_hkg_steering_override_eps_then_brake_retains_only_valid_intent(profile,
         assert not retained and not card.aol_card_intent.allowed_latch
         break
       assert retained and card.aol_card_intent.allowed_latch
-      assert state.alertType == 'steerTempUnavailableSilent/warning'
+      # The fault event still carries the intent; its banner and chime stay hidden while the driver steers.
+      assert any(e.name == log.OnroadEvent.EventName.steerTempUnavailableSilent for e in sd.pm.messages['onroadEvents'].onroadEvents)
+      assert state.alertType != 'steerTempUnavailableSilent/warning'
       assert not state.enabled and not state.active
       assert axis.validUntilMonoTime - axis.observedMonoTime == 30_000_000
     if fault == 'none':
