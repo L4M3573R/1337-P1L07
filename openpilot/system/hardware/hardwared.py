@@ -33,6 +33,7 @@ from openpilot.system.hardware.power_monitoring import PowerMonitoring
 from openpilot.system.hardware.power_telemetry import PowerTelemetry
 from openpilot.system.hardware.hardware_timing import HardwareLoopTiming
 from openpilot.system.hardware.fan_controller import FanController
+from openpilot.system.hardware.wifi_watchdog import WifiWatchdog
 from openpilot.starpilot.power.cpu_boost import CONFIG_NAME as CPU_BOOST_CONFIG, CpuBoost
 from openpilot.system.hardware.chestnut.monitoring import chestnut_state_thread
 from openpilot.system.hardware.chestnut.status import ChestnutStatus
@@ -191,6 +192,7 @@ def hw_state_thread(end_event, hw_queue):
   count = 0
   prev_hw_state = None
   prev_usb_topology = set()
+  wifi_watchdog = WifiWatchdog() if COMMA_HARDWARE else None
 
   while not end_event.is_set():
     usb_topology = get_usb_topology()
@@ -224,6 +226,8 @@ def hw_state_thread(end_event, hw_queue):
           pass
 
         prev_hw_state = hw_state
+        if wifi_watchdog is not None:
+          wifi_watchdog.update(hw_state.network_type, hw_state.network_strength, time.monotonic())
       except Exception:
         cloudlog.exception("Error getting hardware state")
 
