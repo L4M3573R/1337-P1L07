@@ -31,7 +31,7 @@ def test_not_enough_miles_keeps_collecting():
 def test_a_tiny_or_noisy_difference_is_not_a_winner():
   rng = random.Random(5)
   drives = [steady_drive(rng, 30, 'follow|30-45|normal', 0.030) + steady_drive(rng, 30, 'follow|30-45|smooth', 0.0297)]
-  r = el.judge(el.samples(drives))['follow|30-45']
+  r = el.judge(el.samples(drives))['follow|all']
   assert r['winner'] in (None, 'normal')
 
 
@@ -118,8 +118,8 @@ def test_summer_runs_are_never_weighed_against_winter_ones(tmp_path):
   import os
   os.utime(tmp_path / 'drives' / 'a_summer.json', (1, 1))   # older
   doc = el.update(tmp_path)
-  assert doc['season'] == 'cold' and doc['winners'].get('hold|45-60') == 'normal'
-  assert doc['results']['hold|45-60']['measured']['flat'] == round(20 * 400 / 1609.344, 2)   # the winter miles only, not summer's too
+  assert doc['season'] == 'cold' and doc['winners'].get('hold|all') == 'normal'
+  assert doc['results']['hold|all']['measured']['flat'] == round(20 * 400 / 1609.344, 2)   # the winter miles only, not summer's too
   assert el.season_of(9.9) == 'cold' and el.season_of(15.0) == 'mild' and el.season_of(25.0) == 'warm' and el.season_of(None) is None
 
 
@@ -138,7 +138,7 @@ def test_a_variant_driven_on_straighter_roads_is_not_flattered():
 def test_time_free_savings_are_always_taken():
   rng = random.Random(13)
   drive = tagged('hold|60+|normal', runs(rng, 20, 0.040)) + tagged('hold|60+|flat', runs(rng, 20, 0.036))   # same time
-  r = el.judge(el.samples([drive]), situation_miles_per_hour={'hold|60+': 30.0}, budget_min_per_hr=0.0)['hold|60+']
+  r = el.judge(el.samples([drive]), situation_miles_per_hour={'hold|all': 30.0}, budget_min_per_hr=0.0)['hold|all']
   assert r['winner'] == 'flat' and 'no extra time' in r['status']
 
 
@@ -212,13 +212,13 @@ def test_stretches_from_before_the_climate_band_keep_their_curve_class():
 
 
 def test_fuel_from_outside_the_tests_speed_band_is_not_counted():
-  # stored before tests ended on leaving their band: a "60+" follow stretch driven at 56 mph belongs to 45-60
+  # stored before tests ended on leaving their band: a "60+" uphill stretch driven at 56 mph belongs to 45-60
   mph = 0.44704
-  inside = dict(stretch('follow|60+|a0.90', 0.004), v0=66 * mph, v1=68 * mph)
-  edge = dict(stretch('follow|60+|a0.90', 0.004), v0=59 * mph, v1=59 * mph)       # within the 1.5 mph margin
-  slowed = dict(stretch('follow|60+|a0.90', 0.004), v0=57 * mph, v1=55 * mph)
-  untimed = stretch('follow|60+|a0.90', 0.004)                                    # older stretches without speeds stay
+  inside = dict(stretch('uphill|60+|sag3', 0.004), v0=66 * mph, v1=68 * mph)
+  edge = dict(stretch('uphill|60+|sag3', 0.004), v0=59 * mph, v1=59 * mph)       # within the 1.5 mph margin
+  slowed = dict(stretch('uphill|60+|sag3', 0.004), v0=57 * mph, v1=55 * mph)
+  untimed = stretch('uphill|60+|sag3', 0.004)                                    # older stretches without speeds stay
   launch = dict(stretch('launch|launch|gentle', 0.004), v0=0.0, v1=9.0)          # not keyed by its own speed
   data = el.samples([[inside, edge, slowed, untimed]])
-  assert len(data[('follow', '60+', 'a0.90')]) == 3
+  assert len(data[('uphill', '60+', 'sag3')]) == 3
   assert not el._stretch_outside_band('launch', 'launch', launch)

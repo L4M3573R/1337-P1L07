@@ -18,7 +18,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from openpilot.starpilot.efficiency import compare, experiment_learn, learner, speed_curve, trend, trips
+from openpilot.starpilot.efficiency import coolant_backfill, compare, experiment_learn, learner, levers, speed_curve, trend, trips
 
 
 def pull(hosts: list[str], local: Path, key: str) -> str | None:
@@ -28,6 +28,10 @@ def pull(hosts: list[str], local: Path, key: str) -> str | None:
                         f'comma@{host}:/data/starpilot/efficiency/drives/', f'{local}/drives/'], capture_output=True, text=True,
                        check=False)
     if r.returncode == 0:
+      (local / 'bluedriver').mkdir(exist_ok=True)
+      subprocess.run(['rsync', '-a', '--timeout=60', '-e', f'ssh -i {key} -o BatchMode=yes -o ConnectTimeout=6',
+                      f'comma@{host}:/data/starpilot/bluedriver/drives/', f'{local}/bluedriver/'], capture_output=True,
+                     check=False)
       for remote, name in (('/data/starpilot/bluedriver/health.json', 'health.json'),
                            ('/data/starpilot/efficiency/learner_ledger.json', 'learner_ledger.json'),
                            ('/data/starpilot/efficiency/tank_history.json', 'tank_history.json'),
@@ -83,7 +87,7 @@ def learner_ledger(local: Path, points: list) -> dict | None:
     except OSError:
       continue
   contexts: dict[tuple, Totals] = {}
-  for drive, _, by_key in load_drives(local):
+  for drive, _, by_key in load_drives(local, warm_only=True):
     for key, t in by_key.items():
       parts = tuple(key.split(KEY_SEPARATOR))
       who = parts[4] if len(parts) > 4 else ''
@@ -149,7 +153,7 @@ def summarize(local: Path, host: str | None, gas_price: float | None = None, tan
                        ('pulse-glide', ('pulse-glide',))):
     c = compare.stored_comparison(local, modes)
     out['comparison'][label] = {'matched_miles': round(c.matched_miles, 2), 'contexts': c.contexts, 'ready': c.ready,
-                                'comma_saving': c.comma_saving}
+                                'comma_saving': c.comma_saving, 'fuel_only_saving': c.fuel_saving}
   drives = stored_drives(local)
   records = [r for _, rs in drives for r in rs]
   out['trips'] = [{'date': time.strftime('%m-%d %H:%M', time.localtime(t)), **trips.drive_summary(t, rs, gas_price)}
@@ -168,6 +172,7 @@ def summarize(local: Path, host: str | None, gas_price: float | None = None, tan
   out['learner'] = learner.learn_stored(local)
   out['learner_ledger'] = learner_ledger(local, points)
   out['pump_tanks'] = pump_tanks(local)
+  out['levers'] = levers.report(local)
   try:
     out['health'] = json.loads((local / 'health.json').read_text())
   except (OSError, ValueError):
@@ -185,6 +190,9 @@ def main():
   parser.add_argument('--tank-gal', type=float, default=trips.TANK_GAL)
   args = parser.parse_args()
   host = pull(args.host, args.data, args.key) if args.host else None
+  filled = coolant_backfill.backfill(args.data / 'drives', args.data / 'bluedriver')
+  if filled:
+    print(f'engine temperature filled in from the BlueDriver logs on {filled} older drives')
   out = summarize(args.data, host, args.gas_price, args.tank_gal)
   args.out.write_text(json.dumps(out, indent=1))
   n = len(out['drives'])
@@ -197,6 +205,7 @@ def main():
   print('\n'.join(learner.report_lines(out['learner'])))
   print('\n'.join(speed_curve.report_lines(out['speed_curve'])))
   print('\n'.join(speed_curve.condition_lines(out['speed_conditions'])))
+  print('\n'.join(levers.report_lines(out['levers'])))
 
 
 if __name__ == '__main__':

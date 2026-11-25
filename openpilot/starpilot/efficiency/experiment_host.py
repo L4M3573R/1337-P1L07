@@ -199,7 +199,9 @@ class ExperimentHost:
       frame = Frame(now, v_ego, float(cs.vCruise) * KPH_TO_MS, bool(cc.longActive and cc.enabled), bool(cs.gasPressed),
                     bool(cs.brakePressed), bool(cs.standstill), grade, gap, stop_ahead, self.soc, self.driver_pulse_glide,
                     float(cs.aEgo), bool(cs.leftBlinker or cs.rightBlinker),
-                    stop_distance_m=stop_distance(stop_distance_m, lead), engine_warm=self.engine_warm)
+                    stop_distance_m=stop_distance(stop_distance_m, lead), engine_warm=self.engine_warm,
+                    lead_d_m=float(lead.dRel) if lead.present and math.isfinite(lead.dRel) else math.inf,
+                    lead_v=float(lead.vLead) if lead.present and math.isfinite(lead.vLead) else None)
       plan = self.exp.sample(frame)
       if self.shadow is not None:
         shadow_plan = self.shadow.sample(frame)   # decides and logs only; its vetoes and time are never saved

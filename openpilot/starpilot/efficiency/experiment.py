@@ -54,16 +54,37 @@ ACCEL_VARIANTS = {'gentle': 0.75, 'moderate': 0.9}
 NORMAL_ACCEL_BP = (0.0, 10.0, 25.0, 40.0)   # m/s: the planner's A_CRUISE_MAX table
 NORMAL_ACCEL_V = (1.6, 1.2, 0.8, 0.6)
 VETO_LIMIT = 2                 # the driver pressed the gas during a slower variant this many times: never offer it there
-SLOWER_VARIANTS = {'gentle', 'moderate', 'smooth', 'sag3', 'under2', 'under4', 'flat', 'regen'}
+SLOWER_VARIANTS = {'gentle', 'moderate', 'smooth', 'sag3', 'under2', 'under4', 'flat', 'regen', 'lift'}
 ACCELERATE_GAP_MPS = 3 * MPH   # the set speed this far above the car's speed: an "accelerate" episode...
 ACCELERATE_MIN_ACCEL = 0.1     # ...once the car is actually speeding up (not still slowing behind a car or into a turn)
 FOLLOW_SMOOTH_ACCEL = 0.6
 EV_GENTLE_ACCEL = 0.3
 STOP_REGEN_DECEL = 1.0         # m/s2 of braking the hybrid can still put back into the battery at speed (~30 kW, energy.py)
-STOP_ENTER_DECEL = 0.5         # a stop episode starts once stopping needs this much (the regen rate is getting close)
+STOP_ENTER_DECEL = 0.3         # a stop episode starts once stopping needs this much: early enough to coast into it
+                               # (0.5 until 2026-11-25: the slowest stop setting then could only start braking late)
 STOP_MAX_DECEL = 1.6           # a stop first seen needing more than this is no experiment: it brakes as it must
 STOP_MIN_MPS = 6.0
 STOP_GAP_M = 6.0               # a stopped car ahead: the stop is this far behind it (the planner's standstill gap)
+# A gas press counts against a slower setting only while that setting was holding the car back (within this long
+# before the press): its lower target kept the car under the set speed, its acceleration cap was what the car was
+# accelerating at, its glide had the car under the set speed, or its stop slowdown was asking the car to slow.
+# 2026-11-23 17:31: a stopped "car" the radar saw 107 m out that was not there made the planner brake; the driver
+# pressed on, and the gentle stop setting in force (not even braking yet) was blocked for good. Every gentler stop,
+# speed-up and following setting ended up blocked by presses like that, and the learner never moved (2026-11-25).
+VETO_WINDOW_S = 1.0
+LIMIT_SPEED_MARGIN_MPS = 0.5 * MPH
+LIMIT_ACCEL_MARGIN = 0.15      # m/s^2: the car accelerating within this of the cap means the cap is what holds it
+# Situations whose setting is learned once for every speed (2026-11-25): split four ways by speed band, none of them
+# collected enough driving in a week to judge a single setting.
+POOLED = ('accelerate', 'follow', 'hold', 'stop', 'approach')
+POOLED_CONTEXT = 'all'
+# Closing on a slower car ahead ('approach'): lift off and coast early instead of holding speed and braking late.
+APPROACH_MIN_CLOSING_MPS = 2.0   # closing at least this fast on a moving car...
+APPROACH_END_CLOSING_MPS = 0.5   # ...until the speeds about match
+APPROACH_MAX_D_M = 150.0
+APPROACH_TARGET_GAP_S = 1.8      # where the planner settles behind it (time gap plus the standstill gap)
+APPROACH_TARGET_GAP_M = 6.0
+APPROACH_LIFT_S = 8.0            # the fixed 'lift' variant: coast once catching up would take less than this
 HOLD_BAND_MPH = 2.0            # 'flat': hold the throttle (no acceleration) until this far under the set speed (the driver's allowance)
 # 1337 (2026-11-20 drive, 21:05:33): a hold switched the throttle cap 0 <-> off right at the dip edge, so a car riding
 # the edge got 0 / +0.46 m/s^2 two or three times a second ("gas gas gas"). Once the dip is used the hold now climbs
@@ -86,10 +107,11 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
   'cruise': ('set', 'under2', 'under4'),
   'hold': ('normal', 'flat'),   # level cruising: correct small speed losses (normal) or hold the pedal flat
   'stop': ('normal', 'regen'),  # a stop ahead: the planner's own stop, or one steady regen-rate slowdown from first sight
+  'approach': ('normal', 'lift'),  # closing on a slower car: hold speed and brake late, or lift off and coast early
 }
 COSTS_TIME = {('launch', 'gentle'), ('launch', 'moderate'), ('accelerate', 'gentle'), ('accelerate', 'moderate'),
               ('uphill', 'sag3'), ('pulse_glide', 'pg'), ('cruise', 'under2'), ('cruise', 'under4'), ('hold', 'flat'),
-              ('stop', 'regen')}
+              ('stop', 'regen'), ('approach', 'lift')}
 UNDER_MPH = {'sag3': 3.0, 'under2': 2.0, 'under4': 4.0}
 
 
@@ -106,6 +128,18 @@ def normal_accel(v: float) -> float:
 
 def band(v: float) -> str:
   return next(name for top, name in SPEED_BANDS if v < top)
+
+
+def context_of(category: str, v: float) -> str:
+  """The situation's context: one for every speed (POOLED), else the speed band."""
+  return POOLED_CONTEXT if category in POOLED else band(v)
+
+
+def coast_accel(v: float, grade: float | None) -> float:
+  """Lifting off: the car's natural coasting deceleration at v on this grade (light regen on the Elantra)."""
+  from openpilot.starpilot.controllers.coast import G, regen_glide_accel
+  g = grade if type(grade) in (int, float) and math.isfinite(grade) else 0.0
+  return regen_glide_accel(v) - G * g / math.sqrt(1.0 + g * g)
 
 
 # A test is learned for one speed band, so it ends once the car has left that band (traffic slowed, the road opened up):
@@ -155,6 +189,8 @@ class Frame:
   blinker: bool = False         # a turn signal is on: a turn or lane change is coming, no experiment
   stop_distance_m: float | None = None  # metres to a stop ahead (Force Stop's line, or behind a stopped car)
   engine_warm: bool = True      # the engine can stop by itself: Pulse and Glide and electric-only need it (host: coolant)
+  lead_d_m: float = math.inf    # metres to the car ahead
+  lead_v: float | None = None   # its speed, m/s
 
 
 @dataclass(frozen=True)
@@ -232,16 +268,26 @@ def read_tag(now: float, path: Path = STATUS_PATH) -> str | None:
   return None
 
 
-VETO_EPOCH = 2  # vetoes saved under an older epoch are ignored once: 2 (2026-11-15) after the variants were redefined
+VETO_EPOCH = 3  # vetoes saved under an older epoch are ignored once: 2 (2026-11-15) after the variants were redefined;
+                # 3 (2026-11-25) after a press had to hold the setting back to count: of epoch 2 only the set-speed-down
+                # vetoes of faster settings are kept (those never depended on the press rule)
 
 
 def load_vetoes(path: Path | None) -> dict[str, int]:
   """{'category|context|variant': times the driver pressed on during it} across drives (this VETO_EPOCH only)."""
   try:
     doc = json.loads(path.read_text()) if path is not None else {}
-    if doc.get('epoch') != VETO_EPOCH:
-      return {}
-    return {k: int(v) for k, v in doc.get('vetoes', {}).items() if isinstance(k, str) and k.count('|') == 2}
+    vetoes = {k: int(v) for k, v in doc.get('vetoes', {}).items() if isinstance(k, str) and k.count('|') == 2}
+    if doc.get('epoch') == VETO_EPOCH:
+      return vetoes
+    if doc.get('epoch') == 2:
+      from openpilot.starpilot.efficiency.dials import decode, faster_than_normal
+      def too_fast(key: str) -> bool:
+        category, _, variant = key.split('|')
+        values = decode(category, variant)
+        return values is not None and faster_than_normal(category, values)
+      return {k: v for k, v in vetoes.items() if too_fast(k)}
+    return {}
   except (OSError, ValueError, TypeError, AttributeError):
     return {}
 
@@ -280,6 +326,7 @@ class Experimenter:
   spent_s: float = 0.0           # estimated extra trip time from experiments this drive
   offset_mps: float = 0.0        # applied speed offset (negative: under the set speed), ramped
   stop_decel: float = STOP_REGEN_DECEL  # the steady slowdown a 'regen' stop holds (the gentlest that still makes it)
+  limiting_t: float | None = None   # last time the setting in force was holding the car back (see VETO_WINDOW_S)
   episodes: int = 0
   last_t: float | None = None
   was_standstill: bool = False
@@ -343,7 +390,7 @@ class Experimenter:
     need = self._stop_decel_needed(f)
     if need is None or f.v_ego < STOP_MIN_MPS or not STOP_ENTER_DECEL <= need <= STOP_MAX_DECEL:
       return None
-    return 'stop', band(f.v_ego)
+    return 'stop', context_of('stop', f.v_ego)
 
   def _own_target(self, f: Frame) -> float:
     """The speed the car is actually being asked for: the set speed less what an experiment is still taking off it
@@ -361,6 +408,8 @@ class Experimenter:
       return False
     if ep.category == 'accelerate':
       return self._own_target(f) - f.v_ego > 1.0
+    if ep.category == 'approach':
+      return self._approaching(f, APPROACH_END_CLOSING_MPS)
     if outside_band(ep.category, ep.context, f.v_ego):
       return False   # even inside the minimum length: a short test is dropped, a mislabelled one would mislead
     dwell = f.t - ep.start_t < MIN_EPISODE_S
@@ -380,10 +429,12 @@ class Experimenter:
       return 'launch', 'launch'
     if f.standstill:
       return None
+    if f.v_ego > 5.0 and self._approaching(f, APPROACH_MIN_CLOSING_MPS):
+      return 'approach', context_of('approach', f.v_ego)
     if f.lead_gap_s < FOLLOW_GAP_S and f.v_ego > 5.0:
-      return 'follow', band(f.v_ego)
+      return 'follow', context_of('follow', f.v_ego)
     if f.v_ego > 5.0 and f.a_ego > ACCELERATE_MIN_ACCEL and self._own_target(f) - f.v_ego > ACCELERATE_GAP_MPS:
-      return 'accelerate', band(f.v_set)   # learned per target speed
+      return 'accelerate', context_of('accelerate', f.v_set)
     if f.v_ego >= CRUISE_MIN_MPS and f.grade is not None and f.grade > GRADE_ENTER:
       return 'uphill', band(f.v_ego)
     if f.v_ego >= CRUISE_MIN_MPS and f.grade is not None and f.grade < -GRADE_ENTER:
@@ -395,7 +446,7 @@ class Experimenter:
       if not f.pulse_glide_by_driver and f.v_ego < self.pulse_glide_max_mps and f.engine_warm:
         options.append(('pulse_glide', band(f.v_ego)))
       options.append(('cruise', band(f.v_ego)))
-      options.append(('hold', band(f.v_ego)))
+      options.append(('hold', context_of('hold', f.v_ego)))
     if self._ev_ok(f) and f.engine_warm:
       options.append(('ev', 'ev'))
     if not options:
@@ -433,7 +484,7 @@ class Experimenter:
     self.last_t = f.t
     self.frame = f
     ep = self.episode
-    if f.gas and ep is not None and self._is_slower(ep) and self.vetoed_episode != ep.number:
+    if f.gas and ep is not None and self._is_slower(ep) and self.vetoed_episode != ep.number and self._veto_counts(ep, f):
       # the driver pressed on during a slower variant: it was not acceptable here
       self.vetoed_episode = ep.number
       key = ep.tag()
@@ -455,6 +506,7 @@ class Experimenter:
         variant = self.draw(*where)
         self.episodes += 1
         self.episode = ep = Episode(where[0], where[1], variant, f.t, self.distance_m, self.episodes)
+        self.limiting_t = None
         key = ep.tag()
         self.tried[key] = self.tried.get(key, 0) + 1
         self._started(ep, f)
@@ -463,6 +515,33 @@ class Experimenter:
 
   def _vetoed(self, ep: Episode) -> None:
     """Hook: the driver pressed on during this slower episode (its veto is already counted)."""
+
+  def _veto_counts(self, ep: Episode, f: Frame) -> bool:
+    """A gas press is held against the setting only if that setting was holding the car back just then: a press while
+    the planner brakes on its own (a phantom stop), behind a car, or to pass says nothing about the setting."""
+    return self.limiting_t is not None and f.t - self.limiting_t <= VETO_WINDOW_S
+
+  def _note_limiting(self, f: Frame, ceiling: float | None, accel_max: float | None, pulse_glide: bool | None) -> None:
+    if self.episode is None or not f.long_active:
+      return
+    under_set = f.v_ego < f.v_set - LIMIT_SPEED_MARGIN_MPS
+    held = ceiling is not None and ceiling < f.v_set - 0.1 and f.v_ego > ceiling - LIMIT_SPEED_MARGIN_MPS
+    capped = accel_max is not None and f.a_ego > accel_max - LIMIT_ACCEL_MARGIN and (under_set or accel_max < 0.0)
+    if held or capped or (bool(pulse_glide) and under_set):
+      self.limiting_t = f.t
+
+  def _closing_s(self, f: Frame) -> float:
+    """Seconds until the car would reach where it settles behind a slower car ahead at today's closing speed."""
+    if f.lead_v is None or not math.isfinite(f.lead_d_m):
+      return math.inf
+    closing = f.v_ego - f.lead_v
+    if closing <= 0.1:
+      return math.inf
+    return max(f.lead_d_m - (APPROACH_TARGET_GAP_S * f.lead_v + APPROACH_TARGET_GAP_M), 0.0) / closing
+
+  def _approaching(self, f: Frame, closing_min: float) -> bool:
+    return (f.lead_v is not None and f.lead_v > 1.0 and f.lead_d_m < APPROACH_MAX_D_M and
+            f.v_ego - f.lead_v > closing_min and f.lead_gap_s >= FOLLOW_GAP_S)
 
   def _is_slower(self, ep: Episode) -> bool:
     """The episode drives slower than normal (a gas press during it counts as the driver's veto)."""
@@ -493,6 +572,9 @@ class Experimenter:
         accel_max = FOLLOW_SMOOTH_ACCEL
       elif ep.category == 'ev' and v == 'gentle':
         accel_max = EV_GENTLE_ACCEL
+      elif ep.category == 'approach' and v == 'lift' and self._closing_s(f) < APPROACH_LIFT_S:
+        accel_max = coast_accel(f.v_ego, f.grade)
+        self.spent_s += dt * self._lift_cost(f)
       elif ep.category == 'hold' and v == 'flat':
         # the pedal stays where it is: speed may sag, braking and slowing stay the planner's
         accel_max = self._hold_throttle(f.v_set - f.v_ego, HOLD_BAND_MPH * MPH, dt,
@@ -520,8 +602,15 @@ class Experimenter:
       ceiling = stop_ceiling if ceiling is None else min(ceiling, stop_ceiling)
       if stop_ceiling < f.v_ego:
         self.spent_s += dt * min(1.0, f.v_ego / max(stop_ceiling, 1.0) - 1.0)   # slowing earlier than the planner would
+        self.limiting_t = f.t
     bonus = self.offset_mps if self.offset_mps > 0 else 0.0
+    self._note_limiting(f, ceiling, accel_max, pulse_glide)
     return Plan(ceiling, bonus, accel_max, pulse_glide, ep.tag() if ep is not None else None)
+
+  @staticmethod
+  def _lift_cost(f: Frame) -> float:
+    """Extra seconds per second of coasting early behind a slower car: about half the closing speed is given up."""
+    return 0.5 * max(f.v_ego - (f.lead_v or f.v_ego), 0.0) / max(f.v_ego, 1.0)
 
   def status(self) -> dict:
     ep = self.episode
@@ -658,7 +747,10 @@ class DialExperimenter(Experimenter):
       self._hold_throttle(0.0, 0.0, dt, False)
     if values is not None:
       eff = effect(ep.category, values, v_ego=f.v_ego, v_target=f.v_set, normal=normal_accel(f.v_ego),
-                   below_target_mps=own_target - f.v_ego, climbing=self.hold_climbing)
+                   below_target_mps=own_target - f.v_ego, climbing=self.hold_climbing,
+                   closing_s=self._closing_s(f), coast=coast_accel(f.v_ego, f.grade))
+      if ep.category == 'approach' and eff.accel_max is not None and f.long_active:
+        self.spent_s += dt * self._lift_cost(f)
     step = RAMP_MPS2 * dt
     self.offset_mps = min(max(eff.target_offset_mps, self.offset_mps - step), self.offset_mps + step)
     if f.gas or f.brake or not f.long_active:
@@ -671,6 +763,7 @@ class DialExperimenter(Experimenter):
       ceiling = stop_ceiling if ceiling is None else min(ceiling, stop_ceiling)
       if stop_ceiling < f.v_ego:
         self.spent_s += dt * min(1.0, f.v_ego / max(stop_ceiling, 1.0) - 1.0)   # slowing earlier than the planner would
+        self.limiting_t = f.t
     bonus = self.offset_mps if self.offset_mps > 0 else 0.0
     pulse_glide = tuning = None
     if ep is not None and ep.category == 'pulse_glide' and not f.pulse_glide_by_driver and values is not None:
@@ -679,4 +772,5 @@ class DialExperimenter(Experimenter):
     accel_max = eff.accel_max
     if hold_cap is not None:
       accel_max = hold_cap if accel_max is None else min(accel_max, hold_cap)
+    self._note_limiting(f, ceiling, accel_max, pulse_glide)
     return Plan(ceiling, bonus, accel_max, pulse_glide, ep.tag() if ep is not None else None, tuning)

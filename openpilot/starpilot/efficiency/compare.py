@@ -7,6 +7,13 @@ is taken, and the comma's rate is applied to the driver's miles there. Summed ov
 answers: "driving the same kind of roads you drove, how much fuel would the comma have used?"
 Contexts only one side drove are left out, so highway-versus-city mixes cannot skew the result.
 
+The hybrid battery is settled per side over all of its driving, not context by context (2026-11-25): the battery is
+shared, so charge one side builds in one context (a downhill, a cold start) is spent in another, and matching only some
+contexts charged the comma for every drain while its recharging stayed outside the match (chill read 11% worse on fuel
+it actually burned 2.6% less of). Each side's battery change per mile over everything it drove is priced in fuel on the
+matched miles. Cold-engine driving (store.cold_stretches) is left out entirely: the driver always drives the warm-up,
+when the engine runs for heat and charges the battery whoever drives.
+
 The settings tile (tank_headline) compares per tank: the driver's numbers keep averaging over every stored drive, while
 the comma's count only since the last fill-up, so each tank grades how the comma drives now (its fuel experiments keep
 changing it) against the driver's steady baseline. Each finished tank's result is kept in tank_history.json.
@@ -18,7 +25,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from openpilot.starpilot.efficiency.ledger import Totals
+from openpilot.starpilot.efficiency.ledger import BATTERY_KWH, GAL_PER_BATTERY_KWH, Totals
 
 METERS_PER_MILE = 1609.344
 COMMA_MODES = ('chill', 'experimental', 'pulse-glide')
@@ -27,6 +34,7 @@ MIN_MATCHED_MILES = 5.0  # before a result is shown
 TANK_MATCH_SLACK_MI = 0.5  # walking back over drives to the fill-up: within this of the tank's miles is close enough
 TANK_HISTORY = 'tank_history.json'
 MAX_TANK_HISTORY = 200
+GAL_PER_SOC_POINT = BATTERY_KWH * GAL_PER_BATTERY_KWH / 100.0
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,8 @@ class Comparison:
   driver_gal: float  # fuel the driver used on those miles (battery-adjusted)
   comma_gal: float  # fuel the comma would have used on the same miles at its own rates
   comma_miles: float = 0.0  # the comma's own miles in those contexts
+  driver_fuel_gal: float = 0.0  # the same, measured fuel only (before the battery is priced in)
+  comma_fuel_gal: float = 0.0
 
   @property
   def ready(self) -> bool:
@@ -46,42 +56,56 @@ class Comparison:
     """Fraction of fuel the comma saves versus the driver (negative: it uses more)."""
     return 1.0 - self.comma_gal / self.driver_gal if self.ready else None
 
+  @property
+  def fuel_saving(self) -> float | None:
+    """The same on measured fuel alone, battery left out."""
+    return 1.0 - self.comma_fuel_gal / self.driver_fuel_gal if self.ready and self.driver_fuel_gal > 0 else None
 
-def _adjusted_gal_per_mile(t: Totals) -> float | None:
+
+def _gal_per_mile(t: Totals) -> float | None:
   miles = t.obd_distance / METERS_PER_MILE
-  fuel = t.obd_fuel_adjusted_gal
-  return fuel / miles if miles > 0 and fuel > 0 else None
+  return t.obd_fuel_gal / miles if miles > 0 and t.obd_fuel_gal > 0 else None
 
 
 def compare(by_context: dict[tuple, Totals], modes: tuple[str, ...] = COMMA_MODES) -> Comparison:
   """by_context: (speed, grade, curves, traffic, who, drive mode) -> Totals, as summarize() or the stored ledger gives."""
   sides: dict[tuple, dict[str, Totals]] = {}
+  battery = {'driver': Totals(), 'comma': Totals()}   # everything each side drove, for its battery change per mile
   for key, t in by_context.items():
     side = 'driver' if key[4] == 'driver' else 'comma' if key[4] in modes else None
     if side is not None:
       match = tuple(key[:4]) + (key[5] if len(key) > 5 else 'unknown',)  # older drive files have no drive mode
       sides.setdefault(match, {}).setdefault(side, Totals()).add_totals(t)
-  matched = driver_gal = comma_gal = comma_matched = 0.0
+      battery[side].add_totals(t)
+  matched = driver_fuel = comma_fuel = comma_matched = 0.0
   contexts = 0
   for pair in sides.values():
     driver, comma = pair.get('driver'), pair.get('comma')
     if driver is None or comma is None:
       continue
     d_miles, c_miles = driver.obd_distance / METERS_PER_MILE, comma.obd_distance / METERS_PER_MILE
-    d_rate, c_rate = _adjusted_gal_per_mile(driver), _adjusted_gal_per_mile(comma)
+    d_rate, c_rate = _gal_per_mile(driver), _gal_per_mile(comma)
     if d_miles < MIN_MILES_EACH or c_miles < MIN_MILES_EACH or d_rate is None or c_rate is None:
       continue
     matched += d_miles
     comma_matched += c_miles
-    driver_gal += d_rate * d_miles
-    comma_gal += c_rate * d_miles
+    driver_fuel += d_rate * d_miles
+    comma_fuel += c_rate * d_miles
     contexts += 1
-  return Comparison(matched, contexts, driver_gal, comma_gal, comma_matched)
+
+  def charge_gal(side: str) -> float:
+    """The side's battery change per mile over all its driving, as fuel on the matched miles (charged: a credit)."""
+    t = battery[side]
+    miles = t.obd_distance / METERS_PER_MILE
+    return t.obd_soc_delta / miles * matched * GAL_PER_SOC_POINT if miles > 0 else 0.0
+
+  return Comparison(matched, contexts, driver_fuel - charge_gal('driver'), comma_fuel - charge_gal('comma'), comma_matched,
+                    driver_fuel, comma_fuel)
 
 
 def stored_comparison(root=None, modes: tuple[str, ...] = COMMA_MODES) -> Comparison:
   from openpilot.starpilot.efficiency.store import KEY_SEPARATOR, load_totals
-  _, contexts, _ = load_totals(root)
+  _, contexts, _ = load_totals(root, warm_only=True)
   return compare({tuple(k.split(KEY_SEPARATOR)): v for k, v in contexts.items()}, modes)
 
 
@@ -113,7 +137,7 @@ def tank_comparison(root=None, tank=None, modes: tuple[str, ...] = COMMA_MODES) 
   """Every stored drive for the driver, only the current tank's drives for the comma."""
   from openpilot.starpilot.efficiency.ledger import Totals
   from openpilot.starpilot.efficiency.store import KEY_SEPARATOR, load_drives
-  drives = load_drives(root)
+  drives = load_drives(root, warm_only=True)
   window = tank_drives(drives, tank)
   contexts: dict[tuple, Totals] = {}
   for drive, _, by_key in drives:

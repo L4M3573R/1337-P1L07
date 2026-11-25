@@ -1,4 +1,5 @@
 """Self-tuning fuel dials: settings that move on their own toward what saves fuel, inside the driver's limits."""
+from itertools import pairwise
 import random
 
 import pytest
@@ -188,10 +189,11 @@ def test_the_state_survives_the_file_and_a_new_epoch_starts_over(tmp_path):
   path = tmp_path / 'experiments.json'
   import json
   sit = dl.Situation({'d': 1.0, 'k': 0.75}, {'d': 0.5, 'k': 0.25}, 0.4, 2)
-  path.write_text(json.dumps({'dials': dl.state_doc({'hold|60+': sit})}))
+  path.write_text(json.dumps({'dials': dl.state_doc({'hold|all': sit, 'hold|60+': sit})}))
   loaded = dl.load_state(path)
-  assert loaded['hold|60+'].center == sit.center and loaded['hold|60+'].step == sit.step and loaded['hold|60+'].moves == 2
-  path.write_text(json.dumps({'dials': {'_epoch': 0, 'hold|60+': sit.as_doc()}}))
+  assert loaded['hold|all'].center == sit.center and loaded['hold|all'].step == sit.step and loaded['hold|all'].moves == 2
+  assert 'hold|60+' not in loaded   # a per-band state from before the pooling
+  path.write_text(json.dumps({'dials': {'_epoch': 0, 'hold|all': sit.as_doc()}}))
   assert dl.load_state(path) == {}
 
 
@@ -241,8 +243,8 @@ def test_with_two_winners_the_better_fuel_per_minute_is_taken():
   # hold: a deeper dip saves a bit more fuel but costs much more time; the gentler recovery saves less, for no time
   data = _data(random.Random(15), 'd0.00k1.00', {'d1.00k1.00': (0.0360, 56.5), 'd0.00k0.75': (0.0372, 55.0)},
                category='hold')
-  state, report = el.judge_dials(data, {}, {}, situation_miles_per_hour={'hold|60+': 40.0})
-  assert state['hold|60+'].center == {'d': 0.0, 'k': 0.75} and 'no extra time' in report['hold|60+']['status']
+  state, report = el.judge_dials(data, {}, {}, situation_miles_per_hour={'hold|all': 40.0})
+  assert state['hold|all'].center == {'d': 0.0, 'k': 0.75} and 'no extra time' in report['hold|all']['status']
 
 
 # ---------- review 2026-11-17: a veto is a bound, the budget carries over, the evidence spans drives ----------
@@ -343,9 +345,9 @@ def test_dial_hold_climbs_back_instead_of_flickering_at_the_dip_edge():
   for i in range(60):   # 3 s riding the 1 mph edge
     v = set_mps - (1.0 + (0.05 if i % 2 else -0.05)) * MPH
     caps.append(exp.sample(Frame(0.05 * (i + 1), v, set_mps, True, grade=0.0)).accel_max)
-  switches = sum((a == 0.0) != (b == 0.0) for a, b in zip(caps, caps[1:]))
+  switches = sum((a == 0.0) != (b == 0.0) for a, b in pairwise(caps))
   assert switches <= 1 and caps[-1] != 0.0   # the one switch: the dip used, the climb starts
-  assert all(b is None or a is None or b - a <= 0.5 * 0.05 + 1e-9 for a, b in zip(caps, caps[1:]))   # eases in
+  assert all(b is None or a is None or b - a <= 0.5 * 0.05 + 1e-9 for a, b in pairwise(caps))   # eases in
   p = exp.sample(Frame(3.1, set_mps - 0.1 * MPH, set_mps, True, grade=0.0))
   assert p.accel_max == 0.0   # back within 0.2 mph of the target: the next dip starts
   p = exp.sample(Frame(3.15, set_mps - 0.5 * MPH, set_mps, True, grade=0.0))

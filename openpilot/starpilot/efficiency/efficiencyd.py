@@ -54,6 +54,7 @@ class Recorder:
     self.obd_engine: bool | None = None
     self.signals = CarSignals()
     self.ambient_c: float | None = None
+    self.coolant_c: float | None = None
     self.fuel_level: float | None = None
     self.position: tuple[float, float, float] | None = None  # lat, lon, bearing
     self.experiment: str | None = None  # the fuel experiment in force (plannerd's status, read once a second)
@@ -70,6 +71,7 @@ class Recorder:
     rpm = number('rpm', 0.0, 10000.0)
     self.obd_engine = None if not doc or not doc.get('connected') or rpm is None else rpm >= ENGINE_ON_RPM
     self.ambient_c = number('ambient', -40.0, 60.0)
+    self.coolant_c = number('coolant', -40.0, 150.0)
     self.fuel_level = number('fuel_level', 0.0, 100.0)
     if self.fuel_level is not None and doc.get('connected'):
       before = replace(self.tank)
@@ -117,7 +119,7 @@ class Recorder:
     return {'drive_mode': self.signals.drive_mode, 'tire_avg': self.signals.tire_avg, 'tire_min': self.signals.tire_min,
             'map_limit': self.signals.map_limit, 'road_code': self.signals.road_code, 'ambient_c': self.ambient_c,
             'fuel_level': self.fuel_level, 'lat': lat, 'lon': lon, 'bearing': bearing, 'experiment': self.experiment,
-            'obd_engine': self.obd_engine, 'climate_set_f': self.signals.climate_set_f, 'cabin_f': self.signals.cabin_f}
+            'obd_engine': self.obd_engine, 'coolant_c': self.coolant_c, 'climate_set_f': self.signals.climate_set_f, 'cabin_f': self.signals.cabin_f}
 
   def observe(self, t: float, car_state, car_control=None, radar_state=None, selfdrive_state=None, device_motion=None,
               pulse_glide: str | None = None) -> None:

@@ -58,6 +58,7 @@ class Sample:
   obd_fuel_gal: float | None = None  # measured fuel burned so far (BlueDriver), None while the link is down
   soc: float | None = None  # hybrid battery charge, % (BlueDriver)
   obd_engine: bool | None = None  # engine running by the BlueDriver's rpm, None while the link is down
+  coolant_c: float | None = None  # engine coolant, C (BlueDriver): the comparison leaves out cold-engine driving
   # Context tags (car_signals.py, BlueDriver, GPS); recorded per stretch for the PC trip reports.
   drive_mode: str | None = None  # 'eco' / 'smart' / 'sport'
   tire_avg: float | None = None  # psi, the four tires
@@ -143,6 +144,7 @@ class Stretch:
   ambient_n: int = 0
   level_first: float | None = None
   level_last: float | None = None
+  coolant_min: float | None = None  # coldest engine coolant seen in the stretch, C
   experiment: str | None = None  # the fuel experiment in force for the whole stretch
   v_start: float | None = None   # m/s at the stretch's start and end: the fuel judge corrects for a speed change
   v_end: float | None = None
@@ -175,6 +177,8 @@ class Stretch:
       if self.level_first is None:
         self.level_first = sample.fuel_level
       self.level_last = sample.fuel_level
+    if sample.coolant_c is not None and math.isfinite(sample.coolant_c):
+      self.coolant_min = sample.coolant_c if self.coolant_min is None else min(self.coolant_min, sample.coolant_c)
     if self.lat is None and sample.lat is not None and sample.lon is not None:
       self.lat, self.lon, self.bearing = sample.lat, sample.lon, sample.bearing
 
@@ -198,7 +202,7 @@ class Stretch:
       'climate': top(self.climate_s), 'set_f': r(self.set_sum / self.set_n if self.set_n else None, 1),
       'cabin_f': r(self.cabin_sum / self.cabin_n if self.cabin_n else None, 1),
       'lat': r(self.lat, 5), 'lon': r(self.lon, 5), 'bearing': r(self.bearing, 0),
-      'exp': self.experiment, 'v0': r(self.v_start), 'v1': r(self.v_end),
+      'exp': self.experiment, 'v0': r(self.v_start), 'v1': r(self.v_end), 'coolant': r(self.coolant_min, 0),
     }
 
   @property

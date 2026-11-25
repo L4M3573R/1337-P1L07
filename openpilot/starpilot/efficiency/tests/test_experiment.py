@@ -1,4 +1,5 @@
 """Self-learning fuel efficiency: the experimenter's situations, variants, limits and time budget."""
+from itertools import pairwise
 import json
 import math
 import random
@@ -75,11 +76,11 @@ def test_launch_rates_and_end_at_20_mph():
   assert not (p.tag or '').startswith('launch')
 
 
-def test_speeding_up_to_the_set_speed_is_learned_per_target_band():
-  exp = Experimenter(winners={'accelerate|45-60': 'moderate'})
+def test_speeding_up_to_the_set_speed_is_learned_once_for_every_speed():
+  exp = Experimenter(winners={'accelerate|all': 'moderate'})
   exp.rng.random = lambda: 0.99
   p = exp.sample(cruise(0.0, v=30 * MPH, v_set=50 * MPH, a_ego=0.5))
-  assert p.tag == 'accelerate|45-60|moderate' and p.accel_max == pytest.approx(0.9 * ex.normal_accel(30 * MPH))
+  assert p.tag == 'accelerate|all|moderate' and p.accel_max == pytest.approx(0.9 * ex.normal_accel(30 * MPH))
   assert exp.spent_s > 0
 
 
@@ -164,16 +165,25 @@ def test_slower_variants_are_shares_of_normal_acceleration():
 
 
 def test_pressing_on_during_a_slower_variant_vetoes_it_after_two_times():
-  exp = Experimenter(winners={'accelerate|30-45': 'gentle'})
+  exp = Experimenter(winners={'accelerate|all': 'gentle'})
   exp.rng.random = lambda: 0.99
   for drive in range(2):
     exp.episode = None
-    p = exp.sample(cruise(drive * 100.0, v=20 * MPH, v_set=40 * MPH, a_ego=0.5))
-    assert p.tag == 'accelerate|30-45|gentle'
+    p = exp.sample(cruise(drive * 100.0, v=20 * MPH, v_set=40 * MPH, a_ego=1.0))   # speeding up at the gentle cap
+    assert p.tag == 'accelerate|all|gentle'
     exp.sample(cruise(drive * 100.0 + 0.05, v=20 * MPH, v_set=40 * MPH, gas=True))
     exp.sample(cruise(drive * 100.0 + 0.1, v=20 * MPH, v_set=40 * MPH, gas=True))   # one veto per episode
-  assert exp.vetoes == {'accelerate|30-45|gentle': 2}
-  assert all(exp.draw('accelerate', '30-45') != 'gentle' for _ in range(200))   # never offered there again
+  assert exp.vetoes == {'accelerate|all|gentle': 2}
+  assert all(exp.draw('accelerate', 'all') != 'gentle' for _ in range(200))   # never offered there again
+
+
+def test_a_press_while_the_slower_variant_is_not_holding_the_car_back_is_no_veto():
+  exp = Experimenter(winners={'accelerate|all': 'gentle'})
+  exp.rng.random = lambda: 0.99
+  p = exp.sample(cruise(0.0, v=20 * MPH, v_set=40 * MPH, a_ego=0.3))   # speeding up well under the cap: not limiting
+  assert p.tag == 'accelerate|all|gentle'
+  exp.sample(cruise(0.05, v=20 * MPH, v_set=40 * MPH, gas=True))
+  assert exp.vetoes == {}
 
 
 def test_vetoes_file(tmp_path):
@@ -219,7 +229,7 @@ def _hold_episode(variant):
 
 def test_hold_flat_holds_the_throttle_until_a_mile_an_hour_under():
   exp, p = _hold_episode('flat')
-  assert p.tag == 'hold|30-45|flat' and p.accel_max == 0.0 and p.speed_ceiling_mps is None
+  assert p.tag == 'hold|all|flat' and p.accel_max == 0.0 and p.speed_ceiling_mps is None
   spent = exp.spent_s
   p = exp.sample(cruise(0.05, v=40 * MPH - 0.5 * MPH, grade=0.0))
   assert p.accel_max == 0.0 and exp.spent_s > spent   # sagging inside the band: still flat, and it costs time
@@ -231,7 +241,7 @@ def test_hold_flat_holds_the_throttle_until_a_mile_an_hour_under():
     p = exp.sample(cruise(0.15 + 0.05 * i, v=40 * MPH - 2.5 * MPH, grade=0.0))
   assert p.accel_max is None                          # and then the planner wins the speed back
   _, normal = _hold_episode('normal')
-  assert normal.tag == 'hold|30-45|normal' and normal.accel_max is None
+  assert normal.tag == 'hold|all|normal' and normal.accel_max is None
 
 
 def test_hold_flat_is_a_slower_variant_inside_the_time_budget():
@@ -248,7 +258,7 @@ def test_hold_flat_runs_at_highway_speed_where_pulse_and_glide_is_off():
     exp.draw = lambda category, context: 'flat' if category == 'hold' else ex.CATEGORIES[category][0]
     p = exp.sample(cruise(0.0, v=65 * MPH, v_set=65 * MPH, grade=0.0))
     assert not (p.tag or '').startswith('pulse_glide')   # above 60 mph Pulse and Glide is never offered
-    if p.tag == 'hold|60+|flat':
+    if p.tag == 'hold|all|flat':
       assert p.accel_max == 0.0
       return
   raise AssertionError('65 mph cruising never rotated to holding flat')
@@ -263,7 +273,7 @@ def _stopping(variant, v=15.0, distance=150.0, **kw):
 
 def test_regen_stop_slows_at_one_steady_regen_rate_once_it_is_needed():
   exp, p = _stopping('regen', v=15.0, distance=150.0)   # needs 0.75 m/s2: inside the regen rate, not braking yet
-  assert p.tag == 'stop|30-45|regen' and exp.stop_decel == ex.STOP_REGEN_DECEL
+  assert p.tag == 'stop|all|regen' and exp.stop_decel == ex.STOP_REGEN_DECEL
   assert p.speed_ceiling_mps == pytest.approx(math.sqrt(2 * 1.0 * 150.0)) and p.speed_ceiling_mps > 15.0
   p = exp.sample(cruise(0.05, v=15.0, v_set=15.0, grade=0.0, stop_distance_m=80.0))
   assert p.speed_ceiling_mps == pytest.approx(math.sqrt(2 * 1.0 * 80.0)) and p.speed_ceiling_mps < 15.0   # now slowing at 1 m/s2
@@ -281,10 +291,10 @@ def test_a_late_stop_holds_the_gentlest_rate_that_still_makes_it_and_a_hard_one_
 
 def test_normal_stop_leaves_the_planner_alone_and_the_episode_ends_with_the_stop():
   exp, p = _stopping('normal')
-  assert p.tag == 'stop|30-45|normal' and p.speed_ceiling_mps is None
-  assert exp.sample(cruise(0.05, v=0.0, v_set=15.0, standstill=True, stop_distance_m=1.0)).tag != 'stop|30-45|normal'
+  assert p.tag == 'stop|all|normal' and p.speed_ceiling_mps is None
+  assert exp.sample(cruise(0.05, v=0.0, v_set=15.0, standstill=True, stop_distance_m=1.0)).tag != 'stop|all|normal'
   exp, _ = _stopping('regen')
-  assert exp.sample(cruise(0.05, v=15.0, v_set=15.0, stop_distance_m=None, grade=0.0)).tag != 'stop|30-45|regen'   # stop gone
+  assert exp.sample(cruise(0.05, v=15.0, v_set=15.0, stop_distance_m=None, grade=0.0)).tag != 'stop|all|regen'   # stop gone
   exp, _ = _stopping('regen')
   assert exp.sample(cruise(0.05, v=15.0, v_set=15.0, stop_distance_m=140.0, gas=True)).tag is None   # a pedal ends it
   assert ('stop', 'regen') in ex.COSTS_TIME and 'regen' in ex.SLOWER_VARIANTS
@@ -296,17 +306,20 @@ def test_a_stop_without_a_distance_still_blocks_the_other_experiments():
 
 
 def test_a_test_ends_when_the_speed_leaves_its_band():
-  # 2026-11-18: a "60+ mph" follow test kept running at 56 mph after traffic slowed
+  # 2026-11-18: a "60+ mph" follow test kept running at 56 mph after traffic slowed (following is pooled since
+  # 2026-11-25; hills still learn per speed band)
   exp = Experimenter(rng=random.Random(3))
-  lead = {'lead_gap_s': 1.5}
-  plans = run(exp, [cruise(i * 0.05, v=66 * MPH, v_set=70 * MPH, **lead) for i in range(100)])
-  assert plans[-1].tag.startswith('follow|60+|')
+  hill = {'grade': 0.04}
+  plans = run(exp, [cruise(i * 0.05, v=66 * MPH, v_set=70 * MPH, **hill) for i in range(100)])
+  assert plans[-1].tag.startswith('uphill|60+|')
   # just under the band edge: within the margin, the same test goes on (no flapping at 60 mph)
-  plans = run(exp, [cruise(5 + i * 0.05, v=59 * MPH, v_set=70 * MPH, **lead) for i in range(20)])
-  assert plans[-1].tag.startswith('follow|60+|')
+  plans = run(exp, [cruise(5 + i * 0.05, v=59 * MPH, v_set=70 * MPH, **hill) for i in range(20)])
+  assert plans[-1].tag.startswith('uphill|60+|')
   # clearly slower, still inside the 15 s minimum: it ends and a 45-60 test starts
-  plans = run(exp, [cruise(6 + i * 0.05, v=56 * MPH, v_set=70 * MPH, **lead) for i in range(20)])
-  assert plans[-1].tag.startswith('follow|45-60|')
+  plans = run(exp, [cruise(6 + i * 0.05, v=56 * MPH, v_set=70 * MPH, **hill) for i in range(20)])
+  assert plans[-1].tag.startswith('uphill|45-60|')
+  following = run(Experimenter(), [cruise(i * 0.05, v=v * MPH, v_set=70 * MPH, lead_gap_s=1.5) for i, v in enumerate([66] * 40 + [56] * 20)])
+  assert following[-1].tag == following[0].tag and following[0].tag.startswith('follow|all|')
 
 
 def test_pulse_and_glide_swing_does_not_end_its_own_test():
@@ -332,7 +345,7 @@ def test_hold_flat_never_flickers_at_the_band_edge():
   edge = 40 * MPH - ex.HOLD_BAND_MPH * MPH
   caps = [exp.sample(cruise(0.05 * (i + 1), v=edge + (0.02 if i % 2 else -0.02) * MPH, grade=0.0)).accel_max
           for i in range(40)]
-  switches = sum((a == 0.0) != (b == 0.0) for a, b in zip(caps, caps[1:]))
+  switches = sum((a == 0.0) != (b == 0.0) for a, b in pairwise(caps))
   assert caps[0] != 0.0 and switches == 0                  # once the dip is used it climbs, it does not chatter
   p = exp.sample(cruise(2.1, v=40 * MPH - 0.5 * MPH, grade=0.0))
   assert p.accel_max != 0.0                                # still climbing half a mile an hour under

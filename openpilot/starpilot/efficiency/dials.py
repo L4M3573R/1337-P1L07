@@ -28,6 +28,9 @@ MPH = 0.44704
 EXPLOIT = 0.5            # an episode drives the center this often, a probe otherwise
 PULSE_GLIDE_ON_MPH = 0.75   # a Pulse and Glide band under this is off
 DIALS_EPOCH = 1          # dial definitions; a state file of another epoch starts over
+# Situations learned once for every speed (experiment.POOLED, 2026-11-25): their older per-band states are dropped, so
+# they start over from normal (the stop dials had also been halved down to untestable steps by false vetoes).
+POOLED = ('accelerate', 'follow', 'hold', 'stop', 'approach')
 
 
 @dataclass(frozen=True)
@@ -57,7 +60,9 @@ DIALS: dict[str, tuple[Dial, ...]] = {
                  Dial('e', 'ease off before the set speed (mph)', 0.0, 6.0, 0.0, 2.0, 0.5, +1, 1)),
   'follow': (Dial('a', 'speed-up strength behind a car', 0.4, 1.0, 1.0, 0.2, 0.05, -1),),
   'ev': (Dial('a', 'acceleration strength in EV range', 0.25, 1.0, 1.0, 0.25, 0.05, -1),),
-  'stop': (Dial('r', 'stopping rate (m/s2; lower starts slowing earlier and gentler)', 0.5, 2.0, 2.0, 0.5, 0.1, -1),),
+  'stop': (Dial('r', 'stopping rate (m/s2; lower starts slowing earlier and gentler)', 0.3, 2.0, 2.0, 0.5, 0.1, -1),),
+  'approach': (Dial('h', 'lift off this many seconds before catching a slower car (0 = normal)', 0.0, 20.0, 0.0, 6.0,
+                    2.0, +1, 1),),
   'pulse_glide': (Dial('b', 'Pulse and Glide band (mph; 0 = off)', 0.0, 5.0, 0.0, 2.0, 0.5, +1, 1),
                   Dial('p', 'pulse strength (share of the normal pulse)', 0.6, 1.4, 1.0, 0.2, 0.05, 0),
                   Dial('g', 'glide regen (m/s2 beyond the plain coast; 0 = coast)', 0.0, 0.6, 0.0, 0.2, 0.05, 0)),
@@ -140,8 +145,10 @@ def load_state(path: Path | None) -> dict[str, Situation]:
     out = {}
     for key, s in dials.items():
       category = key.split('|')[0]
-      if key == '_epoch' or category not in DIALS or not isinstance(s, dict):
+      if key.startswith('_') or category not in DIALS or not isinstance(s, dict):
         continue
+      if category in POOLED and key != f'{category}|all':
+        continue   # a per-band state from before the pooling
       center = decode(category, encode(category, s.get('center', {})))
       step = s.get('step', {})
       if center is None or not isinstance(step, dict):
@@ -237,10 +244,13 @@ class Effect:
 
 
 def effect(category: str, values: dict[str, float], *, v_ego: float, v_target: float, normal: float,
-           below_target_mps: float, climbing: bool = False) -> Effect:
+           below_target_mps: float, climbing: bool = False, closing_s: float = float('inf'), coast: float = 0.0) -> Effect:
   """What a setting does now. normal: the planner's own cruise acceleration at this speed; below_target_mps: how far
   the car is under the speed it is being asked for (its own target, an experiment's offset included); climbing: a hold
-  already used its dip and is winning the speed back (the experimenter keeps that state, so the edge cannot flicker)."""
+  already used its dip and is winning the speed back (the experimenter keeps that state, so the edge cannot flicker);
+  closing_s: seconds until the car would catch the slower car ahead; coast: the car's lift-off deceleration now."""
+  if category == 'approach':
+    return Effect(accel_max=coast if values['h'] > 0 and closing_s < values['h'] else None)
   if category in ('launch', 'follow', 'ev'):
     return Effect(accel_max=values['a'] * normal if values['a'] < 1.0 - 1e-9 else None)
   if category == 'accelerate':

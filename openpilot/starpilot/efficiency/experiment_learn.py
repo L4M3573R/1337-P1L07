@@ -38,8 +38,10 @@ import numpy as np
 
 from openpilot.starpilot.efficiency.dials import (DIALS, Situation, blocked_by_veto, decode, encode, is_dial_variant,
                                                   load_state, new_situation, state_doc, step_back, vetoed_values)
-from openpilot.starpilot.efficiency.experiment import CATEGORIES, TIME_BUDGET_S_PER_H, VETO_LIMIT, load_vetoes, outside_band
+from openpilot.starpilot.efficiency.experiment import (CATEGORIES, POOLED, POOLED_CONTEXT, TIME_BUDGET_S_PER_H, VETO_LIMIT,
+                                                       load_vetoes, outside_band)
 from openpilot.starpilot.efficiency.ledger import BATTERY_KWH, GAL_PER_BATTERY_KWH
+from openpilot.starpilot.efficiency.learner import REGEN_ROUND_TRIP, WHEEL_J_PER_GAL
 
 METERS_PER_MILE = 1609.344
 MIN_MILES = 3.0          # per variant, steady situations
@@ -48,6 +50,15 @@ MIN_GAIN = 0.03          # 3 % less fuel than the baseline
 CONFIDENCE = 0.8
 RESAMPLES = 400
 WINDOW_M = {'launch': 400.0, 'accelerate': 600.0}
+# Stops are judged per stop, on the energy the car measured, not on fuel per mile (2026-11-25): a stop covers ~0.03 mi
+# (6 mi a side was ~200 stops per setting), it burns almost no fuel either way, and what a stop setting changes lands in
+# the battery, which the coarse charge reading (2.5 % steps) cannot resolve. Per stop: the energy lost on the way from
+# first sight to standstill = the kinetic energy at the start + what the powertrain pushed + the climb, less what regen
+# put back after the battery round trip, in gallons at the wheels.
+PER_EPISODE = set(WINDOW_M) | {'stop', 'approach'}
+# Closing on a slower car is scored the same way over a fixed stretch of road from where it began (lifting early ends
+# the approach later, so the episode itself is not a fair length): the energy lost over the first APPROACH_WINDOW_M.
+APPROACH_WINDOW_M = 500.0
 # physics fallback for the corrections (until enough stretches to fit them): a 1450 kg car at 30 % engine-to-wheel
 MASS_KG, G, ETA, J_PER_GAL = 1450.0, 9.81, 0.30, 121.3e6
 DEFAULT_CLIMB = MASS_KG * G / (ETA * J_PER_GAL)   # gallons per metre climbed (about 0.0004)
@@ -62,10 +73,10 @@ MIN_GAL_PER_MINUTE = 0.02  # a minute must save at least this much fuel (~6-7 ce
 # share its wind, traffic and warm-up, and resampling them one by one called identical driving a win 21 % of the time
 # (review 2026-11-17), 44 % counting every look. With these three (measured on the same 45 miles of real stretches,
 # random labels): 5 % at the last look, 7 % at any.
-DIAL_MIN_DRIVES = 5
+DIAL_MIN_DRIVES = 4
 DIAL_CONFIDENCE = 0.95
-DIAL_MIN_MILES = 6.0
-DIAL_MIN_EPISODES = 16
+DIAL_MIN_MILES = 4.0
+DIAL_MIN_EPISODES = 12
 # The pitch signal reads nose-up all the time (0.93 deg over the first week: every round trip "climbed"), so a third
 # of the driving counted as uphill and the climb correction took 46 % of the fuel. Its long-run mean is the zero.
 PITCH_ZERO_MIN_MILES = 30.0
@@ -169,6 +180,28 @@ def adjusted_gal(stretch: dict) -> float | None:
   return gal - battery   # charge used (soc_d < 0) adds the fuel it stands for
 
 
+def stop_loss(stretches: list[dict], zero: float = 0.0, end_speed: bool = False) -> tuple[float, float, float] | None:
+  """(gallons lost, metres, seconds) over one stop episode's stretches, or None when an energy figure is missing.
+  end_speed: the run does not end stopped, so the speed left at its end is taken off (an approach window)."""
+  if not stretches or not isinstance(stretches[0].get('v0'), (int, float)):
+    return None
+  joules = 0.5 * MASS_KG * stretches[0]['v0'] ** 2
+  if end_speed:
+    v1 = stretches[-1].get('v1')
+    if not isinstance(v1, (int, float)):
+      return None
+    joules -= 0.5 * MASS_KG * v1 ** 2
+  metres = seconds = 0.0
+  for s in stretches:
+    prop, regen = s.get('prop_j'), s.get('regen_j')
+    if not isinstance(prop, (int, float)) or not isinstance(regen, (int, float)):
+      return None
+    joules += prop - REGEN_ROUND_TRIP * regen + MASS_KG * G * climb_m(s, zero)
+    metres += s.get('m') or 0.0
+    seconds += s.get('dur') or 0.0
+  return max(joules, 0.0) / WHEEL_J_PER_GAL, metres, seconds
+
+
 def _stretch_outside_band(category: str, context: str, stretch: dict) -> bool:
   """The stretch's mean speed is clearly outside the band its test was labelled with."""
   v0, v1 = stretch.get('v0'), stretch.get('v1')
@@ -194,8 +227,35 @@ def samples(drives: list[list[dict]], corrections: dict | None = None,
       category, context, variant = tag.split('|')
       if category not in CATEGORIES or (variant not in CATEGORIES[category] and not is_dial_variant(category, variant)):
         continue
+      if category in POOLED:
+        context = POOLED_CONTEXT   # older per-band runs join the pooled situation
       run_season = season_of(s.get('ambient_c'))
       if season is not None and run_season != season:
+        continue
+      if category == 'stop':
+        if not new_episode:
+          continue
+        episode = []
+        for nxt in stretches[i:]:
+          if nxt.get('exp') != tag:
+            break
+          episode.append(nxt)
+        loss = stop_loss(episode, corrections.get('pitch_zero', 0.0))
+        if loss is not None and loss[1] > 0:
+          out.setdefault((category, context, variant), []).append(Run(*loss, _curve(s), run_season, s.get('climate'), drive))
+        continue
+      if category == 'approach':
+        if not new_episode:
+          continue
+        window, metres = [], 0.0
+        for nxt in stretches[i:]:
+          window.append(nxt)
+          metres += nxt.get('m') or 0.0
+          if metres >= APPROACH_WINDOW_M:
+            break
+        loss = stop_loss(window, corrections.get('pitch_zero', 0.0), end_speed=True) if metres >= APPROACH_WINDOW_M else None
+        if loss is not None:
+          out.setdefault((category, context, variant), []).append(Run(*loss, _curve(s), run_season, s.get('climate'), drive))
         continue
       if category in WINDOW_M:
         if not new_episode:
@@ -228,7 +288,7 @@ def gal_per_100mi(rows) -> float:
 
 
 def enough(category: str, rows) -> bool:
-  if category in WINDOW_M:
+  if category in PER_EPISODE:
     return len(rows) >= MIN_EPISODES
   return sum(r[1] for r in rows) / METERS_PER_MILE >= MIN_MILES
 
@@ -240,7 +300,7 @@ def _common_strata(category: str, rows: dict[str, list]) -> dict[str, float]:
   keep = {}
   for c in classes:
     per = [[r for r in rs if _run_curve(r) == c] for rs in rows.values()]
-    ok = (all(len(p) >= STRATUM_MIN_EPISODES for p in per) if category in WINDOW_M else
+    ok = (all(len(p) >= STRATUM_MIN_EPISODES for p in per) if category in PER_EPISODE else
           all(sum(r[1] for r in p) / METERS_PER_MILE >= STRATUM_MIN_MILES for p in per))
     if ok:
       keep[c] = sum(r[1] for p in per for r in p)
@@ -288,7 +348,7 @@ def judge(data: dict, rng: random.Random | None = None, *, situation_miles_per_h
       key = f'{category}|{context}'
       rows = {v: data.get((category, context, v), []) for v in variants}
       entry = {'winner': None, 'gal_per_100mi': {}, 'min_per_100mi': {},
-               'measured': {v: (len(r) if category in WINDOW_M else round(sum(x[1] for x in r) / METERS_PER_MILE, 2))
+               'measured': {v: (len(r) if category in PER_EPISODE else round(sum(x[1] for x in r) / METERS_PER_MILE, 2))
                             for v, r in rows.items()}}
       results[key] = entry
       missing = [v for v in variants if not enough(category, rows[v])]
@@ -399,7 +459,7 @@ def _pair(category: str, center_rows: list, probe_rows: list, rng: random.Random
   """(center gal, center min, probe gal, probe min per 100 mi, confidence the probe uses less) on the roads both drove,
   or None while either side is short (too little driving, or from fewer than DIAL_MIN_DRIVES drives)."""
   for rows in (center_rows, probe_rows):
-    short = (len(rows) < DIAL_MIN_EPISODES if category in WINDOW_M else
+    short = (len(rows) < DIAL_MIN_EPISODES if category in PER_EPISODE else
              sum(r[1] for r in rows) / METERS_PER_MILE < DIAL_MIN_MILES)
     if short or len({_drive_of(r) for r in rows}) < DIAL_MIN_DRIVES:
       return None

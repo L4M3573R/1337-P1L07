@@ -6,7 +6,7 @@ from opendbc.car.structs import car
 from openpilot.common.params import Params
 from openpilot.common.realtime import PLANNING_CORES, Priority, config_realtime_process, set_core_affinity
 from openpilot.common.swaglog import cloudlog
-from openpilot.selfdrive.controls.lib.ldw import LaneDepartureWarning
+from openpilot.selfdrive.controls.lib.ldw import LaneDepartureWarning, mount_offset
 from openpilot.selfdrive.controls.lib.longitudinal_planner import LongitudinalPlanner, NATIVE_PLAN_INPUTS
 import openpilot.cereal.messaging as messaging
 from openpilot.cereal.services import SERVICE_LIST
@@ -326,7 +326,7 @@ def starpilot_main():
   CP = messaging.log_from_bytes(params.get("CarParams", block=True), car.CarParams)
   cloudlog.info("plannerd got CarParams: %s", CP.brand)
 
-  ldw = LaneDepartureWarning()
+  ldw = LaneDepartureWarning(mount_offset(params))
   from openpilot.starpilot.longitudinal.developer_tuning import read_tuning
   from openpilot.starpilot.longitudinal.downhill_coast import read_surplus
   from openpilot.starpilot.navigation.slowdown import DEFAULT_SLOWDOWN_PERCENT

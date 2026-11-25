@@ -47,7 +47,7 @@ def test_battery_drain_counts_against_the_side_that_used_it():
 def test_headline_and_stored_ledger_round_trip(tmp_path):
   from openpilot.starpilot.efficiency.ledger import Stretch
   def stretch(mode, miles, gal):
-    s = Stretch(mode, 0.0, 600.0, distance=miles * MILE, obd_first=0.0, obd_last=gal)
+    s = Stretch(mode, 0.0, 600.0, distance=miles * MILE, obd_first=0.0, obd_last=gal, coolant_min=90.0)
     return s
   save_drive('d1', [stretch('driver', MIN_MATCHED_MILES, 0.2), stretch('chill', MIN_MATCHED_MILES, 0.1)], tmp_path)
   c = stored_comparison(tmp_path)
@@ -69,7 +69,7 @@ def test_drive_modes_are_never_mixed():
 # ---- per tank: the driver's numbers keep averaging, the comma's start over at each fill-up ----
 def _drive(root, drive_id, who, miles, gal):
   from openpilot.starpilot.efficiency.ledger import Stretch
-  save_drive(drive_id, [Stretch(who, 0.0, 600.0, distance=miles * MILE, obd_first=0.0, obd_last=gal)], root)
+  save_drive(drive_id, [Stretch(who, 0.0, 600.0, distance=miles * MILE, obd_first=0.0, obd_last=gal, coolant_min=90.0)], root)
 
 
 def _tank(miles_since_fill, fill_drive=None):
@@ -136,3 +136,56 @@ def test_the_recorder_starts_the_new_tank_at_the_drive_the_fill_up_was_seen_in(t
   assert rec.tank.fill_drive == rec.drive_id and load(tmp_path / 'tank.json').fill_drive == rec.drive_id
   from openpilot.starpilot.efficiency.compare import load_tank_history
   assert load_tank_history(tmp_path)[-1]['comma_saving'] == pytest.approx(0.2)
+
+
+# ---- 2026-11-25: the battery is settled per side over all its driving, and cold-engine driving is left out ----
+def test_battery_charge_built_outside_the_match_still_counts():
+  flat = ('45-60 mph', 'flat', 'straight', 'open road')
+  down = ('45-60 mph', 'downhill', 'straight', 'open road')
+  ctx = {flat + ('driver', 'eco'): t(10, 0.25), flat + ('chill', 'eco'): t(10, 0.25, soc=-20.0),
+         down + ('chill', 'eco'): t(10, 0.05, soc=+20.0)}   # the comma refilled the battery on a hill the driver never drove
+  c = compare(ctx)
+  assert c.matched_miles == pytest.approx(10) and c.contexts == 1
+  assert c.comma_saving == pytest.approx(0.0, abs=1e-9)   # per context it read as a drain; over its driving it is even
+  assert c.fuel_saving == pytest.approx(0.0, abs=1e-9)
+
+
+def test_battery_drain_over_all_driving_still_costs():
+  flat = ('45-60 mph', 'flat', 'straight', 'open road')
+  c = compare({flat + ('driver', 'eco'): t(10, 0.25), flat + ('chill', 'eco'): t(10, 0.25, soc=-20.0)})
+  assert c.fuel_saving == pytest.approx(0.0, abs=1e-9) and c.comma_saving < 0
+
+
+def _stretch_doc(t0, who, gal, coolant=None, soc=0.0):
+  rec = {'t': t0, 'dur': 60.0, 'm': MILE, 'mode': who, 'ctx': ['45-60 mph', 'flat', 'straight', 'open road'],
+         'obd_gal': gal, 'soc_d': soc, 'drive_mode': 'eco', 'prop_j': 1, 'regen_j': 0, 'fric_j': 0}
+  if coolant is not None:
+    rec['coolant'] = coolant
+  return rec
+
+
+def test_cold_stretches_by_coolant_and_by_time():
+  from openpilot.starpilot.efficiency.store import COLD_START_S, cold_stretches
+  doc = {'stretches': [_stretch_doc(0, 'driver', 0.03, 40), _stretch_doc(60, 'driver', 0.02, 70), _stretch_doc(120, 'chill', 0.02, 80)]}
+  assert [s['t'] for s in cold_stretches(doc)] == [0]
+  old = {'stretches': [_stretch_doc(100, 'driver', 0.03), _stretch_doc(100 + COLD_START_S, 'chill', 0.02)]}
+  assert [s['t'] for s in cold_stretches(old)] == [100]   # no coolant kept: the first COLD_START_S of the drive
+
+
+def test_stored_comparison_leaves_out_the_warm_up(tmp_path):
+  import json
+  (tmp_path / 'drives').mkdir()
+  key = '45-60 mph|flat|straight|open road|'
+  stretches = [_stretch_doc(i * 60, 'driver', 0.04, 30) for i in range(5)]               # warm-up: 25 mpg, charging
+  stretches += [_stretch_doc(300 + i * 60, 'driver', 0.02, 80) for i in range(6)]        # warm: 50 mpg
+  stretches += [_stretch_doc(700 + i * 60, 'chill', 0.02, 85) for i in range(6)]         # comma, warm: 50 mpg
+  for s in stretches[:5]:
+    s['soc_d'] = 4.0
+  doc = {'version': 1, 'drive': 'd1', 'speed_factor': 1.0223, 'total': {'distance': 17 * MILE},
+         'contexts': {key + 'driver|eco': {'distance': 11 * MILE, 'obd_distance': 11 * MILE, 'obd_fuel_gal': 0.32, 'obd_soc_delta': 20.0},
+                      key + 'chill|eco': {'distance': 6 * MILE, 'obd_distance': 6 * MILE, 'obd_fuel_gal': 0.12}},
+         'stretches': stretches}
+  (tmp_path / 'drives' / 'd1.json').write_text(json.dumps(doc))
+  c = stored_comparison(tmp_path)
+  assert c.matched_miles == pytest.approx(6, rel=0.03)   # the warm miles only (on whatever speed scale the store uses)
+  assert c.fuel_saving == pytest.approx(0.0, abs=1e-6) and c.comma_saving == pytest.approx(0.0, abs=1e-6)

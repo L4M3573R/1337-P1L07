@@ -22,6 +22,12 @@ DISTANCE_FIELDS = ('distance', 'fuel_distance', 'obd_distance')
 MAX_DRIVES = 500
 MAX_STRETCH_RECORDS = 3000  # about 10 hours of driving in one file
 KEY_SEPARATOR = "|"
+# Cold-engine driving (warming up after a start: the engine runs for heat and charges the battery whoever drives) is
+# left out of the comma-versus-driver comparison: the driver always drives it. A stretch is cold when it was driven
+# before the coolant first reached ENGINE_WARM_C; drives recorded before the coolant was kept (2026-11-25) drop their
+# first COLD_START_S instead (pc_summary fills older drives in from the BlueDriver logs where it can).
+ENGINE_WARM_C = 65.0
+COLD_START_S = 600.0
 
 
 def default_root() -> Path:
@@ -99,8 +105,50 @@ def prune(root: Path, keep: int = MAX_DRIVES) -> None:
     old.unlink(missing_ok=True)
 
 
-def load_totals(root: Path | None = None) -> tuple[Totals, dict[str, Totals], int]:
-  """Sum every stored drive: (overall, per-context, number of drives). Unreadable files are skipped."""
+def cold_stretches(doc: dict) -> list[dict]:
+  """The drive's warm-up: its stretch records before the engine first got warm (by coolant, or by time when the drive
+  has no coolant). Only the warm-up counts: the hybrid's engine cools back down while it drives electric (logs
+  2026-11-14: 72 C down to 38 C in town), and that is driving, not a cold start. A drive whose engine never gets warm
+  (short winter trips peak at 40-55 C) is all warm-up up to its last reading."""
+  stretches = sorted((s for s in doc.get('stretches') or [] if isinstance(s, dict) and isinstance(s.get('t'), (int, float))),
+                     key=lambda x: x['t'])
+  if not stretches:
+    return []
+  first = stretches[0]['t']
+  known = [s for s in stretches if isinstance(s.get('coolant'), (int, float))]
+  if not known:
+    return [s for s in stretches if s['t'] - first < COLD_START_S]
+  warm = [s['t'] for s in known if s['coolant'] >= ENGINE_WARM_C]
+  if warm:
+    return [s for s in stretches if s['t'] < warm[0]]
+  # Never warm: everything up to the last reading; past it (the BlueDriver link dropped) only the first COLD_START_S.
+  last = known[-1]['t']
+  return [s for s in stretches if s['t'] <= last or s['t'] - first < COLD_START_S]
+
+
+def _drop_cold(doc: dict, contexts: dict[str, Totals]) -> None:
+  """Take the cold-engine stretches back out of the drive's per-context totals (measured fuel, battery and distance)."""
+  for s in cold_stretches(doc):
+    ctx = s.get('ctx')
+    if not isinstance(ctx, list) or len(ctx) != 4:
+      continue
+    t = contexts.get(KEY_SEPARATOR.join([*map(str, ctx), str(s.get('mode')), str(s.get('drive_mode') or 'unknown')]))
+    if t is None:
+      continue
+    m, dur = float(s.get('m') or 0.0), float(s.get('dur') or 0.0)
+    t.distance, t.duration = max(t.distance - m, 0.0), max(t.duration - dur, 0.0)
+    t.propulsion = max(t.propulsion - float(s.get('prop_j') or 0.0), 0.0)
+    t.regen = max(t.regen - float(s.get('regen_j') or 0.0), 0.0)
+    t.friction = max(t.friction - float(s.get('fric_j') or 0.0), 0.0)
+    if isinstance(s.get('obd_gal'), (int, float)):
+      t.obd_fuel_gal = max(t.obd_fuel_gal - s['obd_gal'], 0.0)
+      t.obd_distance = max(t.obd_distance - m, 0.0)
+      t.obd_soc_delta -= float(s.get('soc_d') or 0.0)
+
+
+def load_totals(root: Path | None = None, warm_only: bool = False) -> tuple[Totals, dict[str, Totals], int]:
+  """Sum every stored drive: (overall, per-context, number of drives). Unreadable files are skipped. warm_only leaves
+  out cold-engine driving from the per-context totals (the comparison)."""
   root = default_root() if root is None else root
   overall, contexts, count = Totals(), {}, 0
   for path in sorted((root / "drives").glob("*.json")):
@@ -110,16 +158,22 @@ def load_totals(root: Path | None = None) -> tuple[Totals, dict[str, Totals], in
       if doc.get("version") != VERSION:
         continue
       _add(overall, doc["total"])
+      drive_contexts: dict[str, Totals] = {}
       for key, values in doc["contexts"].items():
-        _add(contexts.setdefault(key, Totals()), values)
+        _add(drive_contexts.setdefault(key, Totals()), values)
+      if warm_only:
+        _drop_cold(doc, drive_contexts)
+      for key, t in drive_contexts.items():
+        contexts.setdefault(key, Totals()).add_totals(t)
       count += 1
     except (OSError, ValueError, KeyError, TypeError):
       continue
   return overall, contexts, count
 
 
-def load_drives(root: Path | None = None) -> list[tuple[str, float, dict[str, Totals]]]:
-  """Every stored drive as (drive id, distance in m, per-context totals), oldest name first. Unreadable files are skipped."""
+def load_drives(root: Path | None = None, warm_only: bool = False) -> list[tuple[str, float, dict[str, Totals]]]:
+  """Every stored drive as (drive id, distance in m, per-context totals), oldest name first. Unreadable files are skipped.
+  warm_only leaves out cold-engine driving from the per-context totals (the comparison)."""
   root = default_root() if root is None else root
   drives = []
   for path in sorted((root / "drives").glob("*.json")):
@@ -131,6 +185,8 @@ def load_drives(root: Path | None = None) -> list[tuple[str, float, dict[str, To
       contexts = {}
       for key, values in doc["contexts"].items():
         _add(contexts.setdefault(key, Totals()), values)
+      if warm_only:
+        _drop_cold(doc, contexts)
       drives.append((str(doc.get("drive") or path.stem), float(doc["total"].get("distance", 0.0)), contexts))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
       continue
