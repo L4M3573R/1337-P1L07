@@ -155,3 +155,36 @@ def test_planner_only_relaxes_ordinary_cruise_braking(case, monkeypatch):
     assert normal.a_cruise < coast.a_cruise == 0.
   elif case == 'above-limit':
     assert coast.output_a_target < 0.
+
+
+def test_downhill_coast_uses_the_regen_glide_not_the_pulse_and_glide_feather():
+  # 1337: the coast lifts off with the car's normal regen; the P&G feather (FEATHER_ACCEL) cancels regen instead.
+  from openpilot.starpilot.controllers.coast import FEATHER_ACCEL, G, regen_glide_accel
+  from openpilot.starpilot.longitudinal.downhill_coast import REGEN_MARGIN, regen_coast_accel
+  steep = -math.atan(.05)
+  for speed in (15., 25., 30.):
+    roll = regen_coast_accel(speed, steep)
+    assert roll == pytest.approx(regen_glide_accel(speed) - G * math.sin(steep) - REGEN_MARGIN)
+    assert roll < FEATHER_ACCEL - G * math.sin(steep)   # more braking than the feather: regen stays on
+    assert roll > 0.                                    # a 5% grade still rolls faster
+  assert regen_coast_accel(25., -math.atan(.01)) == 0.  # gentle grade: hold speed, never slow under the set speed
+  assert regen_coast_accel(25., 0.) == 0.
+  assert regen_coast_accel(math.nan, steep) == regen_coast_accel(25., math.nan) == 0.
+
+
+def test_planner_rolls_on_the_regen_coast_down_a_steep_grade():
+  from openpilot.starpilot.longitudinal.downhill_coast import regen_coast_accel
+  cp = CarInterface.get_non_essential_params(CAR.HONDA_CIVIC)
+  frame = Frame()
+  frame['carControl'].orientationNED = [0., -math.atan(.05), 0.]
+  speed = float(frame['carState'].vEgo)
+  roll = regen_coast_accel(speed, -math.atan(.05))
+  coast = LongitudinalPlanner(cp, init_v=speed, init_a=0., downhill_surplus_mps=5 * CV.MPH_TO_MS)
+  for _ in range(60):
+    coast.update(frame, now_ns=NOW, drive_id=DRIVE)
+    assert coast.output_a_target <= roll + 1e-6        # never more than the regen coast: no throttle
+  assert coast.a_cruise == pytest.approx(roll, abs=1e-3)
+  frame['carState'].vEgo = LIMIT + 1.                  # past the allowance it brakes back to it
+  for _ in range(30):
+    coast.update(frame, now_ns=NOW, drive_id=DRIVE)
+  assert coast.output_a_target < 0.

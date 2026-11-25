@@ -31,7 +31,7 @@ from openpilot.starpilot.longitudinal.cruise_ceiling import CruiseCeiling, Curve
 from openpilot.starpilot.longitudinal.profile_runtime import (AppliedProfile, ProfileSmoother, ProfileTuning, SelectedProfileTuning,
                                                              TRAFFIC_CRUISE_BRAKE_MAGNITUDE)
 from openpilot.starpilot.longitudinal.slc_coast import braking_lead_relevant
-from openpilot.starpilot.longitudinal.downhill_coast import speed_error as downhill_speed_error
+from openpilot.starpilot.longitudinal.downhill_coast import regen_coast_accel, speed_error as downhill_speed_error
 from openpilot.starpilot.conditional_mode.ui_action import current_authority, fresh_service
 from openpilot.starpilot.longitudinal.throttle_gate import ModelThrottleGate
 from openpilot.starpilot.longitudinal.ioniq6_start import eligible as ioniq6_long_eligible
@@ -84,7 +84,7 @@ def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, 
                      profile: AppliedProfile | None = None,
                      base_brake_floor: float = A_CRUISE_MIN, selected_acceleration_max: float | None = None, faster_takeoffs: bool = False,
                      *, a_target_prev: float | None = None, ease_slc_braking: bool = False,
-                     speed_step: bool = False, downhill_error: float | None = None):
+                     speed_step: bool = False, downhill_error: float | None = None, downhill_roll: float = 0.):
   ceiling = TAKEOFF_ACCEL_MAX if faster_takeoffs else ACCEL_MAX
   max_accel = ceiling if e2e else get_max_accel(v_ego, faster_takeoffs)
   if selected_acceleration_max is not None and not e2e:
@@ -108,9 +108,12 @@ def get_cruise_accel(e2e, v_cruise, v_ego, a_cruise_prev, angle_steers, CP, dt, 
   cruise_min = max(ACCEL_MIN, -profile.cruise_brake_magnitude) if profile is not None else max(ACCEL_MIN, base_brake_floor)
   speed_error = v_cruise - v_ego
   if downhill_error is not None:
-    speed_error = downhill_error
-    max_accel = min(max_accel, 0.)
-  if not e2e and not faster_takeoffs and v_ego >= MIN_ALLOW_THROTTLE_SPEED and speed_error > 0.:
+    # 1337: under the allowance, roll on the regen coast (downhill_roll, 0 on a gentle grade); past it, brake to it.
+    roll = downhill_roll if math.isfinite(downhill_roll) and downhill_roll > 0. else 0.
+    speed_error = downhill_error if downhill_error < 0. else roll
+    max_accel = min(max_accel, roll)
+  if (downhill_error is None and not e2e and not faster_takeoffs and v_ego >= MIN_ALLOW_THROTTLE_SPEED and
+      speed_error > 0.):
     speed_error /= CRUISE_ACCEL_RESPONSE_TIME
   elif ease_slc_braking and speed_error < 0.:
     speed_error /= CRUISE_ACCEL_RESPONSE_TIME  # correct an SLC overshoot as gradually as an approach
@@ -465,6 +468,7 @@ class LongitudinalPlanner:
       selected_acceleration = (preap_acceleration_cap if selected_acceleration is None else
                                min(selected_acceleration, preap_acceleration_cap))
     downhill_error = None
+    downhill_roll = 0.
     if (self.downhill_surplus_mps > 0. and profile_eligible and not reset_state and self.allow_throttle and
         v_cruise == v_cruise_kph * CV.KPH_TO_MS and v_ego >= v_cruise >= 5. and traffic_mode is False and
         cruise_ceiling is None and curve_ceiling is None and navigation_target is None and
@@ -479,6 +483,7 @@ class LongitudinalPlanner:
           all(fresh_service(sm, name, drive_id, sample_now_ns) for name in ('radarState', 'modelV2', 'controlsState', 'deviceMotion'))):
         limit = min(v_cruise + self.downhill_surplus_mps, V_CRUISE_MAX * CV.KPH_TO_MS)
         downhill_error = downhill_speed_error(v_cruise, v_ego, cs.aEgo, orientation[1], limit=limit, delay=action_t)
+        downhill_roll = regen_coast_accel(v_ego, orientation[1])
         if downhill_error is not None and navigation_ceiling(
             sm, self.CP, sample_now_ns, limit + .25, slowdown_percent=self.navigation_slowdown_percent) is not None:
           downhill_error = None
@@ -541,7 +546,7 @@ class LongitudinalPlanner:
                                      base_brake_floor=global_floor, selected_acceleration_max=selected_acceleration, faster_takeoffs=faster_takeoffs,
                                      a_target_prev=self.output_a_target,
                                      ease_slc_braking=v_cruise == ceiling.effective_mps and not relevant_lead, speed_step=speed_step,
-                                     downhill_error=downhill_error)
+                                     downhill_error=downhill_error, downhill_roll=downhill_roll)
     if self.button_cruise is not None:
       button_target = self.button_cruise.sample(
         sm, now_ns=sample_now_ns, drive_id=drive_id, target_speed=v_cruise,
@@ -637,7 +642,7 @@ class LongitudinalPlanner:
         stopping=self.output_should_stop, accel_min=ACCEL_MIN, active=profile_eligible and not reset_state)
     if efficiency_plan is not None and efficiency_plan.accel_max is not None:
       output_a_target = min(output_a_target, efficiency_plan.accel_max)   # fuel experiment: a gentler throttle only
-    self.output_a_target = np.clip(output_a_target, ACCEL_MIN, 0. if downhill_error is not None else accel_ceiling)
+    self.output_a_target = np.clip(output_a_target, ACCEL_MIN, downhill_roll if downhill_error is not None else accel_ceiling)
 
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.output_a_target + a_prev) / 2.0
 
