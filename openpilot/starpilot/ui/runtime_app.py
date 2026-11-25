@@ -22,7 +22,6 @@ import openpilot.cereal.messaging as messaging
 from opendbc.car.structs import car as car_schema
 
 from openpilot.selfdrive.ui.layouts.home import HomeLayoutState
-from openpilot.selfdrive.ui.mici.layouts.home import HOME_PADDING
 from openpilot.selfdrive.ui.layouts.main import MainLayout, MainState
 from openpilot.selfdrive.ui.mici.layouts.main import MiciMainLayout as MiciMainLayout
 from openpilot.starpilot.ui.runtime_compact import StarMiciMainLayout as StarMiciMainLayout
@@ -72,7 +71,7 @@ from openpilot.starpilot.ui.presentation import BitmapFonts, FontRole, Profile, 
 from openpilot.starpilot.ui.startup import slc_action_transport_enabled, validate_artwork, validate_fonts
 from openpilot.starpilot.speed_limits.vision_gate import diagnostic_choice_enabled
 from openpilot.starpilot.ui.bluetooth_status import BluetoothStatusSource
-from openpilot.starpilot.ui.runtime_snapshot import RuntimeSnapshotAdapter, current_message, display_message
+from openpilot.starpilot.ui.runtime_snapshot import RuntimeSnapshotAdapter, current_message, display_message, input_message
 from openpilot.starpilot.ui.runtime_software import deliver_software
 from openpilot.starpilot.ui.network_panel import NetworkPanelBridge
 from openpilot.starpilot.ui.slc_action_dispatch import SlcActionDispatcher
@@ -89,6 +88,7 @@ from openpilot.starpilot.controllers.mode_actions import ModeActionPublisher, pr
 from openpilot.starpilot.favorites.actions import (BOOKMARK, CYCLE_PERSONALITY, EXPERIMENTAL, INCREASE_SPEED, DECREASE_SPEED, SET_SPEED,
                                                   FORCE_COAST, PULSE_GLIDE, DISENGAGE, TRAFFIC, SWITCHBACK, SCREEN_OFF, mapped_actions)
 from openpilot.starpilot.favorites.state import FavoriteAction
+from openpilot.starpilot.ui.tesla_speed_actions import TeslaSpeedActions
 from openpilot.starpilot.favorites.layout_actions import layout_actions
 from openpilot.starpilot.saved_source import read_saved
 from openpilot.starpilot.feature_runtime import enabled as feature_enabled
@@ -99,11 +99,12 @@ from openpilot.starpilot.ui.settings_state import Destination, SettingsAction, S
 from openpilot.starpilot.ui.shell import ShellInput, ShellMode, ShellRequest, ShellSnapshot, ShellView
 from openpilot.starpilot.ui.software_state import DownloadLabel, SoftwareAction, SoftwareRequest
 from openpilot.starpilot.ui.toggles_state import Personality, ToggleKey, ToggleRequest
-from openpilot.system.ui.lib.application import MouseEvent, MousePos, gui_app
-from openpilot.system.ui.widgets import Widget
+from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets.list_view import button_item, text_item, toggle_item
 from openpilot.starpilot.ui.compact_settings_page import StarCompactSettings as StarCompactSettings
+from openpilot.starpilot.ui.runtime_shell_page import StarShellPage as StarShellPage
 
+DETECTOR_CHECK_S = 5.
 NATIVE_SETTINGS_PANELS = (Destination.DEVICE, Destination.SOFTWARE, Destination.BLUETOOTH, Destination.TOGGLES, Destination.DEVELOPER)
 _FEATURE_SETTINGS_PANES = {
   Destination.DRIVING_CONTROLS: ("features", "feature", "features"),
@@ -156,8 +157,12 @@ def visual_border_state(state: OnroadState, signals: Signals) -> OnroadState:
     border.left_blindspot or signals.vasm_left, border.right_blindspot or signals.vasm_right))
 
 
-class StarShellSession:
+class StarShellSession(TeslaSpeedActions):
   """Own native shell resources and one request/router boundary per app."""
+  uniden = None
+  detector_feed = None
+  _detector_checked_at = -DETECTOR_CHECK_S
+  _detector_configured = False
 
   def __init__(self, profile: Profile, camera_owner: Any, *, network_layer: Any = None, settings_layer: Any = None):
     font_dir = os.environ.get("STARPILOT_UI_FONT_DIR")
@@ -165,7 +170,7 @@ class StarShellSession:
     self.network_layer = network_layer
     self.settings_layer = settings_layer
     self.fonts = BitmapFonts(profile, Path(font_dir) if font_dir else default_font_directory())
-    self.pip_renderer = PiPRenderer("bubble")
+    self.pip_renderer = PiPRenderer("curved" if profile == Profile.COMPACT else "bubble")
     self.pip_warning = PiPWarningSource()
     self._pip_saved = None
     self._vasm_saved = None
@@ -188,8 +193,8 @@ class StarShellSession:
           camera_owner.render_camera_model_layer(rect, camera_view=state.appearance.camera_view,
                                                  reverse_driver=state.reverse_driver_camera,
                                                  road_style=state.customization["roadColors"]["large"],
-                                                 lead_display=(True, int(state.appearance.lead_info_mode), state.appearance.lead_info_metric)
-                                                 if state.appearance.lead_info_mode else None)
+                                                 lead_display=(state.appearance.show_lead_indicator, int(state.appearance.lead_info_mode),
+                                                               state.appearance.lead_info_metric))
       self.view = ShellView(self.fonts, Path(__file__).parents[2] / "selfdrive/assets",
                             camera_layer=camera_layer,
                             pip_layer=self._render_pip)
@@ -249,9 +254,12 @@ class StarShellSession:
     self.display_page = "system"
     self.display_edit_key: str | None = None
     self.slc_actions: SlcActionDispatcher | None = None
+    self.slc_car_actions: SlcActionDispatcher | None = None
     if slc_action_transport_enabled(os.environ, ui_state.params):
       try:
         self.slc_actions = SlcActionDispatcher(_slc_action_publisher(), self._live_slc_message)
+        # Car buttons share the scroll wheel age limit.
+        self.slc_car_actions = SlcActionDispatcher(_slc_action_publisher(), lambda now_ns: self._live_slc_message(now_ns, car_input=True))
       except (OSError, RuntimeError):
         pass  # The shell stays readable and reports action unavailability.
     self.input = ShellInput(profile, self._emit,
@@ -286,7 +294,6 @@ class StarShellSession:
         self._visual_preview_flags = parse_flags(raw_preview)
     self._visual_preview_start_ns = time.monotonic_ns()
     self._native_favorite_actions: Callable[[], dict] = dict
-    # Native publisher for taps on the projected car screen.
     self._publish_bookmark: Callable[[], None] | None = None
     self._wheel_sock = messaging.sub_sock("slcCruiseEvent", conflate=False)
     self._aol_save = None
@@ -320,12 +327,29 @@ class StarShellSession:
         pass  # Car-screen speed-limit taps stay unavailable without affecting the native UI.
     self.onroad_map = self.onroad_jetlink = None
     if profile == Profile.LARGE:
+      self.uniden = self.view.onroad.uniden.activate(self)
       from openpilot.starpilot.ui.onroad_map_layer import NativeMapLayer
       self.onroad_map = NativeMapLayer(self.fonts, ui_state)
       self.view.onroad.map_layer = self.onroad_map.render
       from openpilot.starpilot.ui.onroad_jetlink_layer import NativeJetlinkLayer
       self.onroad_jetlink = NativeJetlinkLayer(self.view.onroad.jetlink_status, ui_state)
       self.view.onroad.jetlink_status = self.onroad_jetlink
+    from openpilot.starpilot.uniden.feed import DetectorFeed
+    # Poll the detector whenever onroad, with or without a widget.
+    self.detector_feed = self.uniden.feed if self.uniden else DetectorFeed()
+
+  def _poll_detector(self) -> None:
+    if not self.detector_feed:
+      return
+    now = time.monotonic()
+    if now - self._detector_checked_at >= DETECTOR_CHECK_S:
+      self._detector_checked_at = now
+      try:
+        config = ui_state.params.get('UnidenConfig')
+      except (TypeError, ValueError):
+        config = None
+      self._detector_configured = isinstance(config, dict) and config.get('enabled') is True and bool(config.get('address'))
+    self.detector_feed.set_enabled(self._detector_configured and bool(ui_state.started) and getattr(ui_state, 'replay_clock', None) is None)
 
   def _favorite_authority(self, *, allow_personality_notice: bool = False) -> bool:
     if getattr(ui_state, "replay_clock", None) is not None:
@@ -492,7 +516,7 @@ class StarShellSession:
                     self.mode_actions.dispatch(mode, ui_state.sm, ui_state.CP, _slc_action_publisher(), now_ns=time.monotonic_ns()))
       actions[key] = FavoriteAction(key, label, available=allowed, token=repr((drive, mode, allowed)),
                                    reason="Fresh onroad control required", invoke=apply_mode)
-    if ui_state.CP is not None and not ui_state.CP.pcmCruise:
+    if ui_state.CP is not None and (not ui_state.CP.pcmCruise or self._tesla_set_speed(ui_state.CP)):
       current = self._favorite_authority() and cruise_action_authority(ui_state.sm, ui_state.CP, time.monotonic_ns())
       def change_speed(increase):
         return bool(not ui_state.params.get_bool("SafeMode") and self.cruise_actions.dispatch(
@@ -515,7 +539,7 @@ class StarShellSession:
           target_mps=float(value) * (1 / 3.6 if metric else 0.44704)))
       actions[SET_SPEED] = FavoriteAction(SET_SPEED, "Set Speed To", available=current and not ui_state.params.get_bool("SafeMode"),
         reason="Active software cruise required; speed uses device units", token=repr((drive, current)), invoke_value=set_speed)
-    return actions
+    return self._tesla_favorite_actions(actions, drive)
 
   def _poll_projection_bookmark(self, now_ns):
     receiver = getattr(self, '_projection_bookmarks', None)
@@ -686,7 +710,6 @@ class StarShellSession:
     return bool(ui_state.is_offroad() and self.adapter.confirmed_offroad())
 
   def connectivity_allowed(self) -> bool:
-    # Connectivity setup also works on USB power without vehicle telemetry.
     return ui_state.is_offroad()
 
   def configuration_allowed(self) -> bool:
@@ -887,7 +910,7 @@ class StarShellSession:
       self.pip_renderer.deactivate()
       return
     camera_positions = {}
-    for side, key in zip(("left", "right"), CAMERA_WIDGETS, strict=True):
+    for side, key in zip(("left", "right"), CAMERA_WIDGETS if self.profile == Profile.LARGE else ("pip_left", "pip_left"), strict=True):
       position = placement(state.customization, self.profile, key)
       if position["enabled"]:
         width, height = widget_size(state.customization, self.profile, key)
@@ -895,9 +918,11 @@ class StarShellSession:
         camera_positions[side] = Rect(position["x"] + shift, position["y"], width, height)
     status = self.pip_renderer.render(rect, saved.mask, signals, enabled=True,
                                       on_blinker=saved.on_blinker, on_bsm=saved.on_bsm, invert=saved.invert,
-                                      placements=camera_positions, **({"submit": submit} if submit is not None else {}))
+                                      placements=camera_positions,
+                                      **({"submit": (lambda _key, draw: submit("pip_left", draw)) if self.profile == Profile.COMPACT else submit}
+                                         if submit is not None else {}))
     if status not in ("rendered", "inactive") and state.alert.size == AlertSize.NONE:
-      self.fonts.draw("SIDE CAMERA UNAVAILABLE", FontRole.MEDIUM,
+      self.fonts.draw("ADJ SPOT CAMERA UNAVAILABLE", FontRole.MEDIUM,
                       18 if self.profile == Profile.COMPACT else 25,
                       18 if self.profile == Profile.COMPACT else rect.x + 30,
                       180 if self.profile == Profile.COMPACT else rect.y + rect.height - 62,
@@ -951,7 +976,14 @@ class StarShellSession:
     try:
       if self.model_source is None:
         self.model_source = ModelStatusSource(self.adapter.ui_state.params)
-      return model_page(self.model_source.snapshot(), self.model_manager_snapshot(), getattr(self, "model_page", "models"),
+      status = self.model_source.snapshot()
+    except Exception as error:
+      if getattr(self, "_model_status_error", None) != repr(error):
+        self._model_status_error = repr(error)
+        cloudlog.exception("Driving model runtime status unavailable")
+      status = project_status(None, None, None, None, time.monotonic_ns())
+    try:
+      return model_page(status, self.model_manager_snapshot(), getattr(self, "model_page", "models"),
                         getattr(self, "model_filter", "installed"), getattr(self, "model_sort", "date"),
                         getattr(self, "model_size", "all"))
     except Exception as error:
@@ -959,7 +991,7 @@ class StarShellSession:
       if getattr(self, "_model_error", None) != repr(error):
         self._model_error = repr(error)
         cloudlog.exception("Driving Model page unavailable")
-      return model_page(project_status(None, None, None, None, time.monotonic_ns()))
+      return model_page(status)
 
   def _model_manager(self):
     if getattr(self, 'model_manager', None) is None:
@@ -1006,6 +1038,21 @@ class StarShellSession:
       self.model_scroll = feature_scroll(self.model_scroll, action.direction, len(state.rows), feature_page_rows(state))
     elif action.kind == "toolbar":
       self._model_option(action.direction)
+    elif action.kind == "action" and row is not None:
+      index = action.direction
+      current = next((candidate for candidate in state.rows if candidate.key == row.key), None)
+      # Catalog metadata can refresh during a tap. Recheck the model and pressed button, not its descriptive text.
+      if (current is None or not current.available or not 0 <= index < min(len(row.actions), len(current.actions)) or
+          not row.actions[index][1] or current.actions[index] != row.actions[index]):
+        self._unavailable("model list changed; try again")
+      elif row.key == "models:active" and index in (0, 1):
+        self._model_open(("models:pick:small", "models:pick:big")[index])
+      else:
+        intent = model_row_intent(self.model_manager_snapshot(fresh=True), self.model_page, row.key, index)
+        if intent is None or intent[0] != row.actions[index][0]:
+          self._unavailable("model list changed; try again")
+        else:
+          self._model_do(*intent[1:])
     elif row is None or row not in state.rows:
       if action.kind == "details" and row is None:
         self._feature_details("models", action)
@@ -1015,15 +1062,6 @@ class StarShellSession:
       self._feature_details("models", action)
     elif row.key == "models:randomizer" and action.kind == "change":
       self._model_do("randomizer")
-    elif row.key == "models:active" and action.kind == "action" and action.direction in (0, 1):
-      self._model_open(("models:pick:small", "models:pick:big")[action.direction])
-    elif action.kind == "action":
-      intent = model_row_intent(self.model_manager_snapshot(fresh=True), self.model_page, row.key, action.direction)
-      # A refreshed button that now means something else must not act on the displayed press.
-      if intent is None or action.direction >= len(row.actions) or intent[0] != row.actions[action.direction][0]:
-        self._unavailable("model list changed; try again")
-      else:
-        self._model_do(*intent[1:])
     self._snapshot_cache = None
 
   def _model_option(self, index: int) -> None:
@@ -1371,7 +1409,7 @@ class StarShellSession:
         self.feature_request(replace(request, confirmation=True))
     gui_app.push_widget(ConfirmDialog(question, "Save", callback=confirmed))
 
-  def _live_slc_message(self, now_ns: int) -> Any | None:
+  def _live_slc_message(self, now_ns: int, *, car_input: bool = False) -> Any | None:
     ui = self.adapter.ui_state
     if not ui.started:
       return None
@@ -1382,10 +1420,11 @@ class StarShellSession:
       return None
     after = ui.started_frame
     # plannerd revalidates actions.
-    car = display_message(ui.sm, "carState", now_ns, after_frame=after)
-    control = display_message(ui.sm, "carControl", now_ns, after_frame=after)
-    controls = display_message(ui.sm, "controlsState", now_ns, after_frame=after)
-    selfdrive = display_message(ui.sm, "selfdriveState", now_ns, after_frame=after)
+    read = input_message if car_input else display_message
+    car = read(ui.sm, "carState", now_ns, after_frame=after)
+    control = read(ui.sm, "carControl", now_ns, after_frame=after)
+    controls = read(ui.sm, "controlsState", now_ns, after_frame=after)
+    selfdrive = read(ui.sm, "selfdriveState", now_ns, after_frame=after)
     cp = ui.CP
     if (car is None or not getattr(car, "canValid", False) or getattr(car, "canTimeout", True) or
         control is None or controls is None or selfdrive is None or cp is None):
@@ -1734,6 +1773,8 @@ class StarShellSession:
   def press(self, mode: ShellMode, x: float, y: float) -> None:
     self._request_emitted = False
     self._mode = mode
+    if self.uniden and self.uniden.press(mode, x, y):
+      return
     if mode == ShellMode.SETTINGS:
       snapshot = self._settings_press_snapshot()
       self.input.press(x, y, time.monotonic(), snapshot)
@@ -1765,6 +1806,8 @@ class StarShellSession:
 
   def move(self, mode: ShellMode, x: float, y: float, *, timestamp: float | None = None) -> None:
     self._mode = mode
+    if self.uniden and self.uniden.move(mode, x, y):
+      return
     if mode == ShellMode.SETTINGS:
       if snapshot := self._settings_gesture_snapshot():
         self.input.move(x, y, timestamp, snapshot)
@@ -1780,6 +1823,8 @@ class StarShellSession:
 
   def release(self, mode: ShellMode, x: float, y: float, *, timestamp: float | None = None) -> bool:
     self._mode = mode
+    if self.uniden and self.uniden.release(mode, x, y):
+      return True
     if mode == ShellMode.SETTINGS:
       snapshot = self._settings_gesture_snapshot()
       self._settings_touch = None
@@ -1800,6 +1845,8 @@ class StarShellSession:
     return self._request_emitted or getattr(self, '_onroad_claimed', False)
 
   def cancel(self) -> None:
+    if self.uniden:
+      self.uniden.cancel()
     if pending := getattr(self, "_aol_save", None):
       pending.cancel.set()
     self._settings_touch = None
@@ -1817,6 +1864,8 @@ class StarShellSession:
   def close(self) -> None:
     if receiver := getattr(self, "rear_fog", None):
       receiver.close()
+    if self.detector_feed:
+      self.detector_feed.close()
     if layer := getattr(self, 'onroad_jetlink', None):
       layer.close()
       self.onroad_jetlink = None
@@ -1836,7 +1885,7 @@ class StarShellSession:
       source.close()
       self.home_stats_source = None
     self.drive_state.physical.close()
-    self.slc_actions = None
+    self.slc_actions = self.slc_car_actions = None
     self.galaxy_flow.close()
     if getattr(self, 'model_manager', None) is not None:
       self.model_manager.close()
@@ -1852,67 +1901,6 @@ class StarShellSession:
       self.map_source = None
     self.view.close()
     self.fonts.close()
-
-
-class StarShellPage(Widget):
-  def __init__(self, session: StarShellSession, mode: ShellMode, *, on_background_tap: Any = None,
-               alerts_pill: Widget | None = None):
-    super().__init__()
-    self.session, self.mode = session, mode
-    self.on_background_tap = on_background_tap
-    self.alerts_pill = alerts_pill
-    self._press_pos: tuple[float, float] | None = None
-    self._dragged = False
-    self._touch_time: float | None = None
-
-  def _render(self, rect: rl.Rectangle) -> None:
-    self.session.render(self.mode, rect, self._parent_rect)
-    if self.alerts_pill is not None:  # bottom right, where upstream's compact home draws it
-      self.alerts_pill.set_position(rect.x + rect.width - self.alerts_pill.rect.width - HOME_PADDING,
-                                    rect.y + rect.height - self.alerts_pill.rect.height)
-      self.alerts_pill.render()
-    if self.mode == ShellMode.ONROAD and self.session.profile == Profile.COMPACT:
-      bookmark = self.session.camera_owner._bookmark_icon
-      bookmark.set_touch_valid_callback(lambda: self._touch_valid() and abs(self.rect.x) < 1)
-      bookmark.set_parent_rect(self._parent_rect or self.rect)
-      bookmark.render(rect)
-
-  def _handle_mouse_press(self, mouse_pos: MousePos) -> None:
-    self._press_pos = (mouse_pos.x, mouse_pos.y)
-    self._dragged = False
-    self._touch_time = None
-    self.session.press(self.mode, mouse_pos.x - self.rect.x, mouse_pos.y - self.rect.y)
-
-  def _handle_mouse_event(self, mouse_event: MouseEvent) -> None:
-    self._touch_time = mouse_event.t
-    if mouse_event.left_down and (not mouse_event.left_pressed or self.mode == ShellMode.SETTINGS):
-      self._track_background_drag(mouse_event.pos)
-      self.session.move(self.mode, mouse_event.pos.x - self.rect.x, mouse_event.pos.y - self.rect.y, timestamp=mouse_event.t)
-    elif mouse_event.left_released and not rl.check_collision_point_rec(mouse_event.pos, self.rect):
-      self.session.cancel()
-
-  def _handle_mouse_release(self, mouse_pos: MousePos) -> None:
-    self._track_background_drag(mouse_pos)
-    handled = self.session.release(self.mode, mouse_pos.x - self.rect.x, mouse_pos.y - self.rect.y, timestamp=self._touch_time)
-    bookmark_handled = (self.mode == ShellMode.ONROAD and self.session.profile == Profile.COMPACT and
-                        self.session.camera_owner._bookmark_icon.interacting())
-    if not handled and not self._dragged and not bookmark_handled and self.on_background_tap is not None:
-      self.on_background_tap()
-    self._press_pos = None
-    self._dragged = False
-
-  def _track_background_drag(self, pos: MousePos) -> None:
-    tolerance = 36 if self.session.profile == Profile.LARGE else 5
-    if self._press_pos is not None and math.hypot(pos.x - self._press_pos[0], pos.y - self._press_pos[1]) > tolerance:
-      self._dragged = True
-
-  def hide_event(self) -> None:
-    self.session.cancel()
-    if self.mode == ShellMode.ONROAD and self.session.profile == Profile.COMPACT:
-      self.session.camera_owner._bookmark_icon.hide_event()
-    self._press_pos = None
-    self._dragged = False
-    super().hide_event()
 
 
 class StarMainLayout(MainLayout):

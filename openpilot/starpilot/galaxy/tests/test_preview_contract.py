@@ -18,8 +18,10 @@ class PreviewContractTest(unittest.TestCase):
     self.assertTrue(all(path.startswith("/") and path != "/tools" for path in paths))
     self.assertEqual([tool["path"] for tool in catalog["tools"] if tool["availability"] == "partial-preview"], ["/logs"])
     self.assertEqual([tool["path"] for tool in catalog["tools"] if tool["availability"] == "local-only"],
-                     ["/bluetooth", "/cameras", "/galaxy", "/manage_models", "/navigation", "/networks", "/system",
-                      "/theme_maker", "/tuning", "/starport"])
+                     ["/cameras", "/galaxy", "/manage_models", "/navigation", "/system", "/theme_maker", "/tuning", "/starport"])
+    galaxy = next(tool for tool in catalog["tools"] if tool["path"] == "/galaxy")
+    self.assertEqual([(tool["path"], tool["availability"]) for tool in galaxy["children"]],
+                     [("/networks", "local-only"), ("/bluetooth", "local-only")])
     self.assertEqual([tool["path"] for tool in catalog["tools"] if tool["availability"] == "always"], [])
     self.assertTrue(all(tool["availability"] in {"always", "unavailable", "partial-preview", "local-only"} for tool in catalog["tools"]))
     self.assertTrue(all(tool["name"] and tool["description"] and tool["icon"] for tool in catalog["tools"]))
@@ -27,8 +29,8 @@ class PreviewContractTest(unittest.TestCase):
   def test_static_preview_and_read_only_runtime_are_explicit(self):
     scripts = "\n".join(path.read_text() for path in (WEB / "js").glob("*.js"))
     self.assertEqual(sorted(re.findall(r"\bfetch\s*\(\s*[\"']([^\"']+)", scripts)),
-                     ['./api/auth/session', './api/drive-state/action', './api/drive-state/status',
-                      '/_gateway/devices'])
+                     ['./api/auth/session', './api/bluetooth/uniden', './api/drive-state/action',
+                      './api/drive-state/status', '/_gateway/devices'])
     config = json.loads((WEB / 'data/runtime.json').read_text())
     self.assertEqual(config, {'schemaVersion': 1, 'monitor': 'sample'})
     self.assertIn('./api/ui/layout', scripts)

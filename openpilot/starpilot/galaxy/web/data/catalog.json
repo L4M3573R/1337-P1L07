@@ -2,13 +2,6 @@
   "mode": "offline-preview",
   "tools": [
     {
-      "name": "Bluetooth",
-      "path": "/bluetooth",
-      "icon": "bi-bluetooth",
-      "description": "Adapter power, saved devices and connections",
-      "availability": "local-only"
-    },
-    {
       "name": "Cameras & Monitoring",
       "path": "/cameras",
       "icon": "bi-camera-video",
@@ -39,11 +32,27 @@
       ]
     },
     {
-      "name": "Galaxy Access & Install",
+      "name": "Galaxy Access & Connections",
       "path": "/galaxy",
       "icon": "bi-globe2",
-      "description": "Pair for remote access, install Galaxy, or set up a Wi-Fi hotspot",
-      "availability": "local-only"
+      "description": "Remote access, app setup, networks, Bluetooth, and support",
+      "availability": "local-only",
+      "children": [
+        {
+          "name": "Networks",
+          "path": "/networks",
+          "icon": "bi-wifi",
+          "description": "Preferred Wi-Fi, cellular data and the Galaxy hotspot",
+          "availability": "local-only"
+        },
+        {
+          "name": "Bluetooth",
+          "path": "/bluetooth",
+          "icon": "bi-bluetooth",
+          "description": "Adapter power, saved devices and connections",
+          "availability": "local-only"
+        }
+      ]
     },
     {
       "name": "Logs & Diagnostics",
@@ -68,13 +77,6 @@
           "availability": "local-only"
         },
         {
-          "name": "StarPort Logs",
-          "path": "/logs/starport",
-          "icon": "bi-phone",
-          "description": "Session logs and a download for bug reports",
-          "availability": "local-only"
-        },
-        {
           "name": "tmux Live View",
           "path": "/logs/tmux",
           "icon": "bi-terminal",
@@ -96,10 +98,10 @@
           "availability": "local-only"
         },
         {
-          "name": "Help & Community",
+          "name": "Get help",
           "path": "/logs/help",
           "icon": "bi-life-preserver",
-          "description": "Guides and community help",
+          "description": "Send StarPort, phone app, or controller logs, or ask on Discord",
           "availability": "always"
         }
       ]
@@ -140,13 +142,6 @@
           "icon": "bi-gear"
         }
       ]
-    },
-    {
-      "name": "Networks",
-      "path": "/networks",
-      "icon": "bi-wifi",
-      "description": "Preferred Wi-Fi, cellular data and the Galaxy hotspot",
-      "availability": "local-only"
     },
     {
       "name": "System Tools",

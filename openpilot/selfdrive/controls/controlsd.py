@@ -16,6 +16,7 @@ from openpilot.selfdrive.controls.lib.cycle_timing import ControlCycleTiming, PU
 from openpilot.common.swaglog import cloudlog
 
 from opendbc.car.car_helpers import interfaces
+from opendbc.car.honda.values import CAR as HONDA_CAR, accord_angle_steer_ratio
 from opendbc.car.vehicle_model import VehicleModel
 from openpilot.selfdrive.controls.lib.drive_helpers import clip_curvature
 from openpilot.selfdrive.controls.lib.highway_correction_gain import HighwayCorrectionGain, predicted_lateral_accels, read_gain
@@ -488,6 +489,9 @@ class Controls:
     torque_extension = getattr(self.LaC, 'starpilot_extension', None)
     if torque_extension is not None:
       sr = torque_extension.vehicle_model_ratio(sr, CS.vEgo)
+    if self.CP.carFingerprint == HONDA_CAR.HONDA_ACCORD and self.CP.steerControlType == car.CarParams.SteerControlType.angle:
+      # angle-loop EPS: the variable-ratio rack map at the measured angle replaces the learner
+      sr = accord_angle_steer_ratio(CS.steeringAngleDeg - lp.angleOffsetDeg)
     self.VM.update_params(x, sr)
 
     steer_angle_without_offset = math.radians(CS.steeringAngleDeg - lp.angleOffsetDeg)
@@ -764,6 +768,13 @@ class Controls:
           new_desired_curvature = limit_curvature_to_plan(model_v2, new_desired_curvature, CS.vEgo, min_reach=4.0)
       else:
         self.subaru_twitch_guard_armed = update_twitch_guard(False, CS.vEgo, CS.standstill)
+    kona_tau = getattr(self, "kona_smoothing", 0.)
+    from openpilot.starpilot.car.subaru.smoothing import seconds as subaru_smooth_seconds, control_maximum
+
+    lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS + subaru_smooth_seconds(CS.vEgo, control_maximum(self)) + kona_tau
+    if getattr(self, "volkswagen_smoothing", None) is not None:
+      lat_delay += self.volkswagen_smoothing.seconds(int(self.sm.logMonoTime["modelV2"]), time.monotonic_ns())
+
     if self.highway_smoothing_supported:
       preferences = getattr(self, "live_steering_preferences", None)
       if preferences is not None:
@@ -787,6 +798,8 @@ class Controls:
           or self.sm.valid['lateralManeuverPlan']
         ),
         predicted=predicted,
+        steering_limited=self.steer_limited_by_safety,
+        actuator_delay_s=lat_delay,
       )
     # the curve guard checks the final curvature, after the highway smoothing
     if not self.sm.valid['lateralManeuverPlan']:
@@ -795,7 +808,6 @@ class Controls:
     self.lane_centering_applied = 0.0
     self.lane_centering_inactive_reason = 'inactive'
     self.last_lane_centering_result = None
-    kona_tau = getattr(self, "kona_smoothing", 0.)
     lane_delay = None
     if lane_centering is None and self.lane_centering_host is not None:
       now_ns = int(self.sm.logMonoTime['carState']) if os.getenv('REPLAY') == '1' else time.monotonic_ns()
@@ -863,12 +875,6 @@ class Controls:
         self.desired_curvature = guarded
         curvature_limited = True
       self.lane_centering_applied = self.desired_curvature - baseline_curvature
-    from openpilot.starpilot.car.subaru.smoothing import seconds as subaru_smooth_seconds, control_maximum
-
-    lat_delay = self.sm["lateralDelay"].lateralDelay + LAT_SMOOTH_SECONDS + subaru_smooth_seconds(CS.vEgo, control_maximum(self)) + kona_tau
-    if getattr(self, "volkswagen_smoothing", None) is not None:
-      lat_delay += self.volkswagen_smoothing.seconds(int(self.sm.logMonoTime["modelV2"]), time.monotonic_ns())
-
     actuators.curvature = self.desired_curvature
     if cycle_timing is not None:
       cycle_timing.mark()

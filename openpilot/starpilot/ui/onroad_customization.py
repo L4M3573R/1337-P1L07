@@ -41,6 +41,8 @@ class WidgetPlacement(TypedDict):
   size: NotRequired[int | str]
   width: NotRequired[int]
   height: NotRequired[int]
+  transparency: NotRequired[int]
+  hide_when_no_alert: NotRequired[bool]
   opacity: NotRequired[int]
   bluetooth: NotRequired[bool]
   wifiName: NotRequired[bool]
@@ -150,13 +152,19 @@ for _index, (_key, _label) in enumerate(zip(RAIL_WIDGETS, ("Model confidence", "
 # Keep layouts saved before camera widgets valid when the registry grows.
 CAMERALESS_WIDGETS = {profile: set(data["widgets"]) for profile, data in PROFILES.items()}
 CAMERA_WIDGETS = ("pip_left", "pip_right")
-for _profile, (_size, _margin) in {"large": (600, 24), "compact": (80, 16)}.items():
+
+
+def camera_widgets(profile):
+  return CAMERA_WIDGETS[:1] if str(profile) == "compact" else CAMERA_WIDGETS
+
+
+for _profile, (_width, _height, _margin) in {"large": (600, 600, 24), "compact": (476, 240, 0)}.items():
   _bounds = PROFILES[_profile]["bounds"]
-  for _side, _key in zip(("left", "right"), CAMERA_WIDGETS, strict=True):
-    _x = _bounds["x"] + (_margin if _side == "left" else _bounds["width"] - _margin - _size)
-    _y = _bounds["y"] + _bounds["height"] - _margin - _size
+  for _side, _key in zip(("left", "right"), camera_widgets(_profile), strict=False):
+    _x = _bounds["x"] + (_margin if _side == "left" else _bounds["width"] - _margin - _width)
+    _y = _bounds["y"] + _bounds["height"] - _margin - _height
     PROFILES[_profile]["widgets"][_key] = {
-      **_widget(f"PiP {_side} side camera", "pip_camera", _size, _size, _x, _y), "layer": "underlay"}
+      **_widget((f"Adj Spot Camera {_side.title()}" if _profile == "large" else "Adj Spot Camera"), "pip_camera", _width, _height, _x, _y), "layer": "underlay"}
 
 MODE_WIDGET = "driving_mode_descriptions"
 for _profile, _geometry in {"large": (580, 68, 640, 344), "compact": (168, 44, 154, 0)}.items():
@@ -203,6 +211,31 @@ _nav_map["opacity"] = dict(zip(("min", "max", "default"), MAP_OPACITY, strict=Tr
 _nav_map["note"] = ("Road lines and your route over the camera. Drag the corner to resize; opacity sets how much shows. "
                     + "Turning it on here turns it off in the other screen's layout.")
 PROFILES["large"]["widgets"][NAV_MAP_WIDGET] = _nav_map
+
+UNIDEN_WIDGET = "uniden_alerts"
+UNIDEN_DISPLAY_DEFAULTS = {"transparency": 8, "hide_when_no_alert": True, "scale": 100}
+UNIDEN_DISPLAY_FIELDS = set(UNIDEN_DISPLAY_DEFAULTS)
+UNIDEN_RETIRED_FIELDS = ("hide_quiet_ride", "hide_mute_memory")
+UNIDEN_SCALE_RANGE = (50, 150)  # percent
+
+
+def valid_uniden_display(placement: dict) -> bool:
+  return (type(placement.get("transparency")) is int and 0 <= placement["transparency"] <= 100 and
+          type(placement.get("hide_when_no_alert")) is bool and
+          type(placement.get("scale")) is int and UNIDEN_SCALE_RANGE[0] <= placement["scale"] <= UNIDEN_SCALE_RANGE[1])
+
+
+def uniden_display(placement: dict) -> dict:
+  return {**UNIDEN_DISPLAY_DEFAULTS, **{key: value for key, value in placement.items() if key not in UNIDEN_RETIRED_FIELDS}}
+
+
+def scaled_size(width: float, height: float, scale: int) -> tuple[int, int]:
+  """Rounds half up, like the editor's Math.round."""
+  return math.floor(width * scale / 100 + .5), math.floor(height * scale / 100 + .5)
+_uniden = _widget("Uniden alerts", UNIDEN_WIDGET, 460, 260, 700, 780)
+_uniden["default"].update(cast(WidgetPlacement, UNIDEN_DISPLAY_DEFAULTS))
+_uniden["note"] = "R4/R8 detector alerts. Pair and select the detector in Galaxy Bluetooth. Tap an alert to mute."
+PROFILES["large"]["widgets"][UNIDEN_WIDGET] = _uniden
 
 JETLINK_WIDGET = "jetlink_status"
 JETLINK_SIZE = (420, 100)
@@ -277,7 +310,7 @@ for _key, _widget_data in PROFILES["large"]["widgets"].items():
   _widget_data["expandable"] = True
 # Older documents retain every saved placement and gain this independent widget.
 OPTIONAL_WIDGETS = frozenset({WEATHER_WIDGET, MODE_WIDGET, CLOCK_WIDGET, STOPPED_TIMER_WIDGET, CEM_GAUGE_WIDGET,
-                              NAV_CARD_WIDGET, NAV_MAP_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, "rear_fog"})
+                              NAV_CARD_WIDGET, NAV_MAP_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, UNIDEN_WIDGET, "rear_fog"})
 
 # The torque arc grows when the developer sidebar closes; protect both road widths.
 _torque = PROFILES['large']['widgets']['torque_bar']
@@ -304,6 +337,7 @@ WIDGET_COLORS = {
     CLOCK_WIDGET: {"text": "#FFFFFFFF"},
     WEATHER_WIDGET: {"cardFill": "#0F0D17CC", "cardBorder": "#C7AEF744", "text": "#F5F2FCFF"},
     CEM_GAUGE_WIDGET: {},
+    UNIDEN_WIDGET: {"cardFill": "#10191FFF", "cardBorder": "#9D72FFFF", "text": None},
     "current_speed": {"text": None},
     "cruise_limits": {"cardFill": "#10191FFF", "cardBorder": "#35434DFF", "text": None},
     "steering_wheel": {"cardFill": None, "cardBorder": "#00000000"},
@@ -341,10 +375,10 @@ def _fit_legacy_signal(placement: dict, bounds: Bounds) -> None:
 DEFAULT_WIDGET_ORDER = {
   "large": (NAV_MAP_WIDGET, "cruise_limits", CEM_GAUGE_WIDGET, "current_speed",
             "steering_wheel", "torque_bar", "following_distance", "driver_monitor", MODE_WIDGET, CLOCK_WIDGET, WEATHER_WIDGET,
-            STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, "rear_fog", "pip_left", "pip_right"),
+            STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, UNIDEN_WIDGET, "rear_fog", "pip_left", "pip_right"),
   "compact": ("speed_limit", "max_speed", "steering_wheel", "torque_bar",
               "driver_monitor", *RAIL_WIDGETS, MODE_WIDGET, CLOCK_WIDGET, WEATHER_WIDGET,
-              STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, "rear_fog", "pip_left", "pip_right"),
+              STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, "rear_fog", "pip_left"),
 }
 
 
@@ -399,7 +433,7 @@ def customization_metadata():
 
 
 def default_document():
-  return {"version": 16, "clock24Hour": False, "reduceMotion": False, "palette": dict(PALETTE), "roadColors": {profile: {} for profile in PROFILES},
+  return {"version": 17, "clock24Hour": False, "reduceMotion": False, "palette": dict(PALETTE), "roadColors": {profile: {} for profile in PROFILES},
           "widgetColors": {profile: {} for profile in PROFILES}, "layouts": {
     profile: {key: {**widget["default"], **({"size": WIDGET_SIZES[key][profile][1]} if key in WIDGET_SIZES else {})}
               for key, widget in data["widgets"].items()}
@@ -481,7 +515,7 @@ def migrate_confirmation_layout(layout, profile, widgets, bounds, *, extra_heigh
 
 
 def validate_document(value):
-  if type(value) is not dict or type(value.get("version")) is not int or value["version"] not in range(1, 17):
+  if type(value) is not dict or type(value.get("version")) is not int or value["version"] not in range(1, 18):
     raise ValueError("Invalid customization version")
   if value["version"] < 16:
     # Version 16 folded the separate speed limit actions widget into the speed limit sign.
@@ -493,6 +527,23 @@ def validate_document(value):
     if type(value.get("widgetOrder")) is dict:
       value["widgetOrder"] = {profile: [key for key in order if key != "speed_limit_actions"] if type(order) is list else order
                               for profile, order in value["widgetOrder"].items()}
+  # C4 has one shared camera panel; accept the old pair without changing C3.
+  compact = value.get("layouts", {}).get("compact") if type(value.get("layouts")) is dict else None
+  if type(compact) is dict and "pip_right" in compact:
+    value = copy.deepcopy(value)
+    compact = value["layouts"]["compact"]
+    right = compact.pop("pip_right")
+    left = compact.get("pip_left")
+    if any(type(item) is not dict or set(item) != {"x", "y", "enabled"} or type(item["enabled"]) is not bool or
+           any(type(item[axis]) not in (int, float) or not math.isfinite(item[axis]) for axis in ("x", "y")) for item in (left, right)):
+      raise ValueError("Invalid legacy camera placement")
+    left["enabled"] = left["enabled"] or right["enabled"]
+    colors = value.get("widgetColors", {}).get("compact") if type(value.get("widgetColors")) is dict else None
+    if type(colors) is dict and colors.get("pip_right") == {}:
+      colors.pop("pip_right")
+    order = value.get("widgetOrder", {}).get("compact") if type(value.get("widgetOrder")) is dict else None
+    if type(order) is list:
+      value["widgetOrder"]["compact"] = [key for key in order if key != "pip_right"]
   fields = {"version", "palette", "layouts"} | ({"widgetColors"} if value["version"] >= 2 else set())
   if value["version"] >= 3:
     fields.add("roadColors")
@@ -559,13 +610,14 @@ def validate_document(value):
                                  type(legacy["enabled"]) is not bool or
                                  any(type(legacy[axis]) not in (int, float) or not math.isfinite(legacy[axis]) for axis in ("x", "y"))):
         raise ValueError("Invalid legacy camera placement")
-      for side, key in enumerate(CAMERA_WIDGETS):
+      for side, key in enumerate(camera_widgets(profile)):
         widget = PROFILES[profile]["widgets"][key]
         position = dict(widget["default"])
         if legacy is not None:
           bounds = widget_bounds(profile, key)
+          shift = side * widget["width"] if profile == "large" else 0
           position.update(enabled=legacy["enabled"],
-                          x=max(bounds["x"], min(legacy["x"], bounds["x"] + bounds["width"] - 2 * widget["width"])) + side * widget["width"],
+                          x=max(bounds["x"], min(legacy["x"], bounds["x"] + bounds["width"] - 2 * widget["width"])) + shift,
                           y=max(bounds["y"], min(legacy["y"], bounds["y"] + bounds["height"] - widget["height"])))
         layouts[profile][key] = position
   layouts = copy.deepcopy(layouts)
@@ -612,7 +664,7 @@ def validate_document(value):
     if type(colors) is not dict or set(colors) != set(PROFILES):
       raise ValueError("Invalid road color profiles")
     for profile, overrides in colors.items():
-      if type(overrides) is not dict or not overrides.keys() <= ROAD_COLORS.keys() | {"pathMode"}:
+      if type(overrides) is not dict or not overrides.keys() <= ROAD_COLORS.keys() | {"pathMode", "leadMarker"}:
         raise ValueError("Invalid road color fields")
       for key, color in overrides.items():
         if key == "pathMode":
@@ -635,11 +687,21 @@ def validate_document(value):
         placement.setdefault('bluetooth', True)
         placement.setdefault('wifiName', False)
         layout[key] = placement
+      if key == UNIDEN_WIDGET and type(placement) is dict:
+        placement = layout[key] = uniden_display(placement)
       bounds = widget_bounds(profile, key)
       if value['version'] < 8 and key in SPEED_LAYOUT_V7[profile]:
         bounds = data['bounds']
       if legacy_signal:
         _fit_legacy_signal(placement, bounds)
+      if value["version"] < 17 and profile == "compact" and key in CAMERA_WIDGETS and type(placement) is dict:
+        # Move the legacy 80px widget into the shared C4 panel.
+        if any(type(placement.get(axis)) not in (int, float) or not math.isfinite(placement[axis]) for axis in ("x", "y")):
+          raise ValueError("Invalid widget position")
+        if key in value["layouts"][profile] and not (0 <= placement["x"] <= bounds["width"] - 80 and
+                                                    0 <= placement["y"] <= bounds["height"] - 80):
+          raise ValueError("Invalid legacy camera position")
+        placement = layout[key] = {**placement, "x": 0, "y": 0}
       if (key == JETLINK_WIDGET and type(placement) is dict and type(placement.get('y')) in (int, float) and
           math.isfinite(placement['y']) and
           bounds['y'] + bounds['height'] - JETLINK_SIZE[1] < placement['y'] <= bounds['y'] + bounds['height'] - 84):
@@ -657,6 +719,10 @@ def validate_document(value):
         expected.add("size")
       if key == SIGNAL_WIDGET:
         expected |= {"scale", "bluetooth", "wifiName"}
+      if key == UNIDEN_WIDGET:
+        expected |= UNIDEN_DISPLAY_FIELDS
+        if type(placement) is not dict or not valid_uniden_display(placement):
+          raise ValueError("Invalid Uniden display settings")
       if type(placement) is not dict or set(placement) != expected or type(placement["enabled"]) is not bool:
         raise ValueError("Invalid widget placement")
       if has_rotation and type(placement['rotate']) is not bool:
@@ -678,9 +744,9 @@ def validate_document(value):
       size = WHEEL_SIZES[profile][1]
       if scalable:
         minimum, _, maximum = WIDGET_SIZES[key][profile]
-        if type(placement["size"]) is not int or not minimum <= cast(int, placement["size"]) <= maximum:
+        if type(placement["size"]) is not int or not minimum <= placement["size"] <= maximum:
           raise ValueError("Invalid widget size")
-        size = cast(int, placement["size"])
+        size = placement["size"]
       # Only a gauge the saved layout actually placed moves; one filled in from defaults is already in the new box.
       saved_layout = value.get("layouts", {}).get(profile) if type(value.get("layouts")) is dict else None
       old_gauge = key == CEM_GAUGE_WIDGET and value["version"] < 7 and type(saved_layout) is dict and key in saved_layout
@@ -831,6 +897,8 @@ def widget_size(document, profile, widget):
   position = placement(document, profile, widget)
   if widget == "cruise_limits":
     return default["width"], default["height"] + sources_extent(document)
+  if widget == UNIDEN_WIDGET and type(position.get("scale")) is int:
+    return scaled_size(default["width"], default["height"], position["scale"])
   if default.get("box"):
     return position["width"], position["height"]
   if widget == SIGNAL_WIDGET:

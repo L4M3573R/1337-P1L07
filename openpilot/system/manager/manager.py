@@ -7,6 +7,7 @@ import time
 import traceback
 
 from openpilot.starpilot.drive_state.owner import DriveStateOwner
+from openpilot.starpilot.drive_state.evidence import PhysicalSource
 from openpilot.starpilot.bookmark_state import clear_bookmark_checkpoint
 from openpilot.cereal import log
 import openpilot.cereal.messaging as messaging
@@ -17,16 +18,22 @@ from openpilot.common.hardware import HARDWARE, PC
 from openpilot.system.manager.helpers import unblock_stdout, save_bootlog
 from openpilot.system.manager.process import ensure_running
 from openpilot.system.manager.process_config import managed_processes
-from openpilot.system.athena.registration import register, UNREGISTERED_DONGLE_ID
+from openpilot.system.athena.registration import register_at_startup, UNREGISTERED_DONGLE_ID
 from openpilot.common.swaglog import cloudlog, add_file_handler
 from openpilot.common.version import get_build_metadata
 from openpilot.common.hardware.hw import Paths
 from openpilot.system import sentry
 from openpilot.starpilot.state_migration import prepare_manager_start
 from openpilot.starpilot.storage import starpilot_storage_root
+from openpilot.starpilot.software import save_me
 
 
 def manager_init() -> None:
+  if save_me.available():
+    try:
+      save_me.clear_request()
+    except OSError:
+      cloudlog.exception("Could not clear stale Save Me request")
   params = Params()
   prepare_manager_start(params, starpilot_storage_root(), auto_migrate=True)
   if not PC:
@@ -80,7 +87,7 @@ def manager_init() -> None:
   for k in params.all_keys():
     if k == b"LKASButtonControl":
       continue  # Card enrolls the vehicle-specific default after identification.
-    default_value = not os.path.lexists(params.get_param_path("Version")) if k in (b"LaneCentering", b"ForceStops") else params.get_default_value(k)
+    default_value = not os.path.lexists(params.get_param_path("Version")) if k == b"ForceStops" else params.get_default_value(k)
     if default_value is not None and not os.path.lexists(params.get_param_path(k)):
       params.put(k, default_value, block=True)
 
@@ -104,7 +111,7 @@ def manager_init() -> None:
   params.put("HardwareSerial", serial, block=True)
 
   # set dongle id
-  reg_res = register(show_spinner=True)
+  reg_res = register_at_startup()
   if reg_res:
     dongle_id = reg_res
   else:
@@ -138,7 +145,7 @@ def manager_cleanup() -> None:
   cloudlog.info("everything is dead")
 
 
-def manager_thread() -> None:
+def manager_thread() -> bool:
   cloudlog.bind(daemon="manager")
   cloudlog.info("manager start")
   cloudlog.info({"environ": os.environ})
@@ -157,6 +164,7 @@ def manager_thread() -> None:
   sm = messaging.SubMaster(['deviceState', 'carParams', 'pandaStates', 'modelV2', 'drivingModelData',
                                'narrowRoadCameraState', 'wideRoadCameraState'], poll='deviceState')
   pm = messaging.PubMaster(['managerState'])
+  save_me_vehicle = PhysicalSource(sm) if save_me.available() else None
 
   params.put_bool("IsOffroad", True, block=True)
   ensure_running(managed_processes.values(), False, params=params, CP=sm['carParams'], not_run=ignore)
@@ -218,7 +226,13 @@ def manager_thread() -> None:
         cloudlog.warning(f"Shutting down manager - {param} set")
 
     if shutdown:
-      break
+      return False
+    if save_me_vehicle is not None and save_me.REQUEST.exists():
+      try:
+        if save_me.take_request(parked=not started and save_me_vehicle.update_ready(params.get_bool("IsOffroad")), started=started):
+          return True
+      except OSError:
+        cloudlog.exception("Could not consume Save Me request")
 
 
 def main() -> None:
@@ -237,8 +251,9 @@ def main() -> None:
   # SystemExit on sigterm
   signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(1))
 
+  save_me_requested = False
   try:
-    manager_thread()
+    save_me_requested = manager_thread()
   except Exception:
     traceback.print_exc()
     cloudlog.exception("crash")
@@ -251,6 +266,17 @@ def main() -> None:
     except Exception:
       cloudlog.exception("Jetlink shutdown handoff failed")
     manager_cleanup()
+
+  if save_me_requested:
+    try:
+      for issue in save_me.wipe():
+        cloudlog.error("Save Me: %s", issue)
+    except OSError:
+      cloudlog.exception("Save Me could not prepare cleanup")
+      os.execv(sys.executable, [sys.executable, __file__])
+    os.sync()
+    HARDWARE.reboot()
+    return
 
   params = Params()
   if params.get_bool("DoUninstall"):

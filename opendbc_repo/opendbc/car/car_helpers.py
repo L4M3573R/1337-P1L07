@@ -10,12 +10,14 @@ from opendbc.car.fw_versions import (ObdCallback, get_fw_versions, get_fw_versio
                                      get_present_ecus, match_fw_to_car)
 from opendbc.car.mock.values import CAR as MOCK
 from opendbc.car.gm.pedal_capability import automatic_bolt_candidate
-from opendbc.car.gm.discovery import automatic_trax_candidate, automatic_volt_candidate, normal_bus0_topology as gm_normal_bus0_topology
+from opendbc.car.gm.discovery import (automatic_trax_candidate, automatic_volt_ascm_candidate, automatic_volt_candidate,
+                                     normal_bus0_topology as gm_normal_bus0_topology)
 from opendbc.car.ford.discovery import (normal_bus0_selection as ford_normal_bus0_selection,
                                        normal_bus0_queries as ford_normal_bus0_queries, normal_bus_query_brand)
 from opendbc.car.volvo.discovery import normal_bus_topology as volvo_normal_bus_topology, v60_bus_topology as volvo_v60_bus_topology
 from opendbc.car.hyundai.discovery import normal_bus_topology
-from opendbc.car.honda.discovery import nidec_bus0_topology, normal_bus_topology as honda_normal_bus_topology
+from opendbc.car.honda.discovery import (eps_needs_obd as honda_eps_needs_obd, nidec_bus0_topology,
+                                         normal_bus_topology as honda_normal_bus_topology)
 from opendbc.car.honda.values import CAR as HONDA, HondaFlags
 from opendbc.car.mazda.discovery import normal_bus0_topology as mazda_normal_bus0_topology
 from opendbc.car.chrysler.discovery import normal_bus_topology as chrysler_normal_bus_topology
@@ -96,6 +98,7 @@ def can_fingerprint(can_recv: CanRecvCallable, *, vin: str = VIN_UNKNOWN,
       frame += 1
 
   car_fingerprint = automatic_volt_candidate(car_fingerprint, finger, candidate_cars)
+  car_fingerprint = automatic_volt_ascm_candidate(car_fingerprint, finger, candidate_cars, vin)
   car_fingerprint = automatic_trax_candidate(car_fingerprint, finger, candidate_cars, vin)
   return automatic_bolt_candidate(car_fingerprint, finger, camera_cruise_messages, vin), finger
 
@@ -213,6 +216,12 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
         else:
           car_fw = get_fw_versions(can_recv, can_send, set_obd_multiplexing,
                                    query_brand=normal_brand, normal_bus_only=True)
+        if normal_brand == 'honda' and honda_eps_needs_obd(match_fw_to_car(car_fw, vin)[1], car_fw):
+          # Read this car's VIN and EPS through the OBD port, as the generic path below does. Without the VIN
+          # the result is never cached, so every start would repeat the query.
+          set_obd_multiplexing(True)
+          vin_rx_addr, vin_rx_bus, vin = get_vin(can_recv, can_send, (0, 1))
+          car_fw = get_fw_versions(can_recv, can_send, set_obd_multiplexing, query_brand='honda')
         ecu_rx_addrs = {(fw.responseAddress, fw.subAddress or None, fw.bus) for fw in car_fw if fw.responseAddress > 0}
       else:
         full_scan = True

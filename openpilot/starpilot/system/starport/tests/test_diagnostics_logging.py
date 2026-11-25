@@ -352,7 +352,8 @@ def test_session_log_never_blocks_on_a_stalled_disk(tmp_path, monkeypatch):
   import threading
   import time
   from openpilot.starpilot.system.starport import supervisor
-  monkeypatch.setattr(supervisor, "LOG_QUEUE_MAX", 5)
+  from openpilot.starpilot.system.starport import event_log
+  monkeypatch.setattr(event_log, "LOG_QUEUE_MAX", 5)
   release = threading.Event()
   original = supervisor.EventLog._write
 
@@ -426,7 +427,8 @@ def test_log_and_bundle_reads_enforce_size_budgets(tmp_path, monkeypatch):
 def test_session_log_full_queue_close_then_reopen_retires_old_writer(tmp_path, monkeypatch):
   import threading
   from openpilot.starpilot.system.starport import supervisor
-  monkeypatch.setattr(supervisor, "LOG_QUEUE_MAX", 2)
+  from openpilot.starpilot.system.starport import event_log
+  monkeypatch.setattr(event_log, "LOG_QUEUE_MAX", 2)
   release = threading.Event()
   entered = threading.Event()
   original = supervisor.EventLog._write
@@ -514,3 +516,41 @@ def test_setup_state_export_uses_bounded_regular_file_reads(tmp_path, monkeypatc
   assert compat_report.shareable_setup_state(link) is None
   monkeypatch.setattr(compat_report, "MAX_LOG_BYTES", 8)
   assert compat_report.shareable_setup_state(path) is None
+
+
+def nv12_frame(width, height, rows):
+  from openpilot.starpilot.system.starport.frame_source import FORMAT_NV12, Frame
+  luma = b"".join(rows(row) for row in range(height))
+  return Frame(luma + bytes([128]) * (width * height // 2), width, height, 1, 1, FORMAT_NV12)
+
+
+def test_luma_summary_reads_black_and_rgba_green():
+  from openpilot.starpilot.system.starport.frame_source import FORMAT_RGBA, Frame, luma_summary
+  black = luma_summary(nv12_frame(64, 32, lambda _: bytes([16]) * 64), 0, 0, 64, 32)
+  assert black["mean"] == 16 and black["dark_pct"] == 100.0 and black["std"] == 0
+  green = Frame(bytes([0, 200, 0, 255]) * (64 * 32), 64, 32, 1, 1, FORMAT_RGBA)
+  assert luma_summary(green, 0, 0, 64, 32)["mean"] == 200
+  assert luma_summary(green, 100, 100, 64, 32) == {}
+
+
+def test_frame_brightness_measures_the_area_the_car_shows():
+  from openpilot.starpilot.system.starport.supervisor import frame_brightness
+  frame = nv12_frame(128, 64, lambda _: bytes([200]) * 64 + bytes([16]) * 64)  # bright only on the left
+  mode = SimpleNamespace(width=128, height=64, margin_width=64, margin_height=0, content_left=0, content_top=0)
+  result = frame_brightness(frame, mode)
+  assert result["luma_visible"]["mean"] == 200 and result["luma_frame"]["mean"] < 200
+  assert frame_brightness(None, mode) == {}
+
+
+def test_focus_change_logs_progress_and_time_since_last_change():
+  events = []
+  session = ProjectionSession.__new__(ProjectionSession)
+  session.focused, session.allow_projection, session.media_started = False, False, True
+  session.focus_requested_at = session.focus_granted_at = session.focus_changed_at = session.grace_frame = session.touch = None
+  session.frames_sent, session.acked = 12, 10
+  session._log = lambda name, **values: events.append((name, values))
+  session._handle_focus(2, 1)
+  session._handle_focus(2, 1)
+  first, second = events[0][1], events[1][1]
+  assert first["frames_sent"] == 12 and first["frames_acked"] == 10 and first["was_focused"] is False
+  assert "since_last_s" not in first and second["since_last_s"] >= 0

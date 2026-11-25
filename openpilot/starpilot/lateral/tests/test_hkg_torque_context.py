@@ -148,3 +148,75 @@ def test_ioniq5_hda2_highway_arc_friction(direction, op_long, hda2, speed, later
   assert threshold == pytest.approx(shaping.get_ioniq_5_friction_threshold(speed, setpoint, jerk) + expected)
   assert scale == pytest.approx(1 + (shaping.get_ioniq_5_friction_scale(speed, setpoint, jerk) - 1) *
                                shaping.get_ioniq_5_center_taper_scale(setpoint, speed))
+
+
+@pytest.mark.parametrize('op_long', [False, True])
+@pytest.mark.parametrize('direction', [-1.0, 1.0])
+@pytest.mark.parametrize('hda2,speed,accel,jerk,pressed,prior_pressed,blend', [
+  (True, 19.5, 1.95, 0.5, False, False, 0.25),
+  (True, 22.0, 1.95, 0.5, False, False, 0.125),
+  (True, 19.5, 1.95, 0.0, False, False, 0.0),
+  (True, 19.5, 0.9, 0.5, False, False, 0.0),
+  (True, 19.5, 2.65, 0.5, False, False, 0.0),
+  (True, 16.0, 1.95, 0.5, False, False, 0.0),
+  (True, 29.0, 1.95, 0.5, False, False, 0.0),
+  (True, 19.5, 1.95, 0.5, True, False, 0.0),
+  (True, 19.5, 1.95, 0.5, False, True, 0.0),
+  (False, 19.5, 1.95, 0.5, False, False, 0.0),
+])
+def test_ioniq5_hda2_tight_curve_feedforward(op_long, direction, hda2, speed, accel, jerk, pressed, prior_pressed, blend):
+  vehicle = CAR.HYUNDAI_IONIQ_5
+  cp = interfaces[vehicle].get_non_essential_params(vehicle)
+  cp.openpilotLongitudinalControl = op_long
+  cp.pcmCruise = not op_long
+  if hda2:
+    cp.flags |= int(HyundaiFlags.CANFD_LKA_STEER_MSG)
+  else:
+    cp.flags &= ~int(HyundaiFlags.CANFD_LKA_STEER_MSG)
+  controller = LatControlTorque(cp.as_reader(), interfaces[vehicle](cp), 0.01, controller_mode=ControllerMode.STARPILOT)
+  policy = controller.starpilot_extension.policy
+  policy.steering_pressed, policy.previous_pressed = pressed, prior_pressed
+  setpoint = accel * direction
+  jerk *= -direction
+  original = shaping.get_ioniq_5_ff_scale(setpoint, jerk, speed)
+  steady = shaping.get_ioniq_5_ff_scale(setpoint, 0.0, speed)
+  expected = (original + blend * (steady - original)) * shaping.get_ioniq_5_center_taper_scale(setpoint, speed)
+  assert policy.feedforward_context(1.0, setpoint, jerk, setpoint, speed) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize('op_long', [False, True])
+@pytest.mark.parametrize('hda2', [False, True])
+def test_ioniq5_hda1_feedforward_damps_transients_and_reseeds_on_override(op_long, hda2):
+  vehicle = CAR.HYUNDAI_IONIQ_5
+  cp = interfaces[vehicle].get_non_essential_params(vehicle)
+  cp.openpilotLongitudinalControl = op_long
+  cp.pcmCruise = not op_long
+  if hda2:
+    cp.flags |= int(HyundaiFlags.CANFD_LKA_STEER_MSG)
+    cp.flags &= ~int(HyundaiFlags.CANFD_CAMERA_SCC)
+  else:
+    cp.flags &= ~int(HyundaiFlags.CANFD_LKA_STEER_MSG)
+    cp.flags |= int(HyundaiFlags.CANFD_CAMERA_SCC)
+  controller = LatControlTorque(cp.as_reader(), interfaces[vehicle](cp), 0.01, controller_mode=ControllerMode.STARPILOT)
+  policy = controller.starpilot_extension.policy
+  vm = VehicleModel(cp)
+  params = SimpleNamespace(angleOffsetDeg=0., roll=0.)
+  state = SimpleNamespace(vEgo=30., steeringAngleDeg=0., steeringPressed=False)
+  original = shaping.get_ioniq_5_ff_scale(.5, 0., 30.) * shaping.get_ioniq_5_center_taper_scale(.5, 30.)
+
+  def tick(target, active=True):
+    controller.update(active, state, vm, params, False, target / state.vEgo**2, False, .37)
+    return policy.feedforward_context(1.0, .5, 0., .5, state.vEgo) / original
+
+  assert tick(0.) == pytest.approx(1.)
+  assert tick(.1) == pytest.approx(1. if hda2 else 1. - .1 * .20 / .21)
+  assert tick(.5) == pytest.approx(1. if hda2 else .76)
+  for _ in range(180):
+    steady = tick(.5)
+  assert steady == pytest.approx(1.0, abs=.0001)
+  state.steeringPressed = True
+  assert tick(-.5) == pytest.approx(1.)
+  state.steeringPressed = False
+  assert tick(.5) == pytest.approx(1.)
+  tick(.5, active=False)
+  assert tick(-.5) == pytest.approx(1.)

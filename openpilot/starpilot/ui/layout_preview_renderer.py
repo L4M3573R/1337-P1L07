@@ -18,7 +18,7 @@ from openpilot.starpilot.ui.raylib import rl
 
 from openpilot.starpilot.ui.layout_preview_transport import SCENES, validate_preview_document
 from openpilot.starpilot.ui.developer_preview import OnroadVisualPreview
-from openpilot.starpilot.ui.onroad_customization import (CAMERA_WIDGETS, PROFILES, ROAD_BASE_WIDTH, RUNTIME_PREVIEW_WIDGETS, fit_to_road, placement,
+from openpilot.starpilot.ui.onroad_customization import (camera_widgets, PROFILES, ROAD_BASE_WIDTH, RUNTIME_PREVIEW_WIDGETS, fit_to_road, placement,
                                                          validate_document, widget_size)
 from openpilot.starpilot.ui.onroad_widget_style import draw_widget_frame
 from openpilot.starpilot.curve_speed.status import CurveObservation
@@ -245,6 +245,9 @@ class _Canvas:
         cast(JetlinkStatusWidget, self.view.jetlink_status).status = JetlinkStatus('iPhone', 'active', 24.6, 'connected', model='Cinque v3')
         from openpilot.starpilot.ui.network_signal import Signal
         self.view.network_signal.preview = Signal(2, 4, 'wifi', 'LTE', 'connected', ('iPhone 15',), 'Home Wi-Fi')
+        self.view.uniden.preview_data = {'config': {'enabled': True}, 'connected': True, 'model': 'R8', 'can_mute': True,
+                                        'alerts': [{'band': 'KA', 'strength': 6, 'frequency': 35.5, 'direction': 'rear', 'muted': False},
+                                                   {'band': 'K', 'strength': 3, 'frequency': 24.15, 'direction': 'front', 'muted': False}]}
       self.monitor = _DriverMonitorArt(profile)
       self.view.driver_monitor_layer = self._render_driver_monitor
       self.view.preview_pip_layer = self._render_preview_pip
@@ -273,17 +276,21 @@ class _Canvas:
     if submit is None:
       self._render_side_cameras(state)
       return
-    for key in CAMERA_WIDGETS:
+    for key in camera_widgets(self.profile):
       submit(key, lambda key=key: self._render_side_cameras(state, only=key))
 
   def _render_side_cameras(self, state: OnroadState, only=None) -> None:
-    for key in CAMERA_WIDGETS:
+    for key in camera_widgets(self.profile):
       if only is not None and key != only:
         continue
       position = placement(state.customization, self.profile, key)
       if not position["enabled"]:
         continue
       widget = PROFILES[str(self.profile)]["widgets"][key]
+      if self.profile == Profile.COMPACT:
+        target = rl.Rectangle(position["x"], position["y"], widget["width"], widget["height"])
+        rl.draw_rectangle_rounded(target, 0.44, 16, rl.Color(21, 44, 57, 90))
+        continue
       radius = widget["width"] / 2
       shift = state.viewport_width - 1860 if self.profile == Profile.LARGE and key == "pip_right" and self.viewport is None else 0
       center = rl.Vector2(position["x"] + shift + radius, position["y"] + radius)

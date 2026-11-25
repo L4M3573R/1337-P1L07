@@ -185,7 +185,8 @@ def make_session(monkeypatch, request, profile, camera):
   monkeypatch.setattr(runtime_app, 'ui_state', NS(params=object(), CP=None, sm={}))
   monkeypatch.delenv('SP_ONROAD_VISUAL_PREVIEW', raising=False)
   def view(*_, camera_layer, **__):
-    return NS(camera_layer=camera_layer, onroad=NS(unified_speed=NS(source_bounds=Mock()), compact_sidebar=NS(), jetlink_status=Mock()))
+    return NS(camera_layer=camera_layer, onroad=NS(unified_speed=NS(source_bounds=Mock()), compact_sidebar=NS(), jetlink_status=Mock(),
+                                                   uniden=NS(activate=lambda session: None)))
   monkeypatch.setattr(runtime_app, 'ShellView', view)
   session = runtime_app.StarShellSession(profile, camera)
   for owner in (session._projection_bookmarks, session._projection_slc, session.onroad_map, session.onroad_jetlink):
@@ -253,12 +254,14 @@ def test_large_camera_paint_is_unchanged(monkeypatch, request, lead_mode, metric
   session = make_session(monkeypatch, request, runtime_app.Profile.LARGE, camera)
   session.camera_paint = False
   state = OnroadState(True, True, 20, 80, SpeedLimitObservation())
-  state = replace(state, appearance=replace(state.appearance, lead_info_mode=lead_mode, lead_info_metric=metric))
+  state = replace(state, appearance=replace(state.appearance, show_lead_indicator=True, lead_info_mode=lead_mode, lead_info_metric=metric))
   session.view.camera_layer(rl.Rectangle(0, 0, 2160, 1080), state)
   kwargs = camera.render_camera_model_layer.call_args.kwargs
   assert set(kwargs) == {'road_style', 'camera_view', 'reverse_driver', 'lead_display'}
   assert kwargs['road_style'] == state.customization['roadColors']['large']
-  assert kwargs['lead_display'] == ((True, int(lead_mode), metric) if lead_mode else None)
+  assert kwargs['lead_display'] == (True, int(lead_mode), metric)
+  session.view.camera_layer(rl.Rectangle(0, 0, 2160, 1080), replace(state, appearance=replace(state.appearance, show_lead_indicator=False)))
+  assert camera.render_camera_model_layer.call_args.kwargs['lead_display'][0] is False
   assert kwargs['camera_view'] == state.appearance.camera_view
   assert kwargs['reverse_driver'] == state.reverse_driver_camera
   assert 'paint' not in kwargs
@@ -284,3 +287,9 @@ def test_large_shell_forwards_the_saved_camera_and_temporary_reverse(monkeypatch
   session.view.camera_layer(rl.Rectangle(0, 0, 2160, 1080), state)
   kwargs = camera.render_camera_model_layer.call_args.kwargs
   assert kwargs['camera_view'] is choice and kwargs['reverse_driver'] is reverse
+
+
+@pytest.mark.parametrize('profile,shape', [(runtime_app.Profile.COMPACT, 'curved'), (runtime_app.Profile.LARGE, 'bubble')])
+def test_side_camera_shape_follows_device_profile(lifecycle, monkeypatch, request, profile, shape):
+  make_session(monkeypatch, request, profile, Mock())
+  runtime_app.PiPRenderer.assert_called_once_with(shape)

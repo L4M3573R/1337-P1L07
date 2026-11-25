@@ -27,6 +27,7 @@ from opendbc.car.hyundai.canfd_owner import config_index
 from opendbc.car.hyundai.canfd_stock_aol import (
   qualified as qualified_canfd_stock, qualified_long as qualified_canfd_long,
   LONG_AOL_WORDS as CANFD_LONG_AOL_WORDS, STOCK_AOL_MARKER, STOCK_AOL_WORDS,
+  KONA_IDLE_AOL_WORD, kona_idle_handoff_profile,
 )
 from opendbc.car.hyundai.non_scc_aol import qualified as qualified_non_scc, aol_word, AOL_MARKER, AOL_EXPERIENCE, AOL_WORDS, SOFTWARE_CRUISE
 from opendbc.car.hyundai.kona_aol import allow_lateral_onset as kona_lateral_onset
@@ -157,7 +158,8 @@ def _policy_for(CP) -> AolVehiclePolicy:
     )
   if qualified_canfd_long(CP):
     return AolVehiclePolicy(intent_supported=True, settings_supported=True, runtime_supported=True,
-                            normal_runtime_supported=True, explicit_latch=True, safety_param_addition=0x0800,
+                            normal_runtime_supported=True, explicit_latch=True,
+                            safety_param_addition=0x0800,
                             alternative_experience_addition=32)
   if qualified_canfd_stock(CP):
     return AolVehiclePolicy(
@@ -204,6 +206,16 @@ def aol_safety_config(CP):
   owner = config_index(CP)
   return CP.safetyConfigs[owner] if owner is not None else None
 
+
+
+def configure_kona_factory_handoff(cp, pandas):
+  if (not kona_idle_handoff_profile(cp) or cp.alternativeExperience != 32 or
+      cp.safetyConfigs[0].safetyParam != 0x0C0C or len(pandas) != 1):
+    return
+  panda = pandas[0]
+  if (str(panda.pandaType) == 'cuatro' and not panda.faults and
+      (panda.ignitionCan or panda.ignitionLine) and not panda.controlsAllowed):
+    cp.safetyConfigs[0].safetyParam = KONA_IDLE_AOL_WORD
 
 def policy_for(CP) -> AolVehiclePolicy:
   policy = _policy_for(CP)

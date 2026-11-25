@@ -85,3 +85,99 @@ def test_unrelated_or_unadmitted_profiles_cannot_select_palisade():
     assert not supported_cp(candidate)
   cp.carFingerprint = CAR.HYUNDAI_IONIQ_6
   assert not supported_cp(cp)
+
+
+def test_only_palisade_hda2_softens_highway_center_corrections():
+  def policy(topology):
+    cp = topology_params(topology)
+    controller = LatControlTorque(cp.as_reader(), interfaces[cp.carFingerprint](cp), .01)
+    return controller.starpilot_extension.policy
+
+  hda1, hda2 = policy('hdai'), policy('hdaii')
+  assert hda2.output(.5, .1, 30.) < .91 * hda1.output(.5, .1, 30.)
+  assert hda2.output(.5, .8, 30.) == pytest.approx(hda1.output(.5, .8, 30.), abs=4e-6)
+  assert hda2.output(.5, .1, 4.) == pytest.approx(hda1.output(.5, .1, 4.), abs=.002)
+
+
+@pytest.mark.parametrize('alpha', (False, True))
+@pytest.mark.parametrize('direction', (-1., 1.))
+def test_hda2_softens_rapid_highway_corrections_across_longitudinal_modes(alpha, direction):
+  cp = topology_params('hdaii')
+  cp.openpilotLongitudinalControl, cp.pcmCruise = alpha, not alpha
+  policy = LatControlTorque(cp.as_reader(), interfaces[cp.carFingerprint](cp), .01).starpilot_extension.policy
+  value, demand, jerk = direction * .4, direction * .45, direction * 1.1
+  baseline = policy.output(value, demand, 31.)
+  assert policy.output_context(value, demand, jerk, 0., 31.) == pytest.approx(.88 * baseline)
+  assert policy.output_context(value, demand, .2, 0., 31.) == baseline
+  assert policy.output_context(value, direction, jerk, 0., 31.) == policy.output(value, direction, 31.)
+  assert policy.output_context(value, demand, jerk, 0., 20.) == policy.output(value, demand, 20.)
+
+
+@pytest.mark.parametrize('alpha', (False, True))
+def test_hda2_softens_shallow_highway_friction_in_both_longitudinal_modes(alpha):
+  cp = topology_params('hdaii')
+  cp.openpilotLongitudinalControl, cp.pcmCruise = alpha, not alpha
+  policy = LatControlTorque(cp.as_reader(), interfaces[cp.carFingerprint](cp), .01).starpilot_extension.policy
+  baseline = shaping.get_palisade_friction_threshold(30., .4, 1.1)
+  assert policy.friction(.4, 1.1, 30.)[0] == pytest.approx(baseline + .16)
+  for speed, setpoint in ((4., .4), (30., 1.0), (24., -.4)):
+    assert policy.friction(setpoint, 1.1, speed)[0] == shaping.get_palisade_friction_threshold(speed, setpoint, 1.1)
+
+  policy.previous_pressed = True
+  assert policy.friction(.4, 1.1, 30.)[0] == baseline
+  hda1_cp = topology_params('hdai')
+  hda1 = LatControlTorque(hda1_cp.as_reader(), interfaces[hda1_cp.carFingerprint](hda1_cp), .01).starpilot_extension.policy
+  assert hda1.friction(.4, 1.1, 30.)[0] == baseline
+
+
+@pytest.mark.parametrize('topology,alpha,expected', [('hdai', False, 1.0), ('hdaii', False, .72), ('hdaii', True, .72)])
+def test_exit_feedforward_damps_hda2_and_reseeds_after_driver_override(topology, alpha, expected):
+  cp = topology_params(topology)
+  cp.openpilotLongitudinalControl, cp.pcmCruise = alpha, not alpha
+  controller = LatControlTorque(cp.as_reader(), interfaces[cp.carFingerprint](cp), .01)
+  policy = controller.starpilot_extension.policy
+  vm = VehicleModel(cp)
+  parameters = SimpleNamespace(angleOffsetDeg=0., roll=0.)
+  state = SimpleNamespace(vEgo=29., steeringAngleDeg=0., steeringPressed=False)
+
+  def tick(target, active=True):
+    controller.update(active, state, vm, parameters, False, target / state.vEgo**2, False, .22)
+    original = shaping.get_palisade_ff_scale(.5, 0., state.vEgo) * shaping.get_palisade_center_taper_scale(.5, state.vEgo)
+    return policy.feedforward(1.0, .5, 0., state.vEgo) / original
+
+  assert tick(0.) == pytest.approx(1.)
+  assert tick(.8) == pytest.approx(expected)
+  for _ in range(250):
+    steady = tick(.8)
+  assert steady == pytest.approx(1., abs=.0001)
+  state.steeringPressed = True
+  assert tick(-.8) == pytest.approx(1.)
+  state.steeringPressed = False
+  assert tick(.8) == pytest.approx(1.)
+  tick(.8, active=False)
+  assert tick(-.8) == pytest.approx(1.)
+  state.vEgo = 14.0
+  assert tick(.8) == pytest.approx(1.)
+
+
+@pytest.mark.parametrize('alpha', (False, True))
+def test_palisade_damps_shallow_mid_speed_corrections_without_softening_deeper_turns(alpha):
+  cp = topology_params('hdaii')
+  cp.openpilotLongitudinalControl, cp.pcmCruise = alpha, not alpha
+  controller = LatControlTorque(cp.as_reader(), interfaces[cp.carFingerprint](cp), .01)
+  policy = controller.starpilot_extension.policy
+  vm = VehicleModel(cp)
+  parameters = SimpleNamespace(angleOffsetDeg=0., roll=0.)
+  state = SimpleNamespace(vEgo=14., steeringAngleDeg=0., steeringPressed=False)
+  setpoint, jerk = .4, .5
+  raw = shaping.get_palisade_ff_scale(setpoint, jerk, state.vEgo) * shaping.get_palisade_center_taper_scale(setpoint, state.vEgo)
+
+  def tick(target):
+    controller.update(True, state, vm, parameters, False, target / state.vEgo**2, False, .22)
+    return policy.feedforward(1.0, setpoint, jerk, state.vEgo) / raw
+
+  assert tick(0.) == pytest.approx(1.0)
+  assert tick(.4) == pytest.approx(1.0 - .28 * 3.5 / 5.5)
+  assert tick(1.3) == pytest.approx(1.0)
+  state.steeringPressed = True
+  assert tick(.4) == pytest.approx(1.0)

@@ -1,27 +1,11 @@
-"""Android Auto session supervisor: owns every stage, deadline, retry and cleanup.
-
-One session, started by the user or by auto-connect (see auto_connect.py), runs
-in one worker thread:
-
-  idle -> connecting_bluetooth -> discovering -> rfcomm -> wifi_start -> wifi_info
-       -> joining_wifi -> connecting_tcp -> authenticating -> negotiating -> streaming
-  streaming <-> suspended (head unit showing its own screen)
-  failure -> cleanup -> backoff -> retry          stop -> cleanup -> idle
-
-Each attempt has a generation number; Stop cancels immediately (sockets are
-closed from the caller's thread to unblock I/O). Between retries the projection
-network is released without restoring the previous Wi-Fi, which happens once,
-on Stop. Nothing here runs as root or touches vehicle control.
-"""
+"""Own Android Auto connection attempts, deadlines, retries and cleanup."""
 
 from __future__ import annotations
 
 import errno
 import ipaddress
-import json
 import math
 import os
-import queue
 import socket
 import threading
 import time
@@ -34,15 +18,17 @@ from typing import Any
 
 from openpilot.common.hardware import COMMA_HARDWARE
 from openpilot.starpilot.system.starport import (car_profiles, device_health, head_unit_fixes, identity as identity_store, quirk_state,
-                                                 reachability, setup_ladder, system_slice)
+                                                 reachability, setup_ladder)
 from openpilot.starpilot.system.starport import reconnect_notice
 from openpilot.starpilot.system.starport.adapter_syslog import AdapterSyslog
 from openpilot.starpilot.system.starport.auto_connect import AutoConnectPolicy
 from openpilot.starpilot.system.starport.bootstrap import MODERN_MAJOR, NAMES, BootstrapError, BootstrapTimeout, WirelessBootstrap
 from openpilot.starpilot.system.starport.bugsink_report import PairingAttempt
+from openpilot.starpilot.system.starport.event_log import EventLog
 from openpilot.starpilot.system.starport.frame_source import (DEFAULT_PATH as DEFAULT_FRAME_PATH, FLAG_ASYNC_READBACK, FLAG_NV12,
-                                                                  FORMAT_NV12, FrameRequest)
+                                                                  FORMAT_NV12, FrameRequest, frame_brightness)
 from openpilot.starpilot.system.starport.projection_control import DEFAULT_CONTROL_SOCKET, NATIVE_FOCUS
+from openpilot.starpilot.system.starport.reachability import _open_projection, _tcp_failure_kind
 from openpilot.starpilot.system.starport.radio_watch import (RADIO_CHANGE_WINDOW as RADIO_CHANGE_WINDOW,
                                                            RADIO_CHECK_INTERVAL as RADIO_CHECK_INTERVAL, SharedRadioWatch)
 from openpilot.starpilot.system.starport.touch import DEFAULT_TOUCH_SOCKET, TouchEvent
@@ -62,8 +48,6 @@ TCP_ATTEMPTS = 6
 PATIENT_TCP_SECONDS = 60.0  # owner toggle: keep retrying a refused projection connection this long
 STANDARD_AA_PORT = 5288
 VERSION_WAIT_SECONDS = 90.0
-MAX_LOG_FILES = 20
-LOG_QUEUE_MAX = 1000          # session log records waiting for the writer; past this they are dropped and counted
 ENCODER_RECOVERIES = 3       # hardware encoder reopens allowed per window before the session is torn down
 ENCODER_RECOVERY_WINDOW = 10.0
 CAR_LINK_HOLD = 10.0         # a hands-free connection from the car counts as "car present" this long
@@ -82,36 +66,18 @@ USB_CONFIGURE_WAIT = 15.0    # slower receivers need time to enumerate after the
 LINK_CHECK_INTERVAL = 1.0    # how often the link watcher asks whether the car's Wi-Fi is still up
 LINK_CHECK_SLOW = 1.0        # a link check slower than this is logged (NetworkManager answers over D-Bus)
 STREAM_STALL_LOG = 1.0       # a streaming loop pass slower than this is logged
-STALL_CAPTURE_S = 20.0       # device logs kept from before a shared-radio stall is reported
 REPORTED_SETTINGS = ("connection", "usb_mode", "view", "encoder", "fps", "bitrate_kbps", "rate_control", "gpu_nv12",
                      "async_readback", "wifi_interface", "dedicated_wifi_interface", "verify_head_unit", "version_status",
                      "rfcomm_channel", "phone_class", "auto_connect", "allow_hevc", "keyframe_test", "tall_hevc",
                      "unacked_video", "patient_tcp", "wired_handsfree", "head_unit_experiments", "head_unit_experiment_rules")
 
 
-def _open_projection(ip: str, ports: list[int], advertised: int, local_ip: str, log) -> socket.socket:
-  error: OSError | None = None
-  for port in ports:
-    try:
-      sock = socket.create_connection((ip, port), timeout=5.0, source_address=(local_ip, 0) if local_ip else None)
-    except OSError as failure:
-      error = error or failure  # the first port's failure decides how patiently to retry
-      continue
-    if port != advertised:
-      log("tcp_port_fallback", advertised=advertised, port=port)
-    return sock
-  assert error is not None
-  raise error
+HANDSFREE_UUID = "0000111e-0000-1000-8000-00805f9b34fb"
+REFUSED_CAR_HINT_S = 120.0
 
 
-def _tcp_failure_kind(error: OSError) -> str:
-  if isinstance(error, (TimeoutError, socket.timeout)):
-    return "timeout"
-  if isinstance(error, ConnectionRefusedError):
-    return "refused"
-  if getattr(error, "errno", None) in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN, errno.EHOSTDOWN):
-    return "unreachable"
-  return "other"
+def short_uuids(device: dict) -> list[str]:
+  return sorted(uuid[4:8] for uuid in device.get("uuids", []) if uuid.endswith("-0000-1000-8000-00805f9b34fb"))
 
 
 def encoder_preference(configured: str) -> str:
@@ -295,108 +261,13 @@ class LinkWatch:
       self._stop.wait(self.interval)
 
 
-class EventLog:
-  """Sanitized JSONL session log under /data/starport/logs, plus the recent tail in memory.
-
-  The streaming loop logs too, so records are queued and a background thread writes them: a slow
-  or full disk never stalls projection. If the writer falls behind, records are dropped and the
-  next one that fits is preceded by a ``log_dropped`` count.
-  """
-
-  def __init__(self, directory: Path | None = None):
-    self.directory = directory or identity_store.LOG_DIR
-    self.recent: deque[dict] = deque(maxlen=40)
-    self.lock = threading.Lock()
-    self._queue: queue.Queue = queue.Queue(maxsize=LOG_QUEUE_MAX)
-    self._writer: threading.Thread | None = None
-    self._writer_stop: threading.Event | None = None
-    self._dropped = 0
-    self.path: Path | None = None
-    self.started = 0.0
-
-  def open(self) -> None:
-    try:
-      self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-      logs = sorted(self.directory.glob("session-*.jsonl"), key=identity_store.session_log_order)
-      for old in logs[:max(0, len(logs) - MAX_LOG_FILES + 1)]:
-        old.unlink(missing_ok=True)
-      system_slice.prune_sidecars(self.directory)
-      number = max([0, *(identity_store.session_log_order(log)[0] for log in logs)]) + 1
-      path = self.directory / f"session-{number:06d}-{identity_store.timestamp()}.jsonl"
-      fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-      handle = os.fdopen(fd, "a")
-    except OSError:
-      return
-    with self.lock:
-      self.path, self.started = path, datetime.now(UTC).timestamp()
-      self._queue = queue.Queue(maxsize=LOG_QUEUE_MAX)
-      self._dropped = 0
-      self._writer_stop = threading.Event()
-      self._writer = threading.Thread(target=self._write, args=(handle, self._queue, self._writer_stop),
-                                      name="aa_session_log", daemon=True)
-      self._writer.start()
-
-  @staticmethod
-  def _write(handle, records: queue.Queue, stopped: threading.Event) -> None:
-    with handle:
-      while not stopped.is_set() or not records.empty():
-        try:
-          line = records.get(timeout=0.1)
-        except queue.Empty:
-          continue
-        try:
-          handle.write(line)
-          if records.empty():
-            handle.flush()
-        except OSError:
-          pass
-
-  def close(self) -> None:
-    """Write what is queued, then stop the writer (bounded: a stuck disk is left to the daemon thread)."""
-    with self.lock:
-      writer, stopped = self._writer, self._writer_stop
-      self._writer = self._writer_stop = None
-    if writer is None:
-      return
-    assert stopped is not None
-    stopped.set()
-    writer.join(timeout=2.0)
-
-  def capture_system(self) -> None:
-    """Save what the device was doing during this session beside its log, off the session's thread."""
-    if self.path is not None:
-      system_slice.write_sidecar_async(self.path, self.started, datetime.now(UTC).timestamp())
-
-  def capture_stall(self) -> None:
-    """Save the last seconds of device logs now; the session's own capture keeps only its newest lines."""
-    if self.path is not None:
-      now = datetime.now(UTC).timestamp()
-      system_slice.write_sidecar_async(self.path, now - STALL_CAPTURE_S, now, tag=".stall",
-                                       on_firmware=lambda lines, reason: self("wifi_firmware_restart", lines=lines, reason=reason))
-
-  def _line(self, record: dict) -> str:
-    return json.dumps(record, default=str) + "\n"
-
-  def __call__(self, name: str, **values) -> None:
-    record = {"t": datetime.now(UTC).isoformat(timespec="milliseconds"), "event": name, "mono_s": time.monotonic(), **values}
-    with self.lock:
-      self.recent.append(record)
-      if self._writer is None:
-        return
-      try:
-        if self._dropped:
-          self._queue.put_nowait(self._line({"t": record["t"], "event": "log_dropped", "count": self._dropped}))
-          self._dropped = 0
-        self._queue.put_nowait(self._line(record))
-      except queue.Full:
-        self._dropped += 1
-
-
 class Supervisor:
   _pairing_note = ""      # why a paired car was not chosen, kept after the pairing window closes
   _reset_note: dict | None = None   # a handshake reset waiting for a session log to be written to
   _no_starport_since = 0.0
   _wired_car = ""         # the car's Bluetooth address while a wired session holds hands-free
+  _refused_car: tuple[str, str, float] = ("", "", 0.0)  # adapter, car, when
+  _adapter_car_note: dict | None = None
   def __init__(self, bluez_factory=None, lease_factory=None, bluetooth_client=None, frame_path: str | None = None,
                synthetic: bool = False, car_frame_path: str = CAR_FRAME_PATH, touch_path: str = DEFAULT_TOUCH_SOCKET,
                control_path: str = DEFAULT_CONTROL_SOCKET, renderer_command: list[str] | None = None, onroad=_is_onroad,
@@ -1207,8 +1078,11 @@ class Supervisor:
       return bool(lease is not None and not lease.released and
                   (lease.receiver == address.upper() or lease.incoming is not None and
                    lease.incoming.approved_address == address.upper()))
-    return bool(receiver) and (address.upper() == receiver.upper() or
+    accepted = bool(receiver) and (address.upper() == receiver.upper() or
       self._shared_bluetooth_owner is not None and self._shared_bluetooth_owner.companion_accepts(address))
+    if not accepted and self.config.get("car_type") == "adapter" and not self.config.get("companion_address"):
+      self._refused_car = (receiver.upper(), address.upper(), time.monotonic())
+    return accepted
 
   def phone_window(self, operation: str, session: tuple, **arguments):
     owner = self._shared_bluetooth_owner
@@ -1225,6 +1099,17 @@ class Supervisor:
     with self._lock:
       return owner.companion_power(enabled, session)
 
+  def uniden_exchange(self, address, model, session, *, mute=None, auto_mute=False, frequency_rules=None, situation=None):
+    from openpilot.starpilot.uniden.transport import exchange
+    owner = self._shared_bluetooth_owner
+    if owner is None:
+      return None
+    with owner.lock:
+      if owner.phone_lease is None:
+        return None
+      return exchange(owner, address, model, session, mute=mute, auto_mute=auto_mute, frequency_rules=frequency_rules,
+                      situation=situation)
+
   def companion_bluetooth_action(self, operation: str, address: str, session: tuple):
     owner = self._shared_bluetooth_owner
     if owner is None:
@@ -1233,6 +1118,18 @@ class Supervisor:
       return self._forget_selected_car(owner, address, session)
     if operation == 'disconnect' and self.config['receiver_address'].upper() == address.upper():
       return self._disconnect_selected_car(owner, address, session)
+    if operation != 'connect':
+      return self._companion_action(owner, operation, address, session)
+    try:
+      result = self._companion_action(owner, operation, address, session)
+    except Exception as error:
+      self.log("adapter_car_connect", tail=address[-2:], outcome="failed", error=str(error)[:120])
+      raise
+    if result is None:
+      self.log("adapter_car_connect", tail=address[-2:], outcome="not_holding_bluetooth")
+    return result
+
+  def _companion_action(self, owner, operation: str, address: str, session: tuple):
     # select_receiver takes the supervisor lock before releasing an owner lease.
     # Keep that same order through connection, save and admission pruning so an
     # old adapter's successful action cannot save its car under a new adapter.
@@ -1253,10 +1150,13 @@ class Supervisor:
             owner.phone_lease is not lease or lease.released or
             not owner.session_valid(session) or not lease.enabled()):
           raise RuntimeError('Selected car connection was not confirmed')
-        if '0000111e-0000-1000-8000-00805f9b34fb' not in device.get('uuids', []):
+        if HANDSFREE_UUID not in device.get('uuids', []):
+          self.log("adapter_car_connect", tail=address[-2:], outcome="not_handsfree", services=short_uuids(device))
           return result  # An accessory must never replace the dongle's selected car.
         self.config.update(companion_address=device['address'], companion_name=device['name'])
         identity_store.save_config(self.config)
+        self._refused_car = ("", "", 0.0)
+        self.log("adapter_car_connect", tail=address[-2:], outcome="saved")
         for previous in list(owner.companion_devices):
           if previous != device['address']:
             owner.companion_devices.pop(previous, None)
@@ -1608,6 +1508,27 @@ class Supervisor:
       text += " (set verify_head_unit false in config.json to test without verifying the car)"
     return f"{STATE_LABELS.get(stage, stage)}: {text}"[:300]
 
+  def _missing_adapter_car(self, bluez, receiver: str) -> str:
+    receiver = receiver.upper()
+    adapter, refused, at = self._refused_car
+    if adapter != receiver or not 0 <= time.monotonic() - at <= REFUSED_CAR_HINT_S:
+      refused = ""
+    devices = bluez.devices()
+    paired = [item for item in devices if item.get("paired") and item["address"] != receiver]
+    connected = any(item["address"] == receiver and item["connected"] for item in devices)
+    cars = []
+    for item in paired:
+      services = short_uuids(item)
+      cars.append({"tail": item["address"][-2:], "handsfree": "111e" in services, "connected": item["connected"], "services": services})
+    note = {"paired": cars, "refused_tail": refused[-2:], "adapter_connected": connected}
+    if note != self._adapter_car_note:
+      self._adapter_car_note = note
+      self.log("adapter_car_missing", **note)
+    car = next((item for item in paired if item["address"] == refused), None)
+    if car is not None:
+      return f"Connect your paired car in Galaxy Bluetooth first: {car['name']} tried to connect, so tap Connect on it there"
+    return 'Connect your paired car in Galaxy Bluetooth first to select it for this Android Auto adapter'
+
   def _attempt(self, lease) -> None:
     if self.config["connection"] == "wired":
       self._attempt_usb()
@@ -1633,10 +1554,10 @@ class Supervisor:
       self._shared_bluetooth_owner.prepare_companion(companion, lambda: self.config.get('companion_address', ''), connect=True)
       self._check_cancel()
       self.log('companion_car_connected', address=companion)
-    elif device.get('starport') and '0000111e-0000-1000-8000-00805f9b34fb' not in device.get('uuids', []):
+    elif device.get('starport') and HANDSFREE_UUID not in device.get('uuids', []):
       if car_profiles.tuning(config)["own_handsfree"]:
         raise RuntimeError('Waiting for the adapter to finish starting up')
-      raise RuntimeError('Connect your paired car in Galaxy Bluetooth first to select it for this Android Auto adapter')
+      raise RuntimeError(self._missing_adapter_car(bluez, address))
     if delay := car_profiles.tuning(config)["connect_delay_s"]:
       self.log("car_profile_connect_delay", seconds=delay)
       self._wait(delay)
@@ -2284,6 +2205,8 @@ class Supervisor:
     unavailable: dict[str, bytes] = {}
     recoveries: list[float] = []  # when the hardware encoder was reopened, this session
     encode_peak = 0.0
+    sizes = {"bytes": 0, "frames": 0, "max": 0, "keyframe": 0}  # encoded sizes over each logged 30 s window
+    last_frame = None
     wait_for_frame = False
     audio = getattr(session, "audio", None)
     nav = getattr(session, "nav", None)
@@ -2350,6 +2273,12 @@ class Supervisor:
             data, keyframe = encoded
             encode_peak = max(encode_peak, encoder.last_encode_ms)
             session.send_frame(data, frame.captured_ns // 1000, keyframe=keyframe)
+            sizes["bytes"] += len(data)
+            sizes["frames"] += 1
+            sizes["max"] = max(sizes["max"], len(data))
+            if keyframe:
+              sizes["keyframe"] = len(data)
+            last_frame = frame
             if source.view == "car":
               source.source.mark_sent(frame.captured_ns)
             sent_at = time.monotonic()
@@ -2385,7 +2314,11 @@ class Supervisor:
                  "uptime_s": round(now - started), "frames_from_view": source.frames, "wifi_dbm": watch.wifi_dbm}
         self._set(stats=stats)
         if int(now - started) % 30 == 0:
-          self.log("stats", **{**device_health.sample(getattr(watch.lease, "interface", "wlan0")), **stats})
+          picture = {"frame_bytes_avg": sizes["bytes"] // sizes["frames"] if sizes["frames"] else None,
+                     "frame_bytes_max": sizes["max"], "keyframe_bytes": sizes["keyframe"] or None,
+                     **frame_brightness(last_frame, session.mode)}
+          self.log("stats", **{**device_health.sample(getattr(watch.lease, "interface", "wlan0")), **stats, **picture})
+          sizes.update(bytes=0, frames=0, max=0)
           encode_peak = 0.0  # the peak covers each logged 30 s window
           if audio is not None:
             audio.reset_peaks()

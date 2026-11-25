@@ -1,5 +1,6 @@
 import { PollTimer, connectionError } from "./polling.js"
 import { requestJson } from "./startup.js"
+import { downloadCaptureZip } from "./log-help.js"
 import { reactive } from "../vendor/vue/vue.esm-browser.js"
 import { GxNotice } from "./notice.js"
 
@@ -49,8 +50,48 @@ export class LocalAccessFeed {
   }
 }
 
-export const LocalAccess = {
+export const ConnectionLogs = {
   components: { GxNotice },
+  props: { panel: Boolean, controller: Boolean, onUnauthorized: { type: Function, default: () => {} } },
+  emits: ["help"],
+  data: () => ({ captureBusy: false, captureError: "", captureSignal: null }),
+  beforeUnmount() { this.captureSignal?.abort() },
+  methods: {
+    async downloadConnectionLogs() {
+      if (this.captureBusy) return
+      const controller = new AbortController()
+      this.captureSignal = controller
+      this.captureBusy = true
+      this.captureError = ""
+      try {
+        await downloadCaptureZip(this.controller ? "controller" : "connection", {
+          unauthorized: this.onUnauthorized,
+          request: { signal: controller.signal },
+        })
+      } catch (error) {
+        if (error?.name !== "AbortError") this.captureError = error?.message || "Could not prepare diagnostic ZIP."
+      } finally {
+        if (this.captureSignal === controller) {
+          this.captureSignal = null
+          this.captureBusy = false
+        }
+      }
+    },
+  },
+  template: `<div class="gx-stack gx-connection-logs" :class="{ 'gx-card gx-panel': panel }">
+    <div v-if="panel" class="gx-section__header"><i class="bi bi-file-earmark-text" aria-hidden="true"></i><span class="gx-section__title">Connection logs</span>
+      <button type="button" class="gx-btn gx-btn--tonal" @click="$emit('help')">Send logs</button>
+    </div>
+    <div v-else class="gx-actions">
+      <button type="button" class="gx-btn gx-btn--tonal" :disabled="captureBusy" @click="downloadConnectionLogs">{{ captureBusy ? 'Preparing ZIP…' : 'Download connection ZIP' }}</button>
+    </div>
+    <p class="gx-note">Before collecting fresh logs, park and update your comma to the latest testing build from StarPilotHQ/StarPilot. Try the connection again.</p>
+    <GxNotice v-if="captureError" tone="danger">{{ captureError }}</GxNotice>
+  </div>`,
+}
+
+export const LocalAccess = {
+  components: { GxNotice, ConnectionLogs },
   props: { mode: { type: String, required: true }, onUnauthorized: { type: Function, default: () => {} } },
   setup(props) {
     const state = reactive({ loading: false, data: null, error: "" })
@@ -69,5 +110,6 @@ export const LocalAccess = {
       <p class="gx-note">Use the full http:// address and bookmark it. Allow local-network access if prompted. Your Firestar Link uses Internet instead.</p>
     </template>
     <p v-else-if="state.data" class="gx-note" role="status">{{ state.data.reason || 'The comma has no local network address available.' }}</p>
+    <ConnectionLogs v-if="mode === 'local'" :on-unauthorized="onUnauthorized" />
   </section>`,
 }

@@ -2,6 +2,7 @@ import numpy as np
 
 from opendbc.car.hyundai.values import CAR, HyundaiFlags
 
+from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.starpilot.lateral import hkg_vehicle_shaping as shaping
 
 from openpilot.starpilot.lateral.hkg_torque_policy import HKGShapedTorquePolicy, supported_torque_cp
@@ -75,6 +76,8 @@ class HKGVehicleTorquePolicy(HKGShapedTorquePolicy):
     self.steering_pressed = False
     self.hev_center_weight = 0.0
     super().__init__(parent, cp)
+    hda1_camera = self.profile == 'ioniq_5' and bool(cp.flags & HyundaiFlags.CANFD_CAMERA_SCC) and not self.ioniq_5_hda2
+    self.ioniq_5_hda1_ff = FirstOrderFilter(0.0, 0.20, self.dt, initialized=False) if hda1_camera else None
 
   supported_cp = staticmethod(lambda cp: policy_for(cp) is not None)
 
@@ -82,11 +85,26 @@ class HKGVehicleTorquePolicy(HKGShapedTorquePolicy):
     self.requested_curvature = curvature
     self.future_lateral_accel = curvature * cs.vEgo ** 2
     self.steering_pressed = bool(cs.steeringPressed)
+    if self.ioniq_5_hda1_ff is not None:
+      if not active or self.steering_pressed or self.previous_pressed or cs.vEgo <= 12.0:
+        self.ioniq_5_hda1_ff.initialized = False
+      if active:
+        self.ioniq_5_hda1_ff.update(self.future_lateral_accel)
     return super().update(active, cs, vm, params, safety_limited, curvature, curvature_limited, delay)
 
   def feedforward_context(self, value, setpoint, jerk, measurement, speed):
     if self.profile == 'ioniq_5':
-      return value * shaping.get_ioniq_5_ff_scale(setpoint, jerk, speed) * shaping.get_ioniq_5_center_taper_scale(setpoint, speed)
+      if self.ioniq_5_hda1_ff is not None and speed > 12.0:
+        weight = min((speed - 12.0) / 4.0, 1.0)
+        correction = float(np.clip(self.ioniq_5_hda1_ff.x - self.future_lateral_accel, -0.24, 0.24))
+        value += weight * correction
+      ff_scale = shaping.get_ioniq_5_ff_scale(setpoint, jerk, speed)
+      if (self.ioniq_5_hda2 and 17.0 < speed < 23.0 and 1.25 < abs(setpoint) < 2.65
+          and jerk != 0.0 and not (self.steering_pressed or self.previous_pressed)):
+        ramp_speed = float(np.interp(speed, [17.0, 18.5, 21.0, 23.0], [0.0, 1.0, 1.0, 0.0]))
+        tight_arc = float(np.interp(abs(setpoint), [1.25, 1.6, 2.25, 2.65], [0.0, 1.0, 1.0, 0.0]))
+        ff_scale += 0.25 * ramp_speed * tight_arc * (shaping.get_ioniq_5_ff_scale(setpoint, 0.0, speed) - ff_scale)
+      return value * ff_scale * shaping.get_ioniq_5_center_taper_scale(setpoint, speed)
     if self.profile == 'ioniq_ev_old':
       return value * shaping.get_ioniq_ev_old_ff_scale(setpoint, jerk, speed) * shaping.get_ioniq_ev_old_center_taper_scale(setpoint, speed)
     if self.profile == 'sonata':
@@ -156,6 +174,8 @@ class HKGVehicleTorquePolicy(HKGShapedTorquePolicy):
     return 0.0
 
   def output_context(self, value, setpoint, jerk, measurement, speed):
+    if self.profile == 'sonata' and 2.0 < speed < 12.0 and not (self.steering_pressed or self.previous_pressed):
+      return value * shaping.get_sonata_low_speed_center_output_scale(setpoint, self.future_lateral_accel, speed)
     if self.profile == 'ioniq_5':
       limit = shaping.get_ioniq_5_low_speed_output_limit(
         setpoint, jerk, speed, self.requested_curvature if not self.steering_pressed and not self.previous_pressed else 0.0, value)

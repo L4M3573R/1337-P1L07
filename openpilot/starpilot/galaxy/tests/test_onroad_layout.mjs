@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { compile } from "../web/vendor/vue/vue.esm-browser.js"
 import * as documentHelpers from "../web/js/onroad-layout-document.js"
 import * as layoutModule from "../web/js/onroad-layout.js"
 import { ONROAD_LAYOUT_TEMPLATE } from "../web/js/onroad-layout-template.js"
@@ -54,7 +55,7 @@ export function snapshot() {
   metadata.roadColorFields = [{ id: 'path', label: 'Path', default: '#30FF9CFF' },
     { id: 'pathEdge', label: 'Path edges', default: '#00FF40FF' }, { id: 'laneLines', label: 'Lane lines', default: '#FFFFFFFF' }]
   metadata.profiles.compact.widgets.speed_limit.visualInsetTop = 32
-  const document = { version: 16, roadColors: { large: {}, compact: {} }, widgetColors: { large: {}, compact: {} }, palette: Object.fromEntries(metadata.paletteFields.map((field) => [field.id, field.default])),
+  const document = { version: 17, roadColors: { large: {}, compact: {} }, widgetColors: { large: {}, compact: {} }, palette: Object.fromEntries(metadata.paletteFields.map((field) => [field.id, field.default])),
     layouts: Object.fromEntries(Object.entries(metadata.profiles).map(([id, profile]) => [id,
       Object.fromEntries(Object.entries(profile.widgets).map(([key, definition]) => [key,
         { ...definition.default, ...(definition.resizable ? { size: definition.resizable.default } : {}) }]))])) }
@@ -364,6 +365,11 @@ try {
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
     getItem: key => preferences.get(key) ?? null, setItem: (key, value) => preferences.set(key, value)
   } })
+  assert.equal(editor().vm.state.hiddenPreviewWidgets.compact.pip_left, true)
+  assert.equal(OnroadLayoutPage.setup({ projection: true }).state.hiddenPreviewWidgets.compact.pip_left, undefined)
+  preferences.set("gx-layout-preview-visibility-v2:comma", JSON.stringify({ compact: { pip_left: false } }))
+  assert.equal(editor().vm.state.hiddenPreviewWidgets.compact.pip_left, false)
+  preferences.delete("gx-layout-preview-visibility-v2:comma")
   const preference = editor().vm
   assert.equal(preference.state.snapEnabled, true)
   preference.toggleSnap()
@@ -1161,7 +1167,7 @@ const displayRows = [
   { key: "DeveloperSidebar", label: "Developer Sidebar", group: "Big layout", choices: ["Off", "On"], available: true, reason: "", requires: "" },
   { key: "ShowBrakeStatus", label: "Wheel brake and acceleration colors", group: "widget", choices: ["Off", "On"], available: true, reason: "", requires: "" },
   { key: "HideLeadMarker", label: "Lead Indicator", group: "Lead car", choices: ["Off", "On"], available: true, reason: "", requires: "" },
-  { key: "LeadInfo", label: "Lead Info", group: "Lead car", choices: ["Off", "Distance", "Speed"], available: true, reason: "", requires: "HideLeadMarker" },
+  { key: "LeadInfo", label: "Lead Info", group: "Lead car", choices: ["Off", "Distance", "Speed", "Relative speed"], available: true, reason: "", requires: "HideLeadMarker" },
   { key: "SignalMetrics", label: "C4 amber signal border", group: "Alerts and borders", choices: ["Off", "On"], available: true, reason: "", requires: "" },
 ]
 const withDisplayData = () => ({ ...snapshot(), display: { rows: copy(displayRows),
@@ -1179,7 +1185,7 @@ assert.equal(validDocument({ ...merged.document, showMaxSpeed: "no" }, merged.me
 const display = editor()
 display.vm.state.data = merged; display.vm.state.draft = copy(merged.document)
 assert.deepEqual(display.vm.displayGroups.map(group => [group.name, group.rows.map(row => row.key)]),
-  [["Big layout", ["DeveloperSidebar"]], ["Lead car", ["HideLeadMarker", "LeadInfo"]], ["Alerts and borders", ["SignalMetrics"]]])
+  [["Big layout", ["DeveloperSidebar"]], ["Alerts and borders", ["SignalMetrics"]]])
 display.vm.setDisplay("DeveloperSidebar", "Off")
 assert.equal(display.vm.displaySettingRow(display.vm.displayRow("DeveloperSidebar")).value, "Off")
 assert.equal(display.vm.dirty, true)
@@ -1263,6 +1269,26 @@ assert.equal(display.vm.displayValue("LeadInfo"), "Distance")
 assert.equal(display.vm.dirty, true)
 display.vm.undo(); display.vm.undo()
 assert.equal(display.vm.dirty, false)
+display.vm.openLeadEditor()
+assert.equal(display.vm.state.inspectorPanel, "lead")
+assert.equal(display.vm.leadRows.length, 2)
+display.vm.setDisplay("HideLeadMarker", "On")
+display.vm.setDisplay("LeadInfo", "Relative speed")
+assert.equal(display.vm.leadPreviewLabel, "+4 mph")
+display.vm.roadColor("leadMarker", "#22CCFFFF")
+assert.equal(display.vm.leadColor, "#22CCFFFF")
+assert.equal(validDocument(display.vm.state.draft, display.vm.state.data.metadata), true)
+display.vm.resetRoad()
+assert.equal(display.vm.leadColor, "#22CCFFFF")
+display.vm.state.data.supportedProfiles = ["large", "compact"]
+display.vm.selectProfile("compact")
+assert.equal(display.vm.leadColor, "#FFFFFFFF")
+display.vm.selectProfile("large")
+display.vm.resetLeadColor()
+assert.equal(display.vm.leadColor, "#C92231FF")
+display.vm.undo()
+assert.equal(display.vm.leadColor, "#22CCFFFF")
+display.vm.resetToStock()
 display.vm.state.selected = "cruise_limits"
 display.vm.setShowMaxSpeed({ target: { checked: false } })
 assert.equal(display.vm.state.draft.showMaxSpeed, false)
@@ -1366,11 +1392,11 @@ console.log("Ford rear fog: make visibility, saved placement and strict metadata
   assert.equal(clampPlacement(profile, 'speed_limit', 330, 16, sample.document.layouts.compact).x, 320)
 }
 
-// The device writes version 16 once the speed limit actions widget is folded into the sign.
+// The device writes version 17 with full-panel C4 side cameras.
 {
   const sample = snapshot()
   assert.equal(validDocument(sample.document, sample.metadata), true)
-  sample.document.version = 15
+  sample.document.version = 16
   assert.equal(validDocument(sample.document, sample.metadata), false)
 }
 
@@ -1383,3 +1409,45 @@ for (const invalidOffset of [true, null, "1", NaN, Infinity, -5.1, 5.1]) {
   assert.equal(validDocument(document, speedAdjustment.metadata), false)
 }
 assert.ok(SETTINGS_SECTIONS.find(section => section.id === "developer").pages.includes("developer"))
+
+
+// C4 has one locked camera widget covering the road panel.
+{
+  const sample = snapshot()
+  const profile = sample.metadata.profiles.compact
+  for (const side of ["left"]) {
+    const id = `pip_${side}`
+    profile.widgets[id] = widget("Adj Spot Camera", "pip_camera", 476, 240, 0, 0)
+    sample.document.layouts.compact[id] = { x: 0, y: 0, enabled: side === "left" }
+    assert.deepEqual(clampPlacement(profile, id, 300, 100, sample.document.layouts.compact), { x: 0, y: 0 })
+    assert.deepEqual(documentHelpers.widgetSize(profile.widgets[id], sample.document.layouts.compact[id]), [476, 240])
+  }
+  assert.equal(validDocument(sample.document, sample.metadata), true)
+  const vm = editor().vm
+  vm.state.data = sample; vm.state.draft = copy(sample.document); vm.state.profile = "compact"
+  assert.deepEqual(vm.cameraIds, ["pip_left"])
+  assert.deepEqual(vm.lockedCameraIds, ["pip_left"])
+  const original = copy(vm.state.draft)
+  assert.equal(vm.previewHidden("pip_left"), true)
+  assert.equal(vm.renderWidgets.some(widget => widget.id === "pip_left"), false)
+  vm.togglePreviewVisibility("pip_left")
+  assert.equal(vm.previewHidden("pip_left"), false)
+  assert.equal(vm.renderWidgets.some(widget => widget.id === "pip_left"), true)
+  assert.deepEqual(vm.state.draft, original)
+  assert.equal(vm.dirty, false)
+}
+
+
+// The actual Vue preview uses the same device-specific silhouettes as onroad.
+{
+  const render = compile(LayoutWidgetPreview.template, { decodeEntities: value => value.replaceAll("&amp;", "&") })
+  const nodes = vnode => [vnode, ...(Array.isArray(vnode.children) ? vnode.children.flatMap(nodes) : [])]
+  for (const [profile, width, height, shape] of [["large", 600, 600, "circle"], ["compact", 476, 240, "rect"]]) {
+    const tree = render({ widget: widget("Adj Spot Camera", "pip_camera", width, height, 0, 0),
+      palette: {}, sprite: null, native: false, profile }, [])
+    const camera = nodes(tree).find(node => node.type === shape)
+    assert.ok(camera, `${profile} renders a ${shape}`)
+    assert.equal(nodes(tree).some(node => node.type === (shape === "rect" ? "circle" : "rect")), false)
+    if (shape === "rect") assert.deepEqual([camera.props.width, camera.props.height, camera.props.rx], [476, 240, 52.8])
+  }
+}

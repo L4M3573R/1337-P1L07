@@ -154,6 +154,61 @@ void process_can(uint8_t can_number) {
   }
 }
 
+#if defined(ALLOW_DEBUG) && !defined(PANDA_BODY)
+static bool kona_release_pending = false;
+static CANPacket_t kona_release_frame;
+static uint32_t kona_release_due = 0U;
+static uint8_t kona_release_source = 0U;
+
+static void kona_release_cancel(void) {
+  if (kona_release_pending) {
+    kona_release_pending = false;
+    register_clear_bits(&MICROSECOND_TIMER->DIER, TIM_DIER_CC1IE);
+    MICROSECOND_TIMER->SR = ~TIM_SR_CC1IF;
+    NVIC_ClearPendingIRQ(TIM2_IRQn);
+  }
+}
+
+static void kona_release_irq(void) {
+  ENTER_CRITICAL();
+  const uint32_t now = microsecond_timer_get();
+  const uint32_t late = get_ts_elapsed(now, kona_release_due);
+  if (kona_release_pending && (late < 0x80000000U)) {
+    kona_release_cancel();
+    mpu_safety_open();
+    if ((late <= 1000U) && safety_camera_release_current(&kona_release_frame, now)) {
+      CANPacket_t output = kona_release_frame;
+      bool replaced = false;
+      const int destination = safety_fwd_output_hook(&kona_release_frame, &output, &replaced);
+      mpu_safety_close();
+      if ((destination >= 0) && !replaced) {
+        can_set_checksum(&output);
+        can_send(&output, (uint8_t)destination, true);
+        can_health[kona_release_source].total_fwd_cnt += 1U;
+      }
+    } else {
+      mpu_safety_close();
+    }
+  }
+  MICROSECOND_TIMER->SR = ~TIM_SR_CC1IF;
+  EXIT_CRITICAL();
+}
+
+static void kona_release_schedule(const CANPacket_t *msg, uint8_t source, uint32_t due) {
+  kona_release_cancel();
+  kona_release_frame = *msg;
+  kona_release_source = source;
+  kona_release_due = due;
+  kona_release_pending = true;
+  MICROSECOND_TIMER->SR = ~TIM_SR_CC1IF;
+  MICROSECOND_TIMER->CCR1 = due;
+  register_set_bits(&MICROSECOND_TIMER->DIER, TIM_DIER_CC1IE);
+  if (get_ts_elapsed(microsecond_timer_get(), due) < 0x80000000U) {
+    NVIC_SetPendingIRQ(TIM2_IRQn);
+  }
+}
+#endif
+
 // FDFDCANx_IT0 IRQ Handler (RX and errors)
 // blink blue when we are receiving CAN messages
 static void can_rx(uint8_t can_number) {
@@ -201,26 +256,56 @@ static void can_rx(uint8_t can_number) {
     can_set_checksum(&to_push);
 
     // forwarding
+    CANPacket_t to_send;
+    #ifdef ALLOW_DEBUG
+    bool replaced = false;
+    #endif
     #ifdef STM32H7
     mpu_safety_open();
     #endif
-    int bus_fwd_num = safety_fwd_packet_hook(&to_push);
+    #ifdef ALLOW_DEBUG
+    int bus_fwd_num;
+    if (safety_uses_camera_slot(&to_push)) {
+      ENTER_CRITICAL();
+      #if defined(ALLOW_DEBUG) && !defined(PANDA_BODY)
+      const uint32_t now = microsecond_timer_get();
+      const uint32_t release_delay = safety_camera_release_delay(&to_push, now);
+      kona_release_cancel();
+      if (release_delay != 0U) {
+        kona_release_schedule(&to_push, can_number, now + release_delay);
+        bus_fwd_num = -1;
+      } else {
+        bus_fwd_num = safety_fwd_output_hook(&to_push, &to_send, &replaced);
+      }
+      #else
+      bus_fwd_num = safety_fwd_output_hook(&to_push, &to_send, &replaced);
+      #endif
+      EXIT_CRITICAL();
+    } else {
+      bus_fwd_num = safety_fwd_packet_hook(&to_push);
+    }
+    #else
+    const int bus_fwd_num = safety_fwd_packet_hook(&to_push);
+    #endif
     #ifdef STM32H7
     mpu_safety_close();
     #endif
     if (bus_fwd_num >= 0) {
-      CANPacket_t to_send;
-
-      to_send.fd = to_push.fd;
-      to_send.returned = 0U;
-      to_send.rejected = 0U;
-      to_send.extended = to_push.extended;
-      to_send.addr = to_push.addr;
-      to_send.bus = to_push.bus;
-      to_send.data_len_code = to_push.data_len_code;
-      (void)memcpy(to_send.data, to_push.data, dlc_to_len[to_push.data_len_code]);
+      #ifdef ALLOW_DEBUG
+      if (!replaced) {
+      #endif
+        to_send.fd = to_push.fd;
+        to_send.returned = 0U;
+        to_send.rejected = 0U;
+        to_send.extended = to_push.extended;
+        to_send.addr = to_push.addr;
+        to_send.bus = to_push.bus;
+        to_send.data_len_code = to_push.data_len_code;
+        (void)memcpy(to_send.data, to_push.data, dlc_to_len[to_push.data_len_code]);
+      #ifdef ALLOW_DEBUG
+      }
+      #endif
       can_set_checksum(&to_send);
-
       can_send(&to_send, bus_fwd_num, true);
       can_health[can_number].total_fwd_cnt += 1U;
     }
@@ -279,6 +364,13 @@ bool can_init(uint8_t can_number) {
   REGISTER_INTERRUPT(FDCAN2_IT1_IRQn, FDCAN2_IT1_IRQ_Handler, CAN_INTERRUPT_RATE, FAULT_INTERRUPT_RATE_CAN_2)
   REGISTER_INTERRUPT(FDCAN3_IT0_IRQn, FDCAN3_IT0_IRQ_Handler, CAN_INTERRUPT_RATE, FAULT_INTERRUPT_RATE_CAN_3)
   REGISTER_INTERRUPT(FDCAN3_IT1_IRQn, FDCAN3_IT1_IRQ_Handler, CAN_INTERRUPT_RATE, FAULT_INTERRUPT_RATE_CAN_3)
+  #if defined(ALLOW_DEBUG) && !defined(PANDA_BODY)
+  ENTER_CRITICAL();
+  REGISTER_INTERRUPT(TIM2_IRQn, kona_release_irq, 100U, FAULT_INTERRUPT_RATE_CAN_3)
+  kona_release_cancel();
+  nvic_enable(TIM2_IRQn);
+  EXIT_CRITICAL();
+  #endif
 
   if (can_number != 0xffU) {
     FDCAN_GlobalTypeDef *FDCANx = CANIF_FROM_CAN_NUM(can_number);

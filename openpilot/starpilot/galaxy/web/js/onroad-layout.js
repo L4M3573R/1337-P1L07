@@ -10,6 +10,7 @@ import { LEAD_INFO, PROJECTION_WORDMARK, editorSnapshot, projectionPayload } fro
 import { GalaxySelect } from "./galaxy-select.js"
 import { GxNotice } from "./notice.js"
 import { GxDialog } from "./dialog.js"
+import { signalColor } from "./uniden-preview.js"
 import { GalaxySettingRow, switchRow } from "./galaxy-setting-row.js"
 import { showDraftChange } from "./save-feedback.js"
 import { snapTargets, snapMove, snapResize, snapThreshold } from "./layout-snap.js"
@@ -20,7 +21,7 @@ export { layoutDocument, previewDocument, withDisplay, orderedWidgetIds, widgetP
 const previewVisibilityKey = projection => "gx-layout-preview-visibility-v2:" + (projection ? "starport" : "comma")
 const oldProjectionVisibilityKey = "gx-layout-preview-visibility-v2:android-auto"
 function loadPreviewVisibility(projection) {
-  const hidden = { large: {}, compact: {} }
+  const hidden = { large: {}, compact: projection ? {} : { pip_left: true } }
   try {
     const currentKey = previewVisibilityKey(projection)
     const raw = localStorage.getItem(currentKey) ?? (projection ? localStorage.getItem(oldProjectionVisibilityKey) : null)
@@ -175,6 +176,7 @@ export const LayoutWidgetPreview = {
     sprite() { return this.art?.url && this.art.sprites?.sprites?.[this.widget.id] },
   },
   methods: {
+    unidenSignal: signalColor,
     withAlpha,
     modeLines(scene, profile) {
       const { mode, experimental } = previewScene(scene), aol = scene === "aol"
@@ -347,6 +349,16 @@ export const LayoutWidgetPreview = {
           </g>
         </g>
       </g>
+      <g v-else-if="widget.kind === 'uniden_alerts'">
+        <g :transform="'scale(' + (widget.scale ?? 100) / 100 + ')'">
+        <rect x="1" y="1" width="458" height="74" rx="14" :stroke="palette.cardBorder || '#9d72ff'" stroke-width="2" :fill="palette.cardFill || '#10191f'" :fill-opacity="(100 - (widget.transparency ?? 8)) / 100" />
+        <text x="24" y="51" font-size="36" font-weight="600" fill="#ff5b65">KA</text>
+        <text x="97" y="48" font-size="28" font-weight="600" :fill="palette.text || '#ffffff'">35.500 GHz</text>
+        <rect v-for="i in 8" :key="i" :x="283 + (i - 1) * 11" :y="53 - (8 + (i - 1) * 3)" width="8" :height="8 + (i - 1) * 3"
+          :fill="i > 6 ? '#35434d' : unidenSignal(6, i - 1)" />
+        <path d="M411 25 L426 51 L396 51 Z" fill="#ff5b65" />
+        </g>
+      </g>
       <g v-else-if="widget.kind === 'jetlink_status'">
         <rect x="0" y="0" :width="widget.width" :height="widget.height" :rx="widget.height / 2" fill="#0f0d17" :fill-opacity="(widget.opacity ?? 85) / 100 * .92" />
         <circle cx="40" cy="30" r="7.5" fill="#46c86e" />
@@ -365,7 +377,8 @@ export const LayoutWidgetPreview = {
         <path :d="'M ' + widget.width / 2 + ' ' + widget.height * .68 + ' Q ' + widget.width * .65 + ' ' + widget.height * .68 + ' ' + widget.width * .8 + ' ' + widget.height * .74" :stroke-width="widget.height * .18" opacity=".9" />
       </g>
       <g v-else-if="widget.kind === 'pip_camera'">
-        <circle :cx="widget.width / 2" :cy="widget.height / 2" :r="widget.width / 2 - 3" fill="#152c39" fill-opacity=".35" stroke="#5ee5ee" stroke-width="3" />
+        <rect v-if="widget.width !== widget.height" x="0" y="0" :width="widget.width" :height="widget.height" :rx="Math.min(widget.width, widget.height) * .22" fill="#152c39" fill-opacity=".35" stroke="#5ee5ee" stroke-width="3" />
+        <circle v-else :cx="widget.width / 2" :cy="widget.height / 2" :r="widget.width / 2 - 3" fill="#152c39" fill-opacity=".35" stroke="#5ee5ee" stroke-width="3" />
         <text :x="widget.width / 2" :y="widget.height / 2" text-anchor="middle" :font-size="widget.height / 10">{{ widget.label }}</text>
       </g>
       <g v-else-if="['nav_home', 'nav_work', 'bookmark'].includes(widget.kind)" :opacity="(widget.opacity ?? 100) / 100">
@@ -714,6 +727,7 @@ export const OnroadLayoutPage = {
           : { x: 0, y: -widget.visualInsetTop, width, height: height + widget.visualInsetTop + widget.visualInsetBottom }
         return {
           ...widget, width, height, outline, ...(widget.iconSize ? { display: this.layout[widget.id].display } : {}),
+          ...(widget.kind === "uniden_alerts" ? { transparency: this.layout[widget.id].transparency, scale: this.layout[widget.id].scale } : {}),
           ...(widget.opacity ? { opacity: this.layout[widget.id].opacity } : {}),
           ...(widget.backgroundToggle ? { background: this.layout[widget.id].background } : {}),
           ...(widget.collapseToggle ? { collapse: this.layout[widget.id].collapse } : {}),
@@ -771,10 +785,16 @@ export const OnroadLayoutPage = {
       { offset: 1, color: '#0df87a', alpha: 102 / 255 }]
     },
     limits() { return this.selectedWidget ? placementLimits(this.limitProfile, this.state.selected, this.layout) : null },
+    leadRows() { return ["HideLeadMarker", "LeadInfo"].map(key => this.displayRow(key)).filter(Boolean) },
+    leadColor() { return this.roadStyle.leadMarker || (this.state.profile === "compact" ? "#FFFFFFFF" : "#C92231FF") },
+    leadPreviewLabel() {
+      return this.displayValue("HideLeadMarker") === "On" ?
+        ({ Distance: "82 ft", Speed: "42 mph", "Relative speed": "+4 mph" }[this.displayValue("LeadInfo")] || "") : ""
+    },
     displayGroups() {
       const groups = []
       for (const row of this.state.data?.display || []) {
-        if (row.group === "widget") continue
+        if (row.group === "widget" || ["HideLeadMarker", "LeadInfo"].includes(row.key)) continue
         const group = groups.find(item => item.name === row.group) || groups[groups.push({ name: row.group, rows: [] }) - 1]
         group.rows.push(row)
       }
@@ -879,12 +899,19 @@ export const OnroadLayoutPage = {
       this.state.inspectorPanel = "edit"
       this.revealEditPanel()
     },
+    openLeadEditor() {
+      if (this.projection || this.state.drag || this.state.layerDrag) return
+      this.deselectWidget()
+      this.state.inspectorPanel = "lead"
+      this.revealEditPanel()
+    },
     // On narrow screens the edit controls always open with their top just under the pinned tabs.
     revealEditPanel() {
       if (typeof window === "undefined") return
       const align = () => {
-        if (this.state.inspectorPanel !== "edit") return
-        const tabs = this.$refs.sections, panel = this.$refs.editPanel
+        const section = this.state.inspectorPanel
+        if (!["edit", "lead"].includes(section)) return
+        const tabs = this.$refs.sections, panel = section === "lead" ? this.$refs.leadPanel : this.$refs.editPanel
         if (!tabs || !panel || getComputedStyle(tabs).position !== "sticky") return
         const gap = panel.getBoundingClientRect().top - tabs.getBoundingClientRect().bottom - 8
         if (Math.abs(gap) >= 1) window.scrollBy(0, gap)
@@ -1230,7 +1257,8 @@ export const OnroadLayoutPage = {
     displaySettingRow(row) {
       const blocked = row.requires && this.displayValue(row.requires) !== "On"
       return {
-        label: row.label, value: this.displayValue(row.key), choices: row.choices, available: this.displayAvailable(row),
+        label: row.key === "LeadInfo" ? "Lead readout" : row.label,
+        value: this.displayValue(row.key), choices: row.choices, available: this.displayAvailable(row),
         reason: blocked ? "Turn on Lead Indicator first" : row.reason, action: true
       }
     },
@@ -1437,6 +1465,17 @@ export const OnroadLayoutPage = {
       this.recordChange(before, this.state.profile + ":" + this.state.selected + ":scale")
       this.state.notice = ""
     },
+    setUnidenDisplay(field, value) {
+      if (!this.editable || this.state.drag || this.state.layerDrag || this.selectedWidget?.kind !== 'uniden_alerts') return
+      const range = { transparency: [0, 100], scale: [50, 150] }[field]
+      if (range ? !Number.isInteger(value) || value < range[0] || value > range[1] :
+          field !== 'hide_when_no_alert' || typeof value !== 'boolean') return
+      this.finishColorEdit()
+      const before = clone(this.state.draft)
+      this.selectedPosition[field] = value
+      this.recordChange(before, this.state.profile + ":" + this.state.selected + ":" + field)
+      this.state.notice = ""
+    },
     opacityInput(event) {
       const value = Number(event.target.value), range = this.selectedWidget?.opacity
       if (!this.editable || this.state.drag || this.state.layerDrag || !range || !Number.isInteger(value) || value < range.min || value > range.max) return
@@ -1619,7 +1658,7 @@ export const OnroadLayoutPage = {
       this.recordChange(before)
     },
     roadColor(id, value, group = null) {
-      if (!this.editable || this.state.drag || !ROAD_COLORS.includes(id)) return
+      if (!this.editable || this.state.drag || !ROAD_COLORS.includes(id) && (id !== "leadMarker" || this.projection)) return
       if (!HEX.test(value)) { this.state.colorError = "Use eight hex digits, for example #30FF9CFF."; return }
       const before = clone(this.state.draft)
       this.state.draft.roadColors[this.state.profile][id] = value.toUpperCase()
@@ -1639,9 +1678,16 @@ export const OnroadLayoutPage = {
     resetRoad() {
       if (!this.editable || this.state.drag) return
       const before = clone(this.state.draft)
-      this.state.draft.roadColors[this.state.profile] = {}
+      const marker = this.roadStyle.leadMarker
+      this.state.draft.roadColors[this.state.profile] = marker ? { leadMarker: marker } : {}
       this.recordChange(before)
       this.state.colorError = ''
+    },
+    resetLeadColor() {
+      if (!this.editable || this.projection || this.state.drag || this.state.layerDrag) return
+      const before = clone(this.state.draft)
+      delete this.state.draft.roadColors[this.state.profile].leadMarker
+      this.recordChange(before)
     },
     widgetColors(id) { return widgetPalette(this.state.draft, this.state.data.metadata, this.state.profile, id) },
     color(id, value, group = null) {

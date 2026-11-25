@@ -31,6 +31,7 @@ from opendbc.car.hyundai.canfd_lfa_status import preserves_stock_lfa
 from opendbc.car.hyundai.classic_scc_aol import qualified as qualified_classic_stock_aol
 from opendbc.car.hyundai.classic_long_aol import AOL_EXPERIENCE, qualified as qualified_classic_long_aol
 from opendbc.car.hyundai.canfd_stock_aol import qualified as qualified_canfd_stock_aol, qualified_long as qualified_canfd_long_aol
+from opendbc.car.hyundai.canfd_stock_aol import KONA_IDLE_AOL_WORD
 from opendbc.car.hyundai.g90_longitudinal import G90LongitudinalPolicy
 from opendbc.car.hyundai.gv70_longitudinal import is_gv70, scc_request, suppress_stock_cancel
 from opendbc.car.hyundai.g90_lead import G90LeadState, eligible as g90_lead_eligible
@@ -137,6 +138,7 @@ class CarController(CarControllerBase):
     self.apply_angle_last = 0.0
     self.angle_gain_last = 0.0
     self.angle_fault_driver_override = False
+    self.stock_angle_lka_active = False
     self.angle_tx_recovery = (AngleTxRecovery(0xCB, self.CAN.ECAN)
       if pe_long_qualified(CP) or ev9_long_qualified(CP) else AngleTxRecovery(0x110, self.CAN.ACAN)
       if CP.carFingerprint in (CAR.HYUNDAI_IONIQ_5_PE, CAR.KIA_EV9) and
@@ -154,6 +156,8 @@ class CarController(CarControllerBase):
     self.blended_longitudinal = None
     self.blended_previous_lateral = False
     self.blended_disengage_frame = None
+    self.blended_camera_sent_frame = -5
+    self.blended_camera_sent_counter = None
     self.last_ccnc_161_ts_ns = 0
     self.last_ccnc_162_ts_ns = 0
     self.last_ccnc_now_ns = 0
@@ -188,6 +192,7 @@ class CarController(CarControllerBase):
                                   int(CP.safetyConfigs[-1].safetyParam) in (0x0811, 0x0891))
     self.canfd_torque_aol_status = (qualified_canfd_stock_aol(CP) or qualified_canfd_long_aol(CP))
     self.ccnc_fault_ownership_required = preserves_stock_lfa(CP)
+    self.kona_last_lfa_counter = None
     self.canfd_dash_icons = CanFDDashIcons() if ioniq6_status or self.canfd_torque_aol_status else None
     self.classic_dash_icons = CanFDDashIcons() if classic_aol_dash_enabled(CP) else None
     self.classic_lfa_icon = None
@@ -366,9 +371,15 @@ class CarController(CarControllerBase):
             sys_warning, sys_state, CC.enabled, hud_control.leftLaneVisible, hud_control.rightLaneVisible,
             left_lane_warning, right_lane_warning, {}, include_alerts=False, counter_mod=0xF,
             fcw_opt_usm=2 if apply_steer_req or icon == 3 else 1))
-        if (self.frame % 5 == 0 and CS.out.canValid and not CS.out.canTimeout and
-            CS.blended_camera_current):
-          can_sends.append(hyundaicanfd.create_suppress_lfa(self.packer, self.CAN, CS.lfa_block_msg, False))
+        if CS.out.canValid and not CS.out.canTimeout and CS.blended_camera_current:
+          camera_counter = CS.lfa_block_msg["COUNTER"]
+          if (self.frame - self.blended_camera_sent_frame >= 5 and camera_counter != self.blended_camera_sent_counter and
+              (not CC.latActive or CS.blended_camera_updated)):
+            can_sends.append(hyundaicanfd.create_suppress_lfa(self.packer, self.CAN, CS.lfa_block_msg, False))
+            self.blended_camera_sent_frame = self.frame
+            self.blended_camera_sent_counter = camera_counter
+        else:
+          self.blended_camera_sent_counter = None
       else:
         _projection_packet_index = len(can_sends) if _projection is not None else 0
         can_sends.extend(hyundaican.create_lkas11_can_canfd_blended(
@@ -548,7 +559,9 @@ class CarController(CarControllerBase):
         angle_active, self.params, self.angle_vm)
       self.angle_gain_last = angle_torque_reduction_gain(CS.out.steeringTorque, CS.out.vEgoRaw,
                                                          angle_active, self.angle_gain_last)
-      if not ccnc_ev_stock or ccnc_ev_replacement:
+      stock_angle_handoff = angle_aol and lka_steering and not ccnc_ev_stock
+      if ((not ccnc_ev_stock or ccnc_ev_replacement) and
+          (not stock_angle_handoff or angle_active or self.stock_angle_lka_active)):
         can_sends.extend(
           hyundaicanfd.create_angle_steering_messages(
             self.packer,
@@ -562,6 +575,7 @@ class CarController(CarControllerBase):
             CS.out.steeringAngleDeg,
           )
         )
+      self.stock_angle_lka_active = stock_angle_handoff and angle_active
     else:
       steering_status_active = CC.enabled
       if ((self.CP.carFingerprint == CAR.KIA_CARNIVAL_2025 and self.CP.safetyConfigs[-1].safetyParam == 0x28B4) or
@@ -583,14 +597,26 @@ class CarController(CarControllerBase):
           stock_ccnc_owned = stock_source.owns_ccnc_fault_status(clock_boot_ns(), display_sample_ns=CS.ccnc_162_ts_ns,
                                                                healthy=display_healthy, qualified_warning=stock_owned_status)
       damping_source = getattr(CS, "stock_lkas_damping", None)
-      can_sends.extend(hyundaicanfd.create_steering_messages(self.packer, self.CP, self.CAN,
-                                                            steering_status_active, apply_steer_req, apply_torque,
-                                                            stock_lfa=stock_lfa, stock_lfa_faults=stock_faults,
-                                                            stock_lfa_owned_status=stock_owned_status,
-                                                            stock_lkas_damping=(damping_source.current_damping(clock_boot_ns())
-                                                              if damping_source is not None else None)))
-      if _projection is not None:
-        _projection.emit('hyundai.CANFD_TORQUE', apply_torque, apply_steer_req, can_sends[-1])
+      kona_handoff = (self.CP.carFingerprint == CAR.HYUNDAI_KONA_2ND_GEN and
+                      self.CP.safetyConfigs[-1].safetyParam == KONA_IDLE_AOL_WORD)
+      lfa_counter = None
+      if kona_handoff:
+        if (CC.enabled or CC.latActive) and stock_lfa is not None:
+          if stock_lfa[2] != self.kona_last_lfa_counter:
+            lfa_counter = stock_lfa[2]
+            self.kona_last_lfa_counter = lfa_counter
+        else:
+          self.kona_last_lfa_counter = None
+      if not kona_handoff or lfa_counter is not None:
+        can_sends.extend(hyundaicanfd.create_steering_messages(self.packer, self.CP, self.CAN,
+                                                              steering_status_active, apply_steer_req, apply_torque,
+                                                              stock_lfa=stock_lfa, stock_lfa_faults=stock_faults,
+                                                              stock_lfa_owned_status=stock_owned_status,
+                                                              stock_lkas_damping=(damping_source.current_damping(clock_boot_ns())
+                                                                if damping_source is not None else None),
+                                                              lfa_counter=lfa_counter))
+        if _projection is not None:
+          _projection.emit('hyundai.CANFD_TORQUE', apply_torque, apply_steer_req, can_sends[-1])
 
     # prevent LFA from activating on LKA steering cars by sending "no lane lines detected" to ADAS ECU
     if (

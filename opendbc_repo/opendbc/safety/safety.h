@@ -366,6 +366,55 @@ int safety_fwd_packet_hook(const CANPacket_t *msg) {
   return destination_bus;
 }
 
+#if !defined(STM32F4) && (defined(ALLOW_DEBUG) || !defined(STM32H7))
+bool safety_uses_camera_slot(const CANPacket_t *msg) {
+#ifdef ALLOW_DEBUG
+  return (current_safety_mode == SAFETY_HYUNDAI_CANFD) && hyundai_kona_idle_handoff && (msg->addr == 0x12AU);
+#else
+  (void)msg;
+  return false;
+#endif
+}
+
+bool safety_camera_release_current(const CANPacket_t *msg, uint32_t now) {
+#ifdef ALLOW_DEBUG
+  return safety_uses_camera_slot(msg) && hyundai_kona_camera_release_current(msg, now);
+#else
+  (void)msg;
+  (void)now;
+  return false;
+#endif
+}
+
+uint32_t safety_camera_release_delay(const CANPacket_t *msg, uint32_t now) {
+#ifdef ALLOW_DEBUG
+  const uint32_t age = safety_get_ts_elapsed(now, hyundai_kona_output_ts);
+  return ((age >= 9000U) && (age < 10000U) && safety_camera_release_current(msg, now)) ? (10000U - age) : 0U;
+#else
+  (void)msg;
+  (void)now;
+  return 0U;
+#endif
+}
+
+bool safety_stage_tx_hook(const CANPacket_t *msg) {
+  return !relay_malfunction && (current_hooks->stage_tx != NULL) && current_hooks->stage_tx(msg);
+}
+
+int safety_fwd_output_hook(const CANPacket_t *msg, CANPacket_t *output, bool *replaced) {
+  int destination;
+  if (current_hooks->fwd_output != NULL) {
+    destination = safety_fwd_hook(msg->bus, msg->addr);
+    if ((destination >= 0) && current_hooks->fwd_output(msg, output, replaced)) {
+      destination = -1;
+    }
+  } else {
+    destination = safety_fwd_packet_hook(msg);
+  }
+  return destination;
+}
+#endif
+
 // 1Hz safety function called by main. Now just a check for lagging safety messages
 void safety_tick(void) {
   const uint8_t MAX_MISSED_MSGS = 10U;
@@ -549,7 +598,7 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
         current_safety_param = 0;
         continue;
       }
-      if ((mode == SAFETY_TESLA) && (((param & ~(TESLA_HW1_FLAG | 257U)) != 0U) || ((param & TESLA_HW1_FLAG) && (param & 256U))) && !tesla_screen_param_valid(param)) {
+      if ((mode == SAFETY_TESLA) && (((param & ~(TESLA_HW1_FLAG | 257U)) != 0U) || ((param & TESLA_HW1_FLAG) && (param & 256U))) && !tesla_extended_param_valid(param)) {
         current_hooks = &nooutput_hooks;
         current_safety_mode = SAFETY_NOOUTPUT;
         current_safety_param = 0;

@@ -163,6 +163,19 @@ def pulse_glide_badge(plan: Any | None) -> str | None:
     return None
 
 
+# Car buttons (wheel, stalk) are handled part-way through a screen frame, after the frame's other work. The same age the
+# scroll wheel's comma-speed actions allow (conditional_mode.ui_action.SOURCE_MAX_AGE_NS).
+INPUT_MAX_AGE_NS = 250_000_000
+
+
+def input_message(sm: Any, service: str, now_ns: int, *, after_frame: int = 0) -> Any | None:
+  """current_message for a car button: the same checks, with the age stretched to INPUT_MAX_AGE_NS for fast services
+  (two periods of a 100 Hz message is 20 ms, less than the work done in the frame before the button is handled)."""
+  frequency = SERVICE_LIST[service].frequency
+  max_age_ns = max(int(2e9 / frequency) if frequency else 1_000_000_000, INPUT_MAX_AGE_NS)
+  return _message_at_age(sm, service, now_ns, after_frame, max_age_ns)
+
+
 def display_message(sm: Any, service: str, now_ns: int, *, after_frame: int = 0) -> Any | None:
   """Allow a bounded UI frame gap without extending control-action freshness."""
   max_age_ns = 200_000_000
@@ -911,7 +924,8 @@ class RuntimeSnapshotAdapter:
                      experimental_enabled=experimental, experimental_available=bool(ui.has_longitudinal_control),
                      stats=self.home_stats(bool(ui.is_metric)) if mode == ShellMode.HOME and self.home_stats is not None else None,
                      paired=bool(ui.prime_state.is_paired()), network=network, network_strength=strength,
-                     temperature_c=device.maxTempC if device is not None else None, metric=bool(ui.is_metric),
+                     temperature_c=device.maxTempC if device is not None else None,
+                     temperature_metric=bool(getattr(ui, "temperature_metric", ui.is_metric)),
                      temperature_high=device is not None and device.thermalStatus != log.DeviceState.ThermalStatus.ok,
                      vehicle_online=panda_connected, connection=connection,
                      recording_audio=bool(ui.recording_audio), bluetooth=bluetooth,

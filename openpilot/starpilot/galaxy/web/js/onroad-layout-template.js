@@ -132,6 +132,20 @@ export const ONROAD_LAYOUT_TEMPLATE = `
                     <text :x="zone.x + zone.width / 2" :y="zone.y + zone.height - 8" text-anchor="middle" :font-size="state.profile === 'large' ? 20 : 10" fill="#d8c8ff">{{ zone.label }}</text>
                   </g>
                 </g>
+                <g v-if="!projection && leadRows.length && !artLoading" class="gx-layout__widget" role="button" tabindex="0" style="cursor: pointer"
+                  :class="{'is-editing': state.inspectorPanel === 'lead'}"
+                  aria-label="Edit Lead Indicator" :aria-pressed="state.inspectorPanel === 'lead'"
+                  :transform="'translate(' + (roadBounds.x + roadBounds.width * .48) + ' ' + (roadBounds.y + roadBounds.height * .53) + ') scale(' + (state.profile === 'compact' ? 1 : 3) + ')'"
+                  @pointerdown.stop @click="openLeadEditor" @keydown.enter.prevent="openLeadEditor" @keydown.space.prevent="openLeadEditor">
+                  <rect x="-32" y="-29" width="64" height="53" fill="transparent" />
+                  <path v-if="state.profile === 'compact'" d="M-25 4 L25 4 L23 9 L-23 9 Z" :fill="leadColor"
+                    :opacity="displayValue('HideLeadMarker') === 'On' ? 1 : .45" />
+                  <path v-else d="M0 15 L-15 -9 L0 -4 L15 -9 Z" :fill="leadColor"
+                    :opacity="displayValue('HideLeadMarker') === 'On' ? 1 : .45" />
+                  <text v-if="leadPreviewLabel" y="-14" text-anchor="middle" font-size="12" font-weight="600" fill="white"
+                    stroke="#101014" stroke-width="2" paint-order="stroke">{{ leadPreviewLabel }}</text>
+                  <rect class="gx-layout__selection" x="-29" y="-29" width="58" height="50" rx="4" fill="none" stroke="#b799ff" stroke-dasharray="3 2" />
+                </g>
                 <text v-if="artLoading" :x="profile.width / 2" :y="profile.height / 2" text-anchor="middle" dominant-baseline="middle"
                   :font-size="state.profile === 'compact' ? 16 : 40" font-weight="600" fill="#d8c8ff" role="status">Loading Widgets</text>
                 <g v-for="widget in artLoading ? [] : renderWidgets" :key="widget.id" class="gx-layout__widget" :class="{'is-selected': state.drag?.id === widget.id, 'is-armed': state.touchArmed === widget.id, 'is-editing': state.showEditingAids && state.inspectorPanel === 'edit' && state.selected === widget.id}"
@@ -185,7 +199,7 @@ export const ONROAD_LAYOUT_TEMPLATE = `
             <section class="gx-card gx-layout__inspector" aria-label="Widget placement" @focusin="revealField"> <!-- codespell:ignore focusin -->
               <nav ref="sections" class="gx-layout__switcher gx-layout__sections gx-settings-tabs" :class="{'is-stuck': state.stuck.sections}" aria-label="Editor sections">
                 <button class="gx-btn gx-btn--tonal" :aria-pressed="state.inspectorPanel === 'widgets'" :disabled="!!state.drag || !!state.layerDrag" @click="state.inspectorPanel = 'widgets'">Widgets</button>
-                <button class="gx-btn gx-btn--tonal" :aria-pressed="state.inspectorPanel === 'edit'" :disabled="!!state.drag || !!state.layerDrag" @click="openEditPanel()"><span>Edit<span class="gx-layout__long"> widget</span></span></button>
+                <button class="gx-btn gx-btn--tonal" :aria-pressed="['edit', 'lead'].includes(state.inspectorPanel)" :disabled="!!state.drag || !!state.layerDrag" @click="state.inspectorPanel === 'lead' ? revealEditPanel() : openEditPanel()"><span>Edit<span class="gx-layout__long"> widget</span></span></button>
                 <button v-if="!projection" class="gx-btn gx-btn--tonal" :aria-pressed="state.inspectorPanel === 'road'" :disabled="!!state.drag || !!state.layerDrag" @click="state.inspectorPanel = 'road'"><span>Road<span class="gx-layout__long"> colors</span></span></button>
                 <button v-if="projection || displayGroups.length" class="gx-btn gx-btn--tonal" :aria-pressed="state.inspectorPanel === 'display'" :disabled="!!state.drag || !!state.layerDrag" @click="state.inspectorPanel = 'display'">Options</button>
               </nav>
@@ -193,8 +207,11 @@ export const ONROAD_LAYOUT_TEMPLATE = `
               <div ref="widgetsHelp" class="gx-layout__subhead gx-layout__help-anchor"><h3>Widgets</h3><span>{{ activeWidgets.length }} active</span>
                 <button class="gx-icon-btn gx-layout__info" type="button" :aria-expanded="state.widgetsHelpOpen" aria-controls="gx-layout-widgets-help" aria-label="How the widget list works" title="How the widget list works" @click="toggleFloating('widgetsHelpOpen', 'widgetsHelp')"><i class="bi bi-info-circle" aria-hidden="true"></i></button>
                 <GxCollapse><div v-show="state.widgetsHelpOpen" id="gx-layout-widgets-help" class="gx-layout__popover" @click="closeFloating('widgetsHelpOpen')" @keydown.esc="closeFloating('widgetsHelpOpen')">
-                  <p>Tap a widget to edit it.</p><p>Drag ⠿ to reorder. The top row is in front, and alerts stay above all widgets. Each side camera can be locked to the front; unlock it to move widgets above.</p><p>The eyes follow the chosen scene. Choose General edit to arrange every enabled widget. Hiding a widget with the eye affects only this scene's preview.</p>
+                  <p>Tap a widget to edit it.</p><p>Drag ⠿ to reorder. The top row is in front, and alerts stay above all widgets. Each Adj Spot Camera can be locked to the front; unlock it to move widgets above.</p><p>The eyes follow the chosen scene. Choose General edit to arrange every enabled widget. Hiding a widget with the eye affects only this scene's preview.</p>
                 </div></GxCollapse>
+              </div>
+              <div v-if="!projection && leadRows.length" class="gx-actions">
+                <button class="gx-btn gx-btn--tonal" type="button" :disabled="!!state.drag || !!state.layerDrag" @click="openLeadEditor">Lead Indicator</button>
               </div>
               <div class="gx-layout__widget-list"><div v-for="widget in listWidgets" :key="widget.id" class="gx-layout__layer" :data-layer-id="widget.id"
                 :class="{'is-dragging': state.layerDrag?.id === widget.id && state.layerDrag?.moved, 'is-drop-target': state.layerDrag?.target === widget.id && state.layerDrag?.id !== widget.id, 'is-drop-after': state.layerDrag?.after}">
@@ -252,6 +269,21 @@ export const ONROAD_LAYOUT_TEMPLATE = `
                     :value="selectedPosition.size" :disabled="!editAvailable || !!state.drag" @change="resizeSelected($event)"></label>
                 <input v-if="selectedWidget.resizable" class="gx-slider" type="range" step="1" aria-label="Size" :min="selectedWidget.resizable.min" :max="selectedWidget.resizable.max"
                   :value="selectedPosition.size" :disabled="!editAvailable || !!state.drag || !!state.layerDrag" @input="sizeSlider($event)" @change="finishColorEdit" @blur="finishColorEdit">
+                <template v-if="selectedWidget.kind === 'uniden_alerts'">
+                  <label for="layout-uniden-scale">Size · {{ selectedPosition.scale }}%</label>
+                  <input id="layout-uniden-scale" class="gx-slider" type="range" min="50" max="150" step="5"
+                    :value="selectedPosition.scale" :disabled="!editAvailable"
+                    @input="setUnidenDisplay('scale', Number($event.target.value))" @change="finishColorEdit" @blur="finishColorEdit" />
+                  <label for="layout-uniden-transparency">Background transparency · {{ selectedPosition.transparency }}%</label>
+                  <input id="layout-uniden-transparency" class="gx-slider" type="range" min="0" max="100" step="1"
+                    :value="selectedPosition.transparency" :disabled="!editAvailable"
+                    @input="setUnidenDisplay('transparency', Number($event.target.value))" @change="finishColorEdit" @blur="finishColorEdit" />
+                  <p class="gx-note">0% is solid; 100% removes the background. Text and arrows stay visible.</p>
+                  <GalaxySettingRow feedback="draft" :row="switchRow('Hide when no alert', selectedPosition.hide_when_no_alert === true)" :index="0"
+                    :disabled="!editAvailable || !!state.drag || !!state.layerDrag" :save-value="(index, value) => setUnidenDisplay('hide_when_no_alert', value === 'On')" />
+                  <p class="gx-note">Hide quiet and disconnected cards. Turn off to show detector readiness and connection status.</p>
+                  <p class="gx-note">Which alerts appear is set in Uniden Preferences, under On the screen. It applies to this widget and the full-screen warning.</p>
+                </template>
                 <template v-if="selectedWidget.opacity">
                   <label for="layout-widget-opacity">{{ selectedWidget.box ? 'Map opacity' : ['cruise_limits', 'jetlink_status', 'network_signal'].includes(selectedWidget.kind) ? 'Background opacity' : 'Opacity' }} · {{ selectedPosition.opacity }}%</label>
                   <input id="layout-widget-opacity" class="gx-slider" type="range" step="1" :min="selectedWidget.opacity.min" :max="selectedWidget.opacity.max"
@@ -354,6 +386,17 @@ export const ONROAD_LAYOUT_TEMPLATE = `
                 <p v-if="!projection && !colorFields.length" class="gx-note">This widget uses its original status colors.</p>
               </div>
               </div>
+              <section v-if="!projection && state.inspectorPanel === 'lead'" ref="leadPanel" class="gx-layout__panel gx-layout__edit" aria-label="Edit Lead Indicator">
+                <div class="gx-layout__subhead"><h4>Lead Indicator</h4></div>
+                <GalaxySettingRow feedback="draft" v-for="(row, index) in leadRows" :key="row.key" :row="displaySettingRow(row)" :index="index"
+                  :disabled="!editable || !!state.drag || !!state.layerDrag || !displayAvailable(row)" :save-value="(_, value) => setDisplay(row.key, value)" />
+                <div class="gx-actions">
+                  <label for="layout-lead-color">Marker color</label>
+                  <input id="layout-lead-color" type="color" :value="leadColor.slice(0, 7)" :disabled="!editable || !!state.drag || !!state.layerDrag"
+                    @input="roadColor('leadMarker', $event.target.value + 'FF', 'leadMarker')" @change="finishColorEdit" @blur="finishColorEdit" />
+                  <button class="gx-btn gx-btn--tonal" type="button" :disabled="!editable || !roadStyle.leadMarker" @click="resetLeadColor">Reset color</button>
+                </div>
+              </section>
               <section v-if="!projection" v-show="state.inspectorPanel === 'road'" class="gx-layout__colors" aria-label="Path and lane colors">
                 <div class="gx-layout__subhead"><h4>Path &amp; Lane Colors</h4><button class="gx-btn gx-btn--tonal" type="button" :disabled="!editAvailable || !!state.drag" @click="resetRoad" aria-label="Reset road colors" title="Reset road colors">Reset</button></div>
                 <label>Path style<GalaxySelect class="gx-field gx-field--full" :value="roadMode" :disabled="!editAvailable || !!state.drag" @change="setRoadMode($event.target.value)">
@@ -400,7 +443,7 @@ export const ONROAD_LAYOUT_TEMPLATE = `
               <h5 class="gx-layout__display-group">Camera</h5>
               <GalaxySettingRow feedback="draft" :row="switchRow('Show Camera on Blind-Spot Warning', state.draft.blindSpotCamera === true)" :index="0"
                 :disabled="!editable || !!state.drag || !!state.layerDrag || !projectionHasPipWidget" :save-value="(index, value) => setProjectionDisplay('blindSpotCamera', value)" />
-              <p v-if="!projectionHasPipWidget" class="gx-note">Add a left or right blind-spot camera widget to enable this option.</p>
+              <p v-if="!projectionHasPipWidget" class="gx-note">Add a left or right Adj Spot Camera widget to enable this option.</p>
               <GalaxySettingRow feedback="draft" :row="switchRow('Large UI Gamma Effect', state.draft.largeUiGammaTrial)" :index="1"
                 :disabled="!editable || !!state.drag || !!state.layerDrag" :save-value="(index, value) => setLargeUiGammaTrial(value)" />
               <p class="gx-note">The large UI road-camera color effect on StarPort (not shown in the preview).</p>
@@ -428,7 +471,7 @@ export const ONROAD_LAYOUT_TEMPLATE = `
       </GxDialog>
       <GxDialog v-if="state.pipUnlockConfirm" labelledby="gx-layout-pip-unlock-title" describedby="gx-layout-pip-unlock-body" alert @close="cancelCameraUnlock">
         <div><h3 id="gx-layout-pip-unlock-title">Unlock {{ profile?.widgets[state.pipUnlockConfirm]?.label }}?</h3>
-          <p id="gx-layout-pip-unlock-body">Warning: moving other widgets on top of this side camera may block your view of the blind-spot camera. Are you sure?</p></div>
+          <p id="gx-layout-pip-unlock-body">Warning: moving other widgets on top of this Adj Spot Camera may block your view of the Adj Spot Camera. Are you sure?</p></div>
         <div class="gx-settings__controls gx-actions">
           <button type="button" class="gx-btn gx-btn--tonal" @click="cancelCameraUnlock">Cancel</button>
           <button type="button" class="gx-btn gx-btn--danger" @click="confirmCameraUnlock">Unlock</button>

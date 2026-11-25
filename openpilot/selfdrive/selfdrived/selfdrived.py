@@ -6,6 +6,7 @@ import threading
 import uuid
 from copy import copy
 from dataclasses import replace
+from typing import cast
 
 import openpilot.cereal.messaging as messaging
 
@@ -1304,6 +1305,12 @@ class SelfdriveD:
     else:
       # Retire only this presentation; retain every original safety alert.
       self.AM.alerts.pop('aolAvailability/warning', None)
+    if self.aol_axis_decision.aol_speed_paused and ET.WARNING not in self.state_machine.current_alert_types:
+      # Preserve the existing speed warning duration even when only AOL was on.
+      speed_alert = copy(cast(Alert, self.events.event_rules[EventName.speedTooHigh][ET.WARNING]))
+      speed_alert.alert_type = 'speedTooHigh/warning'
+      speed_alert.event_type = 'aolSpeedPause'
+      alerts.append(speed_alert)
     if getattr(self, 'jetlink_link_lost', False):
       alerts.append(jetlink_lost_alert())
     if (self.CP.brand == 'ford' or getattr(self, 'hkg_angle_steering', False)) and CS.steeringPressed:
@@ -1944,6 +1951,9 @@ class SelfdriveD:
     pause_brake_mps = self.aol_settings.pause_brake_mps if self.aol_settings is not None else 0.0
     if gear_pause:
       lateral_events = [event for event in lateral_events if event not in (EventName.wrongGear, EventName.reverseGear)]
+    speed_limited = EventName.speedTooHigh in lateral_events
+    if speed_limited:
+      lateral_events.remove(EventName.speedTooHigh)
     below_entry_speed = EventName.belowEngageSpeed in lateral_events
     honda_below_entry_speed = below_entry_speed and honda_below_engage_lateral_allowed(
       self.CP, CS, intent, previously_active=getattr(self, 'aol_ever_active', False))
@@ -1956,7 +1966,7 @@ class SelfdriveD:
        is_ordinary_ascm_profile(self.CP, longitudinal=True) or
        is_ordinary_sdgm_profile(self.CP, longitudinal=True) or
        (self.CP.carFingerprint in (GM_CAR.BUICK_LACROSSE, GM_CAR.CHEVROLET_SUBURBAN) and qualified_gm(self.CP))))
-    return decide_axes(
+    decision = decide_axes(
       standard_lateral=self.active, standard_longitudinal=bool(self.enabled and self.CP.openpilotLongitudinalControl and
         not honda_below_entry_speed and
         not raw_longitudinal_withdrawal(self.CP, CS, self.sm, native, session=self.aol_session_id, now_ns=now_ns) and
@@ -2014,6 +2024,17 @@ class SelfdriveD:
         sample.steerFaultTemporary or pause_brake_mps > 0 and sample.brakePressed and not sample.standstill and
         sample.vEgo < pause_brake_mps
         for sample, _ in getattr(self, 'car_state_samples', ())))
+    if not speed_limited:
+      return decision
+    # Withdraw both requests at the existing ceiling. Keep only the already
+    # established driver's latch while the normal health and entry gates pass.
+    previous = self.aol_axis_decision
+    if (decision.native_acknowledged and decision.desired_lateral and
+        (previous.lateral_active or previous.aol_speed_paused) and
+        intent.allowedLatch and intent.lateralArmed and not self.events.contains(ET.USER_DISABLE) and
+        healthy_transport(self.sm, self.CP, CS, self.aol_session_id, now_ns, native)):
+      return AxisDecision(native_acknowledged=True, aol_speed_paused=True)
+    return AxisDecision()
 
   def cold_volkswagen_main_readiness(self, CS, intent, now_ns):
     from opendbc.car.volkswagen.long_aol import qualified as volkswagen_long_qualified
@@ -2285,9 +2306,11 @@ class SelfdriveD:
         self.ordinary_native_long_withdrawal(
           CS, native, previous, requested, intent, source_current=source_current, now_ns=now_ns))
       from openpilot.starpilot.car.hyundai.aol import expected_stopped_lateral_denial
+      from openpilot.starpilot.car.mazda.aol import expected_stopped_lateral_denial as mazda_stopped_denial
       stopped_lateral_withdrawal = bool(source_current and requested.desired_lateral and
-        expected_stopped_lateral_denial(self.CP, CS, native, sm=self.sm,
-          axis_session_id=self.aol_session_id, now_ns=now_ns))
+        (expected_stopped_lateral_denial(self.CP, CS, native, sm=self.sm,
+          axis_session_id=self.aol_session_id, now_ns=now_ns) or
+         mazda_stopped_denial(self.CP, CS, native, sm=self.sm, axis_session_id=self.aol_session_id, now_ns=now_ns)))
       lost_permission = bool(lost_honda_lateral_grant or native is not None and not driver_override and (
         previous.lateral_active and requested.desired_lateral and native.requestedLateral and
         not native.lateralAllowed and not stopped_lateral_withdrawal and
@@ -2442,7 +2465,8 @@ class SelfdriveD:
       elif getattr(self, 'aol_availability_long_inhibit', False):
         decision = self.aol_axis_decision
         self.aol_axis_decision = AxisDecision(desired_lateral=decision.desired_lateral,
-          lateral_active=decision.lateral_active, native_acknowledged=decision.native_acknowledged)
+          lateral_active=decision.lateral_active, native_acknowledged=decision.native_acknowledged,
+          aol_speed_paused=decision.aol_speed_paused)
       if pause:
         # Negotiate the fresh lateral request while output and ordinary LONG
         # remain off; requiring an active ack before requesting would deadlock.

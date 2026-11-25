@@ -50,6 +50,7 @@ export function widgetSize(widget, position) {
     const [width, height] = widget.sizes[position.size]
     return [width, height + (widget.wifiNameHeight && position.wifiName === true ? widget.wifiNameHeight : 0)].map(side => Math.round(side * scale))
   }
+  if (widget.kind === "uniden_alerts" && Number.isInteger(position?.scale)) return [Math.round(widget.width * position.scale / 100), Math.round(widget.height * position.scale / 100)]
   if (widget.box) return [position?.width ?? widget.width, position?.height ?? widget.height]
   if (widget.resizable) return [position?.size ?? widget.width, position?.size ?? widget.height]
   return [widget.width, widget.height]
@@ -144,7 +145,7 @@ export const PROJECTION_DISPLAY_SWITCHES = ["blindSpotBorder", "signalBorder", "
 export function validDocument(document, metadata) {
   if (!object(document)) return false
   const profiles = metadata?.projection === true ? ["large"] : PROFILES
-  if (!keysEqual(document, ["version", "palette", "layouts", "widgetColors", "roadColors", ...(Object.hasOwn(document, "widgetOrder") ? ["widgetOrder"] : []), ...(Object.hasOwn(document, "speedSources") ? ["speedSources"] : []), ...(Object.hasOwn(document, "speedSourcesCard") ? ["speedSourcesCard"] : []), ...(Object.hasOwn(document, "speedAlign") ? ["speedAlign"] : []), ...(Object.hasOwn(document, "clock24Hour") ? ["clock24Hour"] : []), ...(metadata?.projection !== true && Object.hasOwn(document, "reduceMotion") ? ["reduceMotion"] : []), ...(Object.hasOwn(document, "showMaxSpeed") ? ["showMaxSpeed"] : []), ...(metadata?.projection !== true && Object.hasOwn(document, "speedDisplayOffset") ? ["speedDisplayOffset"] : []), ...(metadata?.projection !== true && Object.hasOwn(document, "display") ? ["display"] : []), ...(metadata?.projection === true && Object.hasOwn(document, "largeUiGammaTrial") ? ["largeUiGammaTrial"] : []), ...(metadata?.projection === true ? PROJECTION_DISPLAY_SWITCHES.filter(key => Object.hasOwn(document, key)) : []), ...(metadata?.projection === true && Object.hasOwn(document, "leadInfo") ? ["leadInfo"] : [])]) || (metadata?.projection === true ? document.version !== 8 : document.version !== 16) ||
+  if (!keysEqual(document, ["version", "palette", "layouts", "widgetColors", "roadColors", ...(Object.hasOwn(document, "widgetOrder") ? ["widgetOrder"] : []), ...(Object.hasOwn(document, "speedSources") ? ["speedSources"] : []), ...(Object.hasOwn(document, "speedSourcesCard") ? ["speedSourcesCard"] : []), ...(Object.hasOwn(document, "speedAlign") ? ["speedAlign"] : []), ...(Object.hasOwn(document, "clock24Hour") ? ["clock24Hour"] : []), ...(metadata?.projection !== true && Object.hasOwn(document, "reduceMotion") ? ["reduceMotion"] : []), ...(Object.hasOwn(document, "showMaxSpeed") ? ["showMaxSpeed"] : []), ...(metadata?.projection !== true && Object.hasOwn(document, "speedDisplayOffset") ? ["speedDisplayOffset"] : []), ...(metadata?.projection !== true && Object.hasOwn(document, "display") ? ["display"] : []), ...(metadata?.projection === true && Object.hasOwn(document, "largeUiGammaTrial") ? ["largeUiGammaTrial"] : []), ...(metadata?.projection === true ? PROJECTION_DISPLAY_SWITCHES.filter(key => Object.hasOwn(document, key)) : []), ...(metadata?.projection === true && Object.hasOwn(document, "leadInfo") ? ["leadInfo"] : [])]) || (metadata?.projection === true ? document.version !== 8 : document.version !== 17) ||
     (Object.hasOwn(document, "speedSources") && typeof document.speedSources !== "boolean") ||
     (Object.hasOwn(document, "speedSourcesCard") && typeof document.speedSourcesCard !== "boolean") ||
     (Object.hasOwn(document, "speedAlign") && !SPEED_ALIGNMENTS.includes(document.speedAlign)) ||
@@ -167,7 +168,8 @@ export function validDocument(document, metadata) {
     const profile = metadata.profiles[name], layout = document.layouts[name]
     const road = document.roadColors[name]
     if (!object(road) || !Object.entries(road).every(([key, value]) => key === "pathMode" ? PATH_MODES.includes(value) :
-      ROAD_COLORS.includes(key) && typeof value === "string" && HEX.test(value))) return false
+      (ROAD_COLORS.includes(key) || key === "leadMarker") &&
+      typeof value === "string" && HEX.test(value))) return false
     const colors = document.widgetColors[name]
     if (!object(colors) || !Object.entries(colors).every(([id, overrides]) => {
       const fields = profile.widgets[id]?.colors
@@ -179,8 +181,11 @@ export function validDocument(document, metadata) {
       const resizable = widget.resizable, box = widget.box, opacity = widget.opacity
       const rotate = wheelRotationAvailable(widget, name, metadata?.projection === true) && object(position) && Object.hasOwn(position, "rotate")
       return keysEqual(position, ["x", "y", "enabled", ...(resizable ? ["size"] : []), ...(box ? ["width", "height"] : []),
-        ...(opacity ? ["opacity"] : []), ...(widget.iconSize ? ["display"] : []), ...(widget.backgroundToggle ? ["background"] : []), ...(widget.collapseToggle ? ["collapse"] : []), ...(widget.bluetoothToggle ? ["bluetooth"] : []), ...(widget.wifiNameHeight ? ["wifiName"] : []), ...(widget.sizes ? ["size"] : []), ...(widget.scale ? ["scale"] : []), ...(rotate ? ["rotate"] : [])]) &&
+        ...(widget.kind === "uniden_alerts" ? ["transparency", "hide_when_no_alert", "scale"] : []), ...(opacity ? ["opacity"] : []), ...(widget.iconSize ? ["display"] : []), ...(widget.backgroundToggle ? ["background"] : []), ...(widget.collapseToggle ? ["collapse"] : []), ...(widget.bluetoothToggle ? ["bluetooth"] : []), ...(widget.wifiNameHeight ? ["wifiName"] : []), ...(widget.sizes ? ["size"] : []), ...(widget.scale ? ["scale"] : []), ...(rotate ? ["rotate"] : [])]) &&
         (!rotate || typeof position.rotate === "boolean") &&
+        (widget.kind !== "uniden_alerts" || (Number.isInteger(position.transparency) && position.transparency >= 0 &&
+          position.transparency <= 100 && typeof position.hide_when_no_alert === "boolean" &&
+          Number.isInteger(position.scale) && position.scale >= 50 && position.scale <= 150)) &&
         (!widget.iconSize || ["words", "icons"].includes(position.display)) &&
         (!widget.backgroundToggle || typeof position.background === "boolean") &&
         (!widget.collapseToggle || typeof position.collapse === "boolean") &&

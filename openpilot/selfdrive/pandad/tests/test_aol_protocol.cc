@@ -89,7 +89,39 @@ void queue(FakeTransport &transport, const aol_safety_health_t &before,
 }
 }  // namespace
 
+static void test_manual_mqb_startup_poll() {
+  const AolWritePlan lat{true, 1U, true};
+  const aol_safety_health_t pending{AOL_SAFETY_PROTOCOL_MAGIC, AOL_SAFETY_PROTOCOL_VERSION,
+                                   1U, 0U, VOLKSWAGEN_LONG_AOL_PROFILE.mode, 25U, 1U};
+  const AolOutcome ready{true, pending, "cold"};
+  for (unsigned refusal = 0; refusal < 11U; ++refusal) {
+    VolkswagenManualAolStartupPoll poll;
+    auto plan = lat;
+    auto outcome = ready;
+    if (refusal == 1U) outcome.status->safety_param = 9U;
+    if (refusal == 2U) outcome.status->safety_mode = 34U;
+    if (refusal == 3U) outcome.status->permission_mask = 1U;
+    if (refusal == 4U) plan.request_mask = 3U;
+    if (refusal == 5U) plan.retain_lateral_arm = false;
+    if (refusal == 6U) outcome.compatible = false;
+    if (refusal == 7U) outcome.session.clear();
+    poll.observe(refusal != 8U, refusal == 9U, refusal != 10U, plan, outcome);
+    for (uint64_t frame = 1U; frame < 10U; ++frame) {
+      assert(poll.due(frame) == (refusal == 0U && frame == 5U));
+    }
+    assert(!poll.due(15U));
+    if (refusal == 0U) {
+      poll.observe(true, false, true, lat, ready);
+      assert(!poll.due(15U));
+    }
+    poll.observe(false, false, true, lat, ready);
+    poll.observe(true, false, true, lat, ready);
+    assert(poll.due(25U));
+  }
+}
+
 int main() {
+  test_manual_mqb_startup_poll();
   for (uint32_t word = 0U; word <= 65535U; word++) {
     auto subaru = status();
     subaru.safety_mode = 11U;
@@ -97,7 +129,7 @@ int main() {
     subaru.capability_flags = 1U;
     const bool expected = (word == 16U) || (word == 0U) || (word == 1U) || (word == 17U) ||
                           (word == 209U) || (word == 465U) || (word == 145U) || (word == 1169U) || (word == 1425U) || (word == 401U) || (word == 177U) || (word == 8U) || (word == 520U) || (word == 512U) || (word == 2225U) ||
-                          (word == 4096U) || (word == 4104U) || (word == 4608U) || (word == 4616U) || (word == 8192U) || (word == 8200U);
+                          (word == 4096U) || (word == 4104U) || (word == 4608U) || (word == 4616U) || (word == 8192U) || (word == 8200U) || (word == 1041U) || (word == 2065U) || (word == 3089U);
     assert(aol_capable(subaru, 11U, VEHICLE_REGISTRY) == expected);
     subaru.capability_flags = 0U;
     assert(!aol_capable(subaru, 11U, VEHICLE_REGISTRY));
@@ -263,30 +295,46 @@ int main() {
   }
   constexpr uint16_t tesla_screen_words[] = {512U, 513U, 768U, 769U, 1536U, 1537U, 1792U, 1793U,
                                              2048U, 2049U, 2304U, 2305U, 3072U, 3073U, 3328U, 3329U};
+  // Scroll speed sync (4096) rides on any of those words that carries longitudinal control (bit 1), and on no other.
+  constexpr uint16_t tesla_speed_sync = 4096U;
+  unsigned tesla_capable_words = 0U;
   for (uint32_t word = 0U; word <= 65535U; ++word) {
     bool expected = false;
-    for (const auto exact : tesla_screen_words) expected |= word == exact;
+    for (const auto exact : tesla_screen_words) {
+      expected |= word == exact;
+      expected |= ((exact & 1U) != 0U) && (word == (exact | tesla_speed_sync));
+    }
+    assert(tesla_screen_aol_param(static_cast<uint16_t>(word)) == expected);
     auto tesla = status();
     tesla.safety_mode = 10U;
     tesla.safety_param = static_cast<uint16_t>(word);
     assert(aol_capable(tesla, 10U, VEHICLE_REGISTRY) == expected);
+    tesla_capable_words += expected ? 1U : 0U;
   }
-  for (const auto word : tesla_screen_words) {
-    AolAxisNegotiator negotiator(VEHICLE_REGISTRY);
-    FakeTransport transport;
-    auto tesla = status();
-    tesla.safety_mode = 10U;
-    tesla.safety_param = word;
-    queue(transport, tesla, tesla);
-    auto neutral = run(negotiator, transport, axis("tesla-screen", false, false), NOW, 10U);
-    assert(neutral.plan.capable && neutral.plan.request_mask == 0U && neutral.outcome.compatible);
-    auto active = tesla;
-    active.request_mask = 1U;
-    active.permission_mask = 1U;
-    queue(transport, tesla, active);
-    auto engaged = run(negotiator, transport, axis("tesla-screen", true, false), NOW, 10U);
-    assert(engaged.plan.request_mask == 1U && engaged.outcome.compatible);
-    assert(engaged.outcome.status && engaged.outcome.status->safety_param == word && engaged.outcome.status->permission_mask == 1U);
+  assert(tesla_capable_words == 24U);
+  for (const uint16_t rejected : {uint16_t{4096U}, uint16_t{4097U}, uint16_t{4353U}, uint16_t{4608U}, uint16_t{6144U}, uint16_t{8192U | 513U}}) {
+    assert(!tesla_screen_aol_param(rejected));
+  }
+  for (const auto screen_word : tesla_screen_words) {
+    for (const bool speed_sync : {false, true}) {
+      if (speed_sync && (screen_word & 1U) == 0U) continue;
+      const uint16_t word = speed_sync ? static_cast<uint16_t>(screen_word | tesla_speed_sync) : screen_word;
+      AolAxisNegotiator negotiator(VEHICLE_REGISTRY);
+      FakeTransport transport;
+      auto tesla = status();
+      tesla.safety_mode = 10U;
+      tesla.safety_param = word;
+      queue(transport, tesla, tesla);
+      auto neutral = run(negotiator, transport, axis("tesla-screen", false, false), NOW, 10U);
+      assert(neutral.plan.capable && neutral.plan.request_mask == 0U && neutral.outcome.compatible);
+      auto active = tesla;
+      active.request_mask = 1U;
+      active.permission_mask = 1U;
+      queue(transport, tesla, active);
+      auto engaged = run(negotiator, transport, axis("tesla-screen", true, false), NOW, 10U);
+      assert(engaged.plan.request_mask == 1U && engaged.outcome.compatible);
+      assert(engaged.outcome.status && engaged.outcome.status->safety_param == word && engaged.outcome.status->permission_mask == 1U);
+    }
   }
   AolAxisNegotiator ford_pause(VEHICLE_REGISTRY);
   FakeTransport ford_transport;
@@ -513,7 +561,7 @@ int main() {
   constexpr uint16_t sportage_long_words[] = {0x0804U, 0x0806U, 0x080CU, 0x080EU, 0x0814U, 0x0816U,
                                               0x0894U, 0x0896U, 0x0824U, 0x0826U, 0x082CU, 0x082EU};
   for (uint32_t word = 0U; word <= 0xFFFFU; ++word) {
-    bool expected = word == 0x0C0CU || word == 0x0C0EU || word == 0x0C2CU || word == 0x0C2EU || word == 0x28B4U || word == 0x080DU || word == 0x2815U || word == 0x2895U || word == 0x0815U || word == 0x0895U || word == 0x8815U || word == 0x8895U || word == 0x5491U || word == 0x5C91U || word == 0x5C95U || word == 0x5495U;
+    bool expected = word == 0x1C0CU || word == 0x0C0CU || word == 0x0C0EU || word == 0x0C2CU || word == 0x0C2EU || word == 0x28B4U || word == 0x080DU || word == 0x2815U || word == 0x2895U || word == 0x0815U || word == 0x0895U || word == 0x8815U || word == 0x8895U || word == 0x5491U || word == 0x5C91U || word == 0x5C95U || word == 0x5495U;
     for (uint16_t stock_word : stock_canfd_words) {
       expected = expected || word == stock_word;
     }
@@ -561,12 +609,13 @@ int main() {
   unsupported.safety_param ^= 0x1U;
   assert(!aol_capable(unsupported, TEST_MODE, TEST_REGISTRY));
 
-  for (uint16_t word = 0U; word < 4096U; ++word) {
+  for (uint16_t word = 0U; word < 8192U; ++word) {
     auto stock_honda = status();
     stock_honda.safety_mode = 20U;
     stock_honda.safety_param = word;
     const bool classic = word == 34U || word == 35U || word == 163U;
-    const bool stock = word == 0U || word == 1U || word == 8U || word == 9U || word == 10U || word == 11U || word == 16U || word == 17U || word == 80U || word == 81U || word == 512U || word == 513U || word == 1058U || word == 1059U || word == 1570U || word == 1571U || word == 2082U || word == 2083U || word == 2211U;
+    const bool stock = word == 0U || word == 1U || word == 8U || word == 9U || word == 10U || word == 11U || word == 16U || word == 17U || word == 80U || word == 81U || word == 512U || word == 513U || word == 1058U || word == 1059U || word == 1570U || word == 1571U || word == 2082U || word == 2083U || word == 2211U ||
+                       word == 4096U || word == 4097U || word == 6178U || word == 6179U;
     assert(aol_capable(stock_honda, 20U, VEHICLE_REGISTRY) == (classic || stock));
     assert(aol_runtime_enabled(false, stock_honda, VEHICLE_REGISTRY) == stock);
     stock_honda.safety_mode = 1U;

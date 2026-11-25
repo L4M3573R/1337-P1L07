@@ -29,6 +29,7 @@ def update_frame(preview=None, controllers=None, star=None, game_mode=None, arab
     star._poll_projection_bookmark(time.monotonic_ns())
     star._poll_projection_slc(time.monotonic_ns())
     poll_screen_off_wheel(star, device.awake, time.monotonic_ns())
+    star._poll_detector()
   if game_mode is not None:
     game_mode()
   if controllers is not None:
@@ -82,7 +83,10 @@ def main():
                                           borrowed_messages=True, evidence_wait_ms=0)
     controllers = None if ui_state.replay_clock is not None else ControllerRuntime(ui_state.params, actions=layout.star._favorite_actions,
                                     favorites=layout.star.favorites_owner.snapshot,
-                                    invoke_favorite=layout.star.favorites_owner.invoke, authority=controller_authority, input_capture=game_input)
+                                    invoke_favorite=layout.star.favorites_owner.invoke, authority=controller_authority, input_capture=game_input,
+                                    vehicle=lambda: ui_state.CP, messages=lambda: ui_state.sm,
+                                    speed_actions=getattr(layout.star, '_comma_speed_actions', None),
+                                    keyed_actions=getattr(layout.star, '_favorite_render_actions', None))
     preview = None if ui_state.replay_clock is not None else LayoutPreviewRuntime(ui_state.params, (Profile.LARGE if BIG_UI else Profile.COMPACT).value,
                                    offroad_hint=ui_state.is_offroad, authority=preview_authority)
   else:
